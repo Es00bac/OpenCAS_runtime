@@ -577,6 +577,7 @@ class MemoryRetriever:
 
         source_hashes = [record.source_hash for record, _ in similar]
         memories = await self.memory.list_memories_by_embedding_ids(source_hashes)
+        episodes = await self.memory.list_episodes_by_embedding_ids(source_hashes)
         score_map = {record.source_hash: sim for record, sim in similar}
         vector_map = {
             record.source_hash: np.array(record.vector, dtype=np.float32)
@@ -584,29 +585,55 @@ class MemoryRetriever:
         }
 
         results: List[RetrievalResult] = []
+        seen_ids: set[Tuple[str, str]] = set()
+
+        def _add_result(source_type: str, source_id: str, content: str, semantic_score: float, embedding_id: Optional[str], mem=None, ep=None) -> None:
+            key = (source_type, source_id)
+            if key in seen_ids:
+                return
+            seen_ids.add(key)
+            final_score = semantic_score
+            if affect_vector is not None:
+                cand_vec = vector_map.get(embedding_id) if embedding_id else None
+                if cand_vec is not None and cand_vec.shape == affect_vector.shape:
+                    c_norm = float(np.linalg.norm(cand_vec))
+                    a_norm = float(np.linalg.norm(affect_vector))
+                    if c_norm > 0 and a_norm > 0:
+                        affect_sim = float(
+                            np.dot(cand_vec, affect_vector) / (c_norm * a_norm)
+                        )
+                        final_score = (1 - affect_weight) * semantic_score + affect_weight * affect_sim
+            results.append(
+                RetrievalResult(
+                    source_type=source_type,
+                    source_id=source_id,
+                    content=content,
+                    score=final_score,
+                    memory=mem,
+                    episode=ep,
+                    embedding=vector_map.get(embedding_id, []).tolist() if embedding_id in vector_map else None,
+                )
+            )
+
         for mem in memories:
             if mem.embedding_id and mem.embedding_id in score_map:
-                semantic_score = score_map[mem.embedding_id]
-                final_score = semantic_score
-                if affect_vector is not None:
-                    cand_vec = vector_map.get(mem.embedding_id)
-                    if cand_vec is not None and cand_vec.shape == affect_vector.shape:
-                        c_norm = float(np.linalg.norm(cand_vec))
-                        a_norm = float(np.linalg.norm(affect_vector))
-                        if c_norm > 0 and a_norm > 0:
-                            affect_sim = float(
-                                np.dot(cand_vec, affect_vector) / (c_norm * a_norm)
-                            )
-                            final_score = (1 - affect_weight) * semantic_score + affect_weight * affect_sim
-                results.append(
-                    RetrievalResult(
-                        source_type="memory",
-                        source_id=str(mem.memory_id),
-                        content=mem.content,
-                        score=final_score,
-                        memory=mem,
-                        embedding=vector_map.get(mem.embedding_id, []).tolist() if mem.embedding_id in vector_map else None,
-                    )
+                _add_result(
+                    "memory",
+                    str(mem.memory_id),
+                    mem.content,
+                    score_map[mem.embedding_id],
+                    mem.embedding_id,
+                    mem=mem,
+                )
+        for ep in episodes:
+            if ep.embedding_id and ep.embedding_id in score_map:
+                _add_result(
+                    "episode",
+                    str(ep.episode_id),
+                    ep.content,
+                    score_map[ep.embedding_id],
+                    ep.embedding_id,
+                    ep=ep,
                 )
         results.sort(key=lambda r: r.score, reverse=True)
         return results

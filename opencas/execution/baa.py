@@ -7,7 +7,9 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from opencas.api import LLMClient
+from opencas.embeddings import EmbeddingService
 from opencas.infra import BaaCompletedEvent, BaaProgressEvent, EventBus
+from opencas.memory import EpisodeKind, MemoryStore
 from opencas.telemetry import EventKind, Tracer
 from opencas.tools import ToolRegistry
 
@@ -53,6 +55,8 @@ class BoundedAssistantAgent:
         event_bus: Optional[EventBus] = None,
         receipt_store: Optional[ExecutionReceiptStore] = None,
         runtime: Optional[Any] = None,
+        memory: Optional[MemoryStore] = None,
+        embeddings: Optional[EmbeddingService] = None,
     ) -> None:
         self.executor = RepairExecutor(tools=tools, llm=llm, tracer=tracer, runtime=runtime)
         self.tracer = tracer
@@ -60,6 +64,8 @@ class BoundedAssistantAgent:
         self.event_bus = event_bus
         self.receipt_store = receipt_store
         self.max_concurrent = max_concurrent
+        self.memory = memory
+        self.embeddings = embeddings
         self._lanes = LaneManager(
             configs={
                 CommandLane.CHAT: LaneConfig(max_concurrent=1),
@@ -339,6 +345,7 @@ class BoundedAssistantAgent:
         if result.stage in terminal_stages:
             if result.stage == ExecutionStage.DONE:
                 await self._transition_task(task, LifecycleStage.DONE, "execution completed successfully")
+                await self._extract_procedural_memory(task, result)
             elif result.stage == ExecutionStage.FAILED and task.stage != ExecutionStage.FAILED:
                 await self._transition_task(task, LifecycleStage.FAILED, result.output or "execution failed")
             if self.store:
@@ -393,6 +400,47 @@ class BoundedAssistantAgent:
             }
             for lane in CommandLane
         }
+
+    async def _extract_procedural_memory(self, task: RepairTask, result: RepairResult) -> None:
+        """Summarize a successful task's tool sequence into a procedural episode."""
+        if self.memory is None:
+            return
+        from datetime import datetime, timezone
+        from opencas.memory import Episode, EpisodeKind
+
+        task_id = str(task.task_id)
+        episodes = await self.memory.list_episodes(session_id=task_id, limit=200)
+        tool_eps = [
+            ep for ep in episodes
+            if ep.kind in (EpisodeKind.ACTION, EpisodeKind.OBSERVATION)
+        ]
+        if not tool_eps:
+            return
+        tool_eps.sort(key=lambda ep: ep.created_at)
+        tool_lines = [f"- {ep.content}" for ep in tool_eps]
+        summary = (
+            f"Objective: {task.objective}\n"
+            f"Tool sequence:\n" + "\n".join(tool_lines) + "\n"
+            f"Outcome: {result.output}"
+        )
+        embed_id: Optional[str] = None
+        if self.embeddings is not None:
+            try:
+                embed_record = await self.embeddings.embed(
+                    summary, task_type="retrieval_document"
+                )
+                embed_id = embed_record.source_hash
+            except Exception:
+                pass
+        procedural_episode = Episode(
+            kind=EpisodeKind.PROCEDURAL,
+            session_id=task_id,
+            content=summary,
+            embedding_id=embed_id,
+            salience=2.0,
+        )
+        await self.memory.save_episode(procedural_episode)
+        self._trace("procedural_memory_saved", {"task_id": task_id, "episode_id": str(procedural_episode.episode_id)})
 
     def _trace(self, event: str, payload: Dict[str, Any]) -> None:
         if self.tracer:

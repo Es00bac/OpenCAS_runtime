@@ -243,7 +243,7 @@ class NightlyConsolidationEngine:
         text = str(getattr(obj, "content", "")).lower()
         payload = getattr(obj, "payload", {}) or {}
         source = str(payload.get("legacy_agent_source", "")).lower()
-        markers = ["legacy_agent_v4", "legacy_agent-v3", "legacy_agent-v2", "openclaw"]
+        markers = ["legacy_agent-v4", "legacy_agent-v3", "legacy_agent-v2", "openclaw"]
         combined = f"{text} {source}"
         return any(marker in combined for marker in markers)
 

@@ -800,6 +800,21 @@ class MemoryStore:
         assert self._db is not None
         await self._db.commit()
 
+    async def list_episodes_by_embedding_ids(
+        self,
+        embedding_ids: List[str],
+    ) -> List[Episode]:
+        """Fetch episodes whose embedding_id is in the given list."""
+        if not embedding_ids:
+            return []
+        placeholders = ", ".join("?" for _ in embedding_ids)
+        cursor = await self._execute(
+            f"SELECT * FROM episodes WHERE embedding_id IN ({placeholders})",
+            tuple(embedding_ids),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_episode(r) for r in rows]
+
     async def list_memories_by_embedding_ids(
         self,
         embedding_ids: List[str],

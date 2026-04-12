@@ -22,14 +22,15 @@ Canonical current docs:
 - [live_validation_summary.md]((workspace_root)/docs/qualification/live_validation_summary.md)
 - [qualification_remediation_rollup.md]((workspace_root)/docs/qualification/qualification_remediation_rollup.md)
 
-## Pending
-
-- `PR-015` SparkEvaluator (structured novelty filter)
-  - owner: unassigned
-  - goal: add a novelty-scoring gate between `DaydreamGenerator` output and `CreativeLadder` entry; score on cosine distance from existing `WorkObject`s, somatic/relational alignment, executive feasibility; promote only sparks above a novelty floor
-  - files: `opencas/daydream/spark_evaluator.py` (new), `opencas/runtime/daydream.py`
+## Recently Completed
 
 - `PR-016` Procedural memory extraction
+  - status: completed
+  - result: added post-task hook in `BoundedAssistantAgent` that summarizes successful task tool sequences into `PROCEDURAL` episodes with embeddings. Wired `MemoryRetriever._semantic_search` to also fetch episodes by embedding_id so procedural memories surface for similar future tasks. Added `list_episodes_by_embedding_ids` to `MemoryStore`. All 5 new tests and 18 related tests pass.
+
+- `PR-015` SparkEvaluator (structured novelty filter)
+  - status: completed
+  - result: created `SparkEvaluator` in `opencas/daydream/spark_evaluator.py` with cosine distance, somatic alignment, relational alignment, and executive feasibility scoring. Wired into `DaydreamGenerator` and `AgentRuntime`. Added 8 tests covering all scoring dimensions and DaydreamGenerator integration; all pass.
   - owner: unassigned
   - goal: post-task hook in `BoundedAssistantAgent` on SUCCEEDED that summarizes the tool sequence into a `procedural_memory` episode kind with embeddings; wire `MemoryRetriever` to surface matching procedural episodes for similar future tasks
   - files: `opencas/execution/baa.py`, `opencas/memory/store.py`, `opencas/context/retriever.py`
@@ -70,6 +71,10 @@ Canonical current docs:
 
 
 ## Recently Completed
+
+- `PR-015` SparkEvaluator (structured novelty filter)
+  - status: completed
+  - result: created `SparkEvaluator` in `opencas/daydream/spark_evaluator.py` with cosine distance, somatic alignment, relational alignment, and executive feasibility scoring. Wired into `DaydreamGenerator` and `AgentRuntime`. Added 8 tests covering all scoring dimensions and DaydreamGenerator integration; all pass.
 
 - `PR-014` Belief pollution resistance
   - status: completed

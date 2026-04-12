@@ -19,6 +19,7 @@ class EpisodeKind(str, Enum):
     ARTIFACT = "artifact"
     COMPACTION = "compaction"
     CONSOLIDATION = "consolidation"
+    PROCEDURAL = "procedural"
 
 
 class EdgeKind(str, Enum):
