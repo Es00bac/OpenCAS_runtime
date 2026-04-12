@@ -1,13 +1,13 @@
 # OpenCAS Release Docs
 
-OpenCAS is a persistent autonomous agent with local state, durable memory, a web control plane, and provider-routed model access through `open_llm_auth`.
+OpenCAS is a persistent autonomous agent with local state, durable memory, a web control plane, and provider-routed model access through [`open_llm_auth`](https://github.com/Es00bac/OpenLLMAuth).
 
 This release bundle reflects the codebase as it exists now. It does not describe an aspirational future package. If a command, endpoint, or UI surface is listed here, it should exist in the repo and in the running server.
 
 ## What This Release Includes
 
 - Persistent episodic and distilled memory backed by SQLite
-- Provider-backed chat and embedding lanes via `open_llm_auth`
+- Provider-backed chat and embedding lanes via [`open_llm_auth`](https://github.com/Es00bac/OpenLLMAuth)
 - Memory inspection, retrieval inspection, and connected atlas views
 - Chat, operations, usage, daydream, identity, executive, and system dashboard surfaces
 - Telegram pairing and chat integration
@@ -28,7 +28,7 @@ That means the project is local-state and operator-owned, but not “fully local
 ## Recommended First Run
 
 ```bash
-git clone https://github.com/Es00bac/OpenCAS.git
+git clone https://github.com/Es00bac/OpenCAS_runtime.git
 cd opencas
 python -m venv .venv
 source .venv/bin/activate
@@ -80,13 +80,14 @@ The current dashboard includes these top-level tabs:
 
 ## Current Release Boundaries
 
-This repo is not yet packaged as a polished PyPI install. The current `requirements.txt` expects the editable gateway dependency at:
+This repo is not yet packaged as a polished PyPI install. The `requirements.txt` references `open_llm_auth` as an editable dependency. To install it:
 
-```text
-/mnt/xtra/open_llm_auth/
+```bash
+git clone https://github.com/Es00bac/OpenLLMAuth.git
+pip install -e ./OpenLLMAuth/open_llm_auth/
 ```
 
-If you move the repo to another machine or directory layout, update that dependency path or install `open_llm_auth` separately before running OpenCAS.
+Then install OpenCAS's remaining dependencies with `pip install -r requirements.txt`.
 
 ## Verification Checklist
 

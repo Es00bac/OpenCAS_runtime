@@ -17,5 +17,6 @@ textual>=0.52.0
 # Optional MCP support
 mcp>=1.0.0
 
-# Editable local dependency
--e /mnt/xtra/open_llm_auth/
+# LLM Gateway dependency — clone from https://github.com/Es00bac/OpenLLMAuth
+# Then install with: pip install -e ./OpenLLMAuth/open_llm_auth/
+# -e /path/to/your/local/OpenLLMAuth/open_llm_auth/

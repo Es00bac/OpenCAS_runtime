@@ -40,14 +40,14 @@ pytest tests/test_memory.py::test_episode_storage -v
 
 ## External Dependencies
 
-- **`open_llm_auth`** (`/mnt/xtra/open_llm_auth/`) — multi-provider LLM gateway. Handles all routing, credentials, and provider abstraction. Installed as editable path in `requirements.txt`.
+- **`open_llm_auth`** ([GitHub](https://github.com/Es00bac/OpenLLMAuth)) — multi-provider LLM gateway. Handles all routing, credentials, and provider abstraction. Install as editable dependency: `pip install -e ./OpenLLMAuth/open_llm_auth/`.
 
 ### Embedding Model Policy
 
 - Default chat model: `anthropic/claude-sonnet-4-6`
 - Default embedding model: `google/gemini-embedding-2-preview`
 - `EmbeddingService` routes through `LLMClient.embed()`. Falls back to local deterministic hash embedder only when offline.
-- If `open_llm_auth` lacks a needed provider, extend it first (editable dep), then update OpenCAS.
+- If `open_llm_auth` lacks a needed provider, extend it first (clone from [GitHub](https://github.com/Es00bac/OpenLLMAuth)), then update OpenCAS.
 
 ## Architecture
 
