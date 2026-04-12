@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCAS Architecture</title>
+  <meta name="description" content="OpenCAS runtime architecture: bootstrap, memory, embeddings, autonomy, dashboard, API, daydreaming, and persistence.">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-shell">
+      <a class="brand" href="../index.html">
+        <span class="brand-mark mono">O</span>
+        <span>OpenCAS Release</span>
+      </a>
+      <nav class="nav-links">
+        <a href="../index.html">Home</a>
+        <a href="../installation.html">Installation</a>
+        <a href="../usage.html">Usage</a>
+        <a href="../features.html">Features</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="site-shell">
+    <section class="page-hero">
+      <span class="eyebrow">Architecture</span>
+      <h1>Explicit subsystems instead of one opaque agent blob.</h1>
+      <p>OpenCAS is organized around runtime concerns: bootstrap, memory, embeddings, autonomy, telemetry, control plane, and channel integration.</p>
+    </section>
+
+    <div class="content-stack">
+      <section class="page-card">
+        <h3>Primary subsystems</h3>
+        <div class="grid cols-3">
+          <article class="content-card"><h3>bootstrap/</h3><p>Configuration resolution, store wiring, provider material, and runtime assembly.</p></article>
+          <article class="content-card"><h3>runtime/</h3><p>Conversational loop, scheduler, creative cycles, Telegram lifecycle, and background orchestration.</p></article>
+          <article class="content-card"><h3>memory/</h3><p>Episodic storage, distilled memories, graph edges, and artifact-backed memory ingestion.</p></article>
+          <article class="content-card"><h3>context/</h3><p>Session context, retrieval fusion, resonance signals, and memory-backed prompt assembly.</p></article>
+          <article class="content-card"><h3>somatic/</h3><p>Arousal, fatigue, tension, valence, focus, energy, certainty, and modulation logic.</p></article>
+          <article class="content-card"><h3>autonomy/</h3><p>Self-approval, creative ladder, work store, commitments, and executive state.</p></article>
+          <article class="content-card"><h3>daydream/</h3><p>Reflection storage, conflict storage, keeper flow, and promotion lineage.</p></article>
+          <article class="content-card"><h3>api/</h3><p>FastAPI server plus config, chat, memory, operations, usage, identity, executive, and Telegram routes.</p></article>
+          <article class="content-card"><h3>dashboard/</h3><p>Single-page operator UI for inspection, control, and configuration.</p></article>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>Runtime loops</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Loop</th>
+                <th>Role</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Conversation</td><td>Handles user input, retrieval, tool use, and response persistence.</td></tr>
+              <tr><td>Creative cycle</td><td>Promotes ideas and work objects through the creative ladder.</td></tr>
+              <tr><td>Daydream</td><td>Runs under idle conditions to produce reflections, keepers, and promoted work.</td></tr>
+              <tr><td>Consolidation</td><td>Reprocesses memory and long-horizon continuity state on interval.</td></tr>
+              <tr><td>Operations</td><td>Tracks PTY, browser, process, qualification, and receipt state.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>Persistence layout</h3>
+        <p>The state directory is local and configurable. Under the current CLI, it defaults to <code>./.opencas</code>.</p>
+        <ul class="list">
+          <li><code>memory.db</code> for episodes, memories, and graph relationships</li>
+          <li><code>context.db</code> for session message history</li>
+          <li><code>tasks.db</code>, <code>work.db</code>, <code>plans.db</code> for execution and planning state</li>
+          <li><code>daydream.db</code> for reflections and conflicts</li>
+          <li><code>telemetry/</code> for event traces</li>
+          <li><code>provider_material/</code> for app-local OpenLLMAuth config and env material</li>
+        </ul>
+      </section>
+
+      <section class="page-card">
+        <h3>Provider integration truth</h3>
+        <div class="callout warn">
+          State, dashboards, and operators are local. Model execution is provider-routed by default. Do not describe this architecture as fully local unless you have explicitly replaced the provider-backed model lanes with local equivalents.
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="site-shell">
+      <div><a href="../../architecture/README.md">Markdown source</a></div>
+      <div><a href="../index.html">Back to release index</a></div>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Bulma → OpenCAS Import Guide</title>
+  <meta name="description" content="How your OpenBulma v4 memory, identity, and creative history move into OpenCAS — step by step, with your role as operator explained.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <style>
+    /* ── TTS button ─────────────────────────────────────────── */
+    .tts-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      background: rgba(110, 231, 200, 0.08);
+      border: 1px solid rgba(110, 231, 200, 0.22);
+      color: #6ee7c8;
+      border-radius: 6px;
+      padding: 2px 8px;
+      font-size: 0.72rem;
+      font-family: inherit;
+      cursor: pointer;
+      vertical-align: middle;
+      margin-left: 8px;
+      white-space: nowrap;
+      transition: background 0.15s, border-color 0.15s;
+      user-select: none;
+    }
+    .tts-btn:hover { background: rgba(110, 231, 200, 0.16); border-color: rgba(110, 231, 200, 0.5); }
+    .tts-btn.speaking { background: rgba(110, 231, 200, 0.24); border-color: #6ee7c8; color: #fff; }
+    .tts-btn svg { flex-shrink: 0; }
+
+    /* ── Section headings with TTS ──────────────────────────── */
+    .tts-heading {
+      display: flex;
+      align-items: baseline;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .tts-heading h2, .tts-heading h3 { margin: 0; }
+
+    /* ── Flow diagram ───────────────────────────────────────── */
+    .flow-wrap {
+      overflow-x: auto;
+      padding: 2rem 0;
+    }
+    .flow-svg { display: block; margin: 0 auto; }
+
+    /* ── Phase grid ─────────────────────────────────────────── */
+    .phase-group {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+      gap: 8px;
+      margin-top: 1rem;
+    }
+    .phase-chip {
+      background: rgba(17, 21, 34, 0.9);
+      border: 1px solid rgba(101, 122, 168, 0.28);
+      border-radius: 10px;
+      padding: 10px 14px;
+      font-size: 0.8rem;
+      font-family: "JetBrains Mono", monospace;
+      color: var(--text-soft);
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .phase-chip .dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .phase-chip.memory .dot  { background: #63b6ff; }
+    .phase-chip.self .dot    { background: #6ee7c8; }
+    .phase-chip.work .dot    { background: #ffbf75; }
+    .phase-chip.creative .dot{ background: #c084fc; }
+    .phase-chip.system .dot  { background: #80f3b3; }
+
+    /* ── Stat cards ─────────────────────────────────────────── */
+    .stat-card {
+      background: rgba(17, 21, 34, 0.88);
+      border: 1px solid rgba(101, 122, 168, 0.24);
+      border-radius: 16px;
+      padding: 1.5rem;
+      text-align: center;
+    }
+    .stat-card .stat-num {
+      font-size: 2rem;
+      font-weight: 800;
+      letter-spacing: -0.03em;
+      color: var(--accent);
+      line-height: 1;
+      margin-bottom: 6px;
+    }
+    .stat-card .stat-label {
+      font-size: 0.82rem;
+      color: var(--text-muted);
+    }
+
+    /* ── Step list ──────────────────────────────────────────── */
+    .step-list { display: grid; gap: 12px; margin-top: 1.25rem; }
+    .step {
+      display: grid;
+      grid-template-columns: 44px 1fr;
+      gap: 16px;
+      align-items: start;
+    }
+    .step-num {
+      width: 44px; height: 44px;
+      border-radius: 50%;
+      background: linear-gradient(135deg, rgba(110,231,200,0.18), rgba(99,182,255,0.18));
+      border: 1.5px solid rgba(110,231,200,0.4);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 1rem; color: #6ee7c8;
+      flex-shrink: 0;
+    }
+    .step-body h4 { margin: 0 0 4px; font-size: 0.95rem; color: var(--text); }
+    .step-body p  { margin: 0; font-size: 0.87rem; color: var(--text-soft); line-height: 1.55; }
+    .step-body code { font-size: 0.82rem; background: rgba(101,122,168,0.15); padding: 1px 5px; border-radius: 4px; }
+
+    /* ── Category cards ─────────────────────────────────────── */
+    .cat-card {
+      background: rgba(17,21,34,0.85);
+      border: 1px solid rgba(101,122,168,0.22);
+      border-radius: 14px;
+      padding: 1.1rem 1.25rem;
+    }
+    .cat-card .cat-head {
+      display: flex; align-items: center; gap: 10px; margin-bottom: 8px;
+    }
+    .cat-card .cat-icon {
+      font-size: 1.3rem; line-height: 1;
+    }
+    .cat-card h4 { margin: 0; font-size: 0.92rem; color: var(--text); }
+    .cat-card p  { margin: 0; font-size: 0.83rem; color: var(--text-soft); line-height: 1.55; }
+    .cat-card .becomes {
+      margin-top: 8px; font-size: 0.78rem;
+      color: var(--accent); font-family: "JetBrains Mono", monospace;
+    }
+
+    /* ── Warning / note callout ─────────────────────────────── */
+    .callout {
+      background: rgba(255, 191, 117, 0.08);
+      border: 1px solid rgba(255, 191, 117, 0.3);
+      border-radius: 14px;
+      padding: 1.1rem 1.4rem;
+    }
+    .callout.info {
+      background: rgba(99, 182, 255, 0.07);
+      border-color: rgba(99,182,255,0.28);
+    }
+    .callout h4 { margin: 0 0 6px; font-size: 0.9rem; color: var(--accent-warm); }
+    .callout.info h4 { color: var(--accent-strong); }
+    .callout p  { margin: 0; font-size: 0.85rem; color: var(--text-soft); line-height: 1.6; }
+
+    /* ── Code block ─────────────────────────────────────────── */
+    .code-block {
+      background: rgba(9, 11, 17, 0.9);
+      border: 1px solid rgba(101,122,168,0.22);
+      border-radius: 12px;
+      padding: 1.1rem 1.4rem;
+      overflow-x: auto;
+    }
+    .code-block pre { margin: 0; font-size: 0.83rem; line-height: 1.7; color: #b7c0d9; }
+    .code-block .c { color: #6d7fa8; } /* comment */
+    .code-block .k { color: #63b6ff; } /* keyword */
+    .code-block .s { color: #6ee7c8; } /* string */
+    .code-block .n { color: #ffbf75; } /* name/var */
+
+    /* ── Speaking toast ─────────────────────────────────────── */
+    #tts-toast {
+      position: fixed; bottom: 24px; right: 24px;
+      background: rgba(17,21,34,0.95);
+      border: 1px solid rgba(110,231,200,0.4);
+      border-radius: 12px;
+      padding: 10px 18px;
+      font-size: 0.82rem;
+      color: #6ee7c8;
+      display: flex; align-items: center; gap: 10px;
+      opacity: 0; transform: translateY(12px);
+      transition: opacity 0.2s, transform 0.2s;
+      pointer-events: none;
+      z-index: 999;
+    }
+    #tts-toast.visible { opacity: 1; transform: translateY(0); pointer-events: auto; }
+    #tts-toast button {
+      background: none; border: none; color: var(--text-muted);
+      cursor: pointer; font-size: 1rem; padding: 0; line-height: 1;
+    }
+
+    /* ── Misc ───────────────────────────────────────────────── */
+    .content-stack { display: grid; gap: 2.5rem; }
+    .page-card h2 { margin-top: 0; }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 1.5rem; }
+    @media (max-width: 700px) {
+      .two-col { grid-template-columns: 1fr; }
+      .flow-svg { min-width: 700px; }
+    }
+    .section-label {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.1em;
+      text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px;
+    }
+    .phase-group-label {
+      font-size: 0.72rem; font-weight: 700; letter-spacing: 0.08em;
+      text-transform: uppercase; color: var(--text-muted); margin: 16px 0 6px;
+    }
+  </style>
+</head>
+<body>
+
+  <header class="site-header">
+    <div class="site-shell">
+      <a class="brand" href="index.html">
+        <span class="brand-mark mono">O</span>
+        <span>OpenCAS Release</span>
+      </a>
+      <nav class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="installation.html">Installation</a>
+        <a href="usage.html">Usage</a>
+        <a href="features.html">Features</a>
+        <a href="terminology.html">Terminology</a>
+        <a href="import.html" aria-current="page">Import</a>
+        <a href="api/">API</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="site-shell">
+
+    <!-- Hero -->
+    <section class="page-hero">
+      <span class="eyebrow">Migration Guide</span>
+      <h1>Bringing your Bulma memory into OpenCAS.</h1>
+      <p>
+        A one-way, checkpointed transfer of your episodes, identity, creative history, and relational state — from OpenBulma&nbsp;v4 into a persistent autonomous agent.
+        <button class="tts-btn" data-tts="Bringing your Bulma memory into OpenCAS. A one-way, checkpointed transfer of your episodes, identity, creative history, and relational state from OpenBulma version 4 into a persistent autonomous agent.">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+          listen
+        </button>
+      </p>
+    </section>
+
+    <div class="content-stack">
+
+      <!-- Overview -->
+      <section class="page-card">
+        <div class="tts-heading">
+          <h2>What this import is</h2>
+          <button class="tts-btn" data-tts="What this import is. OpenBulma version 4 and OpenCAS are two different agents. Bulma was the predecessor — a TypeScript system with its own SQLite and JSONL state. OpenCAS is its Python successor with a richer autonomy stack, relational engine, scheduling, and operator dashboard. The import is a one-way migration. It reads Bulma's state directory, maps every data category to OpenCAS equivalents, and writes them into the live agent's stores. After the import, OpenCAS boots with your full history, your identity profile, your creative workspace, your daydream sparks, and your relational trust already in place. Bulma's state directory is never modified.">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+            listen
+          </button>
+        </div>
+        <p>
+          OpenBulma&nbsp;v4 and OpenCAS are two different agents. Bulma was the predecessor — a TypeScript system with its own SQLite and JSONL state. OpenCAS is its Python successor with a richer autonomy stack, relational engine, scheduling, and operator dashboard.
+        </p>
+        <p>
+          The import is a one-way migration. It reads Bulma's state directory, maps every data category to OpenCAS equivalents, and writes them into the live agent's stores. After the import, OpenCAS boots with your full history, your identity profile, your creative workspace, your daydream sparks, and your relational trust already in place. Bulma's state directory is never modified.
+        </p>
+
+        <div class="callout info" style="margin-top:1.25rem;">
+          <h4>One-way and checkpointed</h4>
+          <p>
+            The import writes into OpenCAS and does not touch Bulma. If it fails partway through, re-running it resumes from the last completed phase — no data is duplicated or lost.
+          </p>
+        </div>
+      </section>
+
+      <!-- Data flow diagram -->
+      <section class="page-card">
+        <div class="tts-heading">
+          <h2>How the data flows</h2>
+          <button class="tts-btn" data-tts="How the data flows. Your Bulma state directory is first copied into a clean staging package by the extract script. You review and prune the package. Then the import task reads the package and writes each category into OpenCAS's live stores, producing an audit manifest when done.">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+            listen
+          </button>
+        </div>
+        <p class="muted" style="margin-bottom:1.25rem;">Your Bulma state is first extracted into a clean staging package. You review and prune it. Then the importer reads that package and writes into OpenCAS's live stores.</p>
+        <div class="flow-wrap">
+          <!-- Flow SVG -->
+          <svg class="flow-svg" width="860" height="200" viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Data flow from Bulma state through extract script to staging package to importer to OpenCAS">
+
+            <!-- Background glow -->
+            <defs>
+              <radialGradient id="gA" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stop-color="#63b6ff" stop-opacity="0.15"/>
+                <stop offset="100%" stop-color="#63b6ff" stop-opacity="0"/>
+              </radialGradient>
+              <radialGradient id="gB" cx="50%" cy="50%" r="50%">
+                <stop offset="0%" stop-color="#6ee7c8" stop-opacity="0.15"/>
+                <stop offset="100%" stop-color="#6ee7c8" stop-opacity="0"/>
+              </radialGradient>
+              <filter id="glow">
+                <feGaussianBlur stdDeviation="3" result="coloredBlur"/>
+                <feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge>
+              </filter>
+              <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
+                <path d="M0,0 L0,6 L8,3 z" fill="rgba(110,231,200,0.6)"/>
+              </marker>
+            </defs>
+
+            <!-- Node 1: Bulma State -->
+            <rect x="10" y="60" width="150" height="80" rx="14" fill="rgba(17,21,34,0.9)" stroke="rgba(99,182,255,0.5)" stroke-width="1.5"/>
+            <ellipse cx="85" cy="34" rx="30" ry="18" fill="url(#gA)"/>
+            <text x="85" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" fill="#63b6ff">📁</text>
+            <text x="85" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">Bulma State Dir</text>
+            <text x="85" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">openbulma-v4/state</text>
+            <text x="85" y="137" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#8590ad">3,174 eps · 177k edges</text>
+
+            <!-- Arrow 1 -->
+            <line x1="162" y1="100" x2="198" y2="100" stroke="rgba(110,231,200,0.6)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+            <!-- Node 2: Extract script -->
+            <rect x="200" y="60" width="150" height="80" rx="14" fill="rgba(17,21,34,0.9)" stroke="rgba(110,231,200,0.45)" stroke-width="1.5"/>
+            <text x="275" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" fill="#6ee7c8">🔧</text>
+            <text x="275" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">Extract Script</text>
+            <text x="275" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">extract_bulma_package.py</text>
+            <text x="275" y="137" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#8590ad">preflight · copy · redact</text>
+
+            <!-- Operator label below arrow 1→2 -->
+            <text x="275" y="160" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="rgba(110,231,200,0.5)">you run this</text>
+
+            <!-- Arrow 2 -->
+            <line x1="352" y1="100" x2="388" y2="100" stroke="rgba(110,231,200,0.6)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+            <!-- Node 3: Staging Package -->
+            <rect x="390" y="60" width="150" height="80" rx="14" fill="rgba(17,21,34,0.9)" stroke="rgba(255,191,117,0.45)" stroke-width="1.5"/>
+            <text x="465" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" fill="#ffbf75">📦</text>
+            <text x="465" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">Staging Package</text>
+            <text x="465" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">/mnt/xtra/bulma-package</text>
+            <text x="465" y="137" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#8590ad">65 MB · you review &amp; prune</text>
+
+            <!-- Operator label -->
+            <text x="465" y="160" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="rgba(255,191,117,0.6)">your review step</text>
+
+            <!-- Arrow 3 -->
+            <line x1="542" y1="100" x2="578" y2="100" stroke="rgba(110,231,200,0.6)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+            <!-- Node 4: Importer -->
+            <rect x="580" y="60" width="140" height="80" rx="14" fill="rgba(17,21,34,0.9)" stroke="rgba(192,132,252,0.45)" stroke-width="1.5"/>
+            <text x="650" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" fill="#c084fc">⚙️</text>
+            <text x="650" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">BulmaImportTask</text>
+            <text x="650" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">21 phases · checkpointed</text>
+            <text x="650" y="137" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#8590ad">needs live runtime + embeddings</text>
+
+            <!-- Arrow 4 -->
+            <line x1="722" y1="100" x2="758" y2="100" stroke="rgba(110,231,200,0.6)" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+            <!-- Node 5: OpenCAS -->
+            <rect x="760" y="60" width="90" height="80" rx="14" fill="rgba(17,21,34,0.9)" stroke="rgba(128,243,179,0.5)" stroke-width="1.5"/>
+            <ellipse cx="805" cy="65" rx="22" ry="14" fill="url(#gB)"/>
+            <text x="805" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" fill="#80f3b3">🧠</text>
+            <text x="805" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">OpenCAS</text>
+            <text x="805" y="122" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#8590ad">live agent with</text>
+            <text x="805" y="137" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#8590ad">full history</text>
+          </svg>
+        </div>
+      </section>
+
+      <!-- Stats -->
+      <section>
+        <div class="section-label">What's in your Bulma state</div>
+        <div class="grid cols-3" style="gap:12px;">
+          <div class="stat-card">
+            <div class="stat-num">3,174</div>
+            <div class="stat-label">Memory episodes</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">177k</div>
+            <div class="stat-label">Memory edges</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">744</div>
+            <div class="stat-label">Daydream sparks</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">680</div>
+            <div class="stat-label">Daydream initiatives</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">521</div>
+            <div class="stat-label">Work-product drafts</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-num">785</div>
+            <div class="stat-label">Workspace files</div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Your role -->
+      <section class="page-card">
+        <div class="tts-heading">
+          <h2>Your role as operator</h2>
+          <button class="tts-btn" data-tts="Your role as operator. You have six steps. First, run the extract script to create a clean staging package from the Bulma state directory. Second, open REVIEW.md inside the package and read the notes. Third, prune anything you don't want to carry forward — old work products, low-confidence edges, workspace directories you no longer need. Fourth, start OpenCAS with the server flag. Fifth, call import underscore bulma on the runtime, pointing it at your staging package. Sixth, verify — check the import report, browse memory in the dashboard, confirm your identity profile came through.">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+            listen
+          </button>
+        </div>
+        <p class="muted">You have six steps. The agent handles the rest.</p>
+
+        <div class="step-list">
+          <div class="step">
+            <div class="step-num">1</div>
+            <div class="step-body">
+              <h4>Run the extract script</h4>
+              <p>Creates a clean, 65 MB staging package from Bulma's state directory. Runs a preflight scan, copies only the essential categories, redacts any secret-bearing files, and writes <code>REVIEW.md</code> and <code>manifest.json</code>. Takes about 30 seconds. Does not modify Bulma.</p>
+              <div class="code-block" style="margin-top:10px;">
+                <pre>python scripts/extract_bulma_package.py --out /mnt/xtra/bulma-package</pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="step-num">2</div>
+            <div class="step-body">
+              <h4>Read <code>REVIEW.md</code></h4>
+              <p>The extract script generates a pruning guide inside the package. It tells you the count of each category, flags duplicate episode IDs (handled automatically), and gives you the exact <code>jq</code> command to thin the 177k memory edges if you want a lighter import.</p>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="step-num">3</div>
+            <div class="step-body">
+              <h4>Prune what you don't need</h4>
+              <p>Delete work-product JSON files that are obsolete. Remove workspace sub-directories you don't want migrated. Edit <code>identity/profile.json</code> if the narrative or goals are stale. Filter edges by confidence. None of this is required — skip it if you want everything.</p>
+              <div class="code-block" style="margin-top:10px;">
+                <pre><span class="c"># Optional: keep only edges with confidence &gt; 0.3</span>
+jq -c <span class="s">'select(.confidence &gt; 0.3)'</span> memory/edges.jsonl \
+  &gt; memory/edges.filtered.jsonl
+mv memory/edges.filtered.jsonl memory/edges.jsonl</pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="step-num">4</div>
+            <div class="step-body">
+              <h4>Start OpenCAS with the server</h4>
+              <p>The importer requires a fully-booted runtime with an active embedding provider. Start OpenCAS normally. The import is triggered through the Python API — not through the dashboard UI.</p>
+              <div class="code-block" style="margin-top:10px;">
+                <pre>source .venv/bin/activate
+python -m opencas --with-server</pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="step-num">5</div>
+            <div class="step-body">
+              <h4>Call <code>import_bulma()</code></h4>
+              <p>Point the importer at your staging package. It runs 21 phases, checkpointing after each one. If it fails partway through, re-running resumes from the last completed phase. The embedding provider must be available — this is where Kimi (or another configured model) is used to embed imported episodes.</p>
+              <div class="code-block" style="margin-top:10px;">
+                <pre><span class="c"># In a Python session with the venv active:</span>
+<span class="k">from</span> opencas.runtime.agent_loop <span class="k">import</span> AgentRuntime
+<span class="k">from</span> pathlib <span class="k">import</span> Path
+<span class="k">import</span> asyncio
+
+<span class="c"># runtime = your running AgentRuntime instance</span>
+report = asyncio.run(runtime.import_bulma(
+    bulma_state_dir=Path(<span class="s">"/mnt/xtra/bulma-package"</span>),
+))
+<span class="k">print</span>(report.model_dump_json(indent=2))</pre>
+              </div>
+            </div>
+          </div>
+
+          <div class="step">
+            <div class="step-num">6</div>
+            <div class="step-body">
+              <h4>Verify</h4>
+              <p>Check the import report for counts. Open the Memory tab in the dashboard and confirm episodes are present. Check the Identity tab for your narrative and values. The cutover manifest at <code>.opencas/cutover_manifest.json</code> lists every file that was processed with its sha256 hash.</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Import phases -->
+      <section class="page-card">
+        <div class="tts-heading">
+          <h2>The 21 import phases</h2>
+          <button class="tts-btn" data-tts="The 21 import phases. The importer works in ordered, checkpointed phases. Memory phases handle episodes, edges, embeddings, and auxiliary memory data. Self phases handle identity, continuity, relational state, and somatic history. Work phases handle the executive state, tasks, executive events, and task plans. Creative phases handle daydreams, workspaces, the agentic harness, and skills. System phases handle governance, execution receipts, sessions, the cutover manifest, and finalization. If the import fails at any phase, re-running it skips already-completed phases.">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+            listen
+          </button>
+        </div>
+        <p class="muted">Phases run in order. The importer checkpoints after each one — a failed run resumes where it left off.</p>
+
+        <div class="phase-group-label">Memory</div>
+        <div class="phase-group">
+          <div class="phase-chip memory"><span class="dot"></span>episodes</div>
+          <div class="phase-chip memory"><span class="dot"></span>edges</div>
+          <div class="phase-chip memory"><span class="dot"></span>embeddings</div>
+          <div class="phase-chip memory"><span class="dot"></span>memory_aux</div>
+        </div>
+
+        <div class="phase-group-label">Self</div>
+        <div class="phase-group">
+          <div class="phase-chip self"><span class="dot"></span>identity</div>
+          <div class="phase-chip self"><span class="dot"></span>continuity</div>
+          <div class="phase-chip self"><span class="dot"></span>relational</div>
+          <div class="phase-chip self"><span class="dot"></span>somatic</div>
+        </div>
+
+        <div class="phase-group-label">Work</div>
+        <div class="phase-group">
+          <div class="phase-chip work"><span class="dot"></span>executive</div>
+          <div class="phase-chip work"><span class="dot"></span>tasks</div>
+          <div class="phase-chip work"><span class="dot"></span>executive_events</div>
+          <div class="phase-chip work"><span class="dot"></span>task_plans</div>
+        </div>
+
+        <div class="phase-group-label">Creative</div>
+        <div class="phase-group">
+          <div class="phase-chip creative"><span class="dot"></span>daydreams</div>
+          <div class="phase-chip creative"><span class="dot"></span>workspaces</div>
+          <div class="phase-chip creative"><span class="dot"></span>harness</div>
+          <div class="phase-chip creative"><span class="dot"></span>skills</div>
+        </div>
+
+        <div class="phase-group-label">System</div>
+        <div class="phase-group">
+          <div class="phase-chip system"><span class="dot"></span>governance</div>
+          <div class="phase-chip system"><span class="dot"></span>execution_receipts</div>
+          <div class="phase-chip system"><span class="dot"></span>sessions</div>
+          <div class="phase-chip system"><span class="dot"></span>cutover</div>
+          <div class="phase-chip system"><span class="dot"></span>finalized</div>
+        </div>
+      </section>
+
+      <!-- What each category becomes -->
+      <section class="page-card">
+        <div class="tts-heading">
+          <h2>What each category becomes</h2>
+          <button class="tts-btn" data-tts="What each category becomes in OpenCAS. Episodes become OpenCAS Episode objects in memory dot db, each assigned a new UUID while preserving its original Bulma ID for deduplication. Memory edges become EpisodeEdge records with confidence and weight fields mapped from Bulma's semantic, emotional, recency, and salience weights. Identity becomes the OpenCAS SelfModel — narrative, values, traits, and goals are mapped directly, and the partner trust and musubi scores seed the relational engine. Daydream sparks and initiatives become DaydreamReflection objects in daydream dot db. Workspace files are copied into OpenCAS workspace storage under a named project. Work products become WorkObject entries in the creative ladder's work store. Somatic history seeds the somatic store so the agent's starting emotional state reflects recent Bulma history rather than defaults. Executive state becomes active goals and commitments. Skills are registered in the plugin skill registry if they are enabled.">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+            listen
+          </button>
+        </div>
+        <div class="grid cols-2" style="gap:12px; margin-top:1rem;">
+
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">💬</span><h4>Episodes</h4></div>
+            <p>Each Bulma episode becomes an OpenCAS <code>Episode</code> in <code>memory.db</code>, assigned a new UUID while preserving the original Bulma ID for deduplication. Source, content, salience, emotion tags, and <code>identityCore</code> flag are all mapped.</p>
+            <div class="becomes">→ memory.db / episodes table</div>
+          </div>
+
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">🔗</span><h4>Memory edges</h4></div>
+            <p>Bulma's semantic, emotional, recency, and salience weights are averaged into OpenCAS <code>EpisodeEdge</code> confidence scores. Orphan edges (pointing to missing episodes) are skipped with a count in the report.</p>
+            <div class="becomes">→ memory.db / episode_edges table</div>
+          </div>
+
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">🪪</span><h4>Identity</h4></div>
+            <p>Narrative, values, traits, and ongoing goals map to the OpenCAS <code>SelfModel</code>. Partner trust and musubi scores seed the relational engine. Recent themes and memory anchors are preserved on the self-model for context.</p>
+            <div class="becomes">→ identity/ + relational.db</div>
+          </div>
+
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">🌙</span><h4>Daydreams</h4></div>
+            <p>Sparks, initiatives, outcomes, and notifications become <code>DaydreamReflection</code> objects in the daydream store. Keeper daydreams with a track record of value delivered are flagged accordingly.</p>
+            <div class="becomes">→ daydream.db</div>
+          </div>
+
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">📂</span><h4>Workspaces</h4></div>
+            <p>Creative workspace directories (chronicle chapters, scripts, research files) are copied into OpenCAS workspace storage. A workspace manifest is created for each top-level project directory.</p>
+            <div class="becomes">→ workspace storage + work.db</div>
+          </div>
+
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">📝</span><h4>Work products</h4></div>
+            <p>Each Bulma work-product draft JSON becomes a <code>WorkObject</code> entry in the creative ladder's work store, with objective, summary, and status carried through.</p>
+            <div class="becomes">→ work.db</div>
+          </div>
+
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">🌡️</span><h4>Somatic history</h4></div>
+            <p>The most recent somatic snapshot (arousal, fatigue, valence, certainty) seeds the OpenCAS somatic store so the agent's starting emotional state reflects recent Bulma history rather than cold defaults.</p>
+            <div class="becomes">→ somatic.db</div>
+          </div>
+
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">🎯</span><h4>Executive state</h4></div>
+            <p>Active goals and commitments become OpenCAS <code>Goal</code> and <code>Commitment</code> records. Executive events are archived and indexed rather than imported verbatim — too large to carry as live state.</p>
+            <div class="becomes">→ commitments.db + executive archive</div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- The embedding question -->
+      <section class="page-card">
+        <div class="tts-heading">
+          <h2>Why embeddings matter for this import</h2>
+          <button class="tts-btn" data-tts="Why embeddings matter for this import. The embeddings phase is the most expensive one. Every imported episode needs a vector embedding so OpenCAS can retrieve it semantically — that is, so you can ask the agent about something and it can find relevant memories even if the exact words don't match. Those embeddings are computed during import by calling the configured embedding provider, which is Google Gemini embedding 2 preview routed through open LLM auth. If the provider is unavailable, the importer falls back to a local deterministic hash embedder. The hash embedder is fast and always available, but the resulting vectors won't support meaningful semantic search — they're positional placeholders. A backfill job can recompute them later when the provider is back. This is why the import is currently waiting for Kimi usage to reset: Kimi is used for the provider-backed embedding lane.">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+            listen
+          </button>
+        </div>
+
+        <div class="two-col">
+          <div>
+            <p>The <strong>embeddings phase</strong> is the most expensive one. Every imported episode needs a vector embedding so OpenCAS can retrieve it semantically — so you can ask the agent about something and it can find relevant memories even if the exact words don't match.</p>
+            <p>Those embeddings are computed during import by calling the configured embedding provider (<code>google/gemini-embedding-2-preview</code> routed through <code>open_llm_auth</code>).</p>
+          </div>
+          <div>
+            <!-- Embedding diagram -->
+            <svg width="100%" viewBox="0 0 280 160" xmlns="http://www.w3.org/2000/svg">
+              <rect x="10" y="20" width="80" height="40" rx="10" fill="rgba(99,182,255,0.12)" stroke="rgba(99,182,255,0.4)" stroke-width="1"/>
+              <text x="50" y="44" text-anchor="middle" font-family="Inter,sans-serif" font-size="10" fill="#edf2ff">3,174 episodes</text>
+              <text x="50" y="56" text-anchor="middle" font-family="Inter,sans-serif" font-size="8" fill="#8590ad">raw text</text>
+
+              <line x1="92" y1="40" x2="118" y2="40" stroke="rgba(110,231,200,0.5)" stroke-width="1" marker-end="url(#arrow)"/>
+
+              <rect x="120" y="20" width="80" height="40" rx="10" fill="rgba(110,231,200,0.12)" stroke="rgba(110,231,200,0.4)" stroke-width="1"/>
+              <text x="160" y="38" text-anchor="middle" font-family="Inter,sans-serif" font-size="10" fill="#edf2ff">Gemini embed</text>
+              <text x="160" y="50" text-anchor="middle" font-family="Inter,sans-serif" font-size="8" fill="#8590ad">via open_llm_auth</text>
+              <text x="160" y="62" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="7" fill="#6ee7c8">3072-dim vector</text>
+
+              <line x1="202" y1="40" x2="228" y2="40" stroke="rgba(110,231,200,0.5)" stroke-width="1" marker-end="url(#arrow)"/>
+
+              <rect x="230" y="20" width="40" height="40" rx="10" fill="rgba(128,243,179,0.12)" stroke="rgba(128,243,179,0.4)" stroke-width="1"/>
+              <text x="250" y="44" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#80f3b3">cache</text>
+
+              <text x="140" y="95" text-anchor="middle" font-family="Inter,sans-serif" font-size="10" fill="#8590ad">If provider unavailable:</text>
+              <rect x="60" y="108" width="160" height="30" rx="8" fill="rgba(255,122,154,0.08)" stroke="rgba(255,122,154,0.3)" stroke-width="1"/>
+              <text x="140" y="128" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#ff7a9a">local-fallback embedder (hash-based)</text>
+              <text x="140" y="150" text-anchor="middle" font-family="Inter,sans-serif" font-size="8" fill="#8590ad">semantic search won't work — backfill later</text>
+            </svg>
+          </div>
+        </div>
+
+        <div class="callout" style="margin-top:1rem;">
+          <h4>Why the import is waiting</h4>
+          <p>
+            Kimi usage resets on an 11-hour cycle. Once it resets, the embedding provider is available and the import can run with full semantic vector quality. The staging package at <code>/mnt/xtra/bulma-package</code> is already prepared and ready — no further extract steps are needed.
+          </p>
+        </div>
+      </section>
+
+      <!-- Safety and rollback -->
+      <section class="page-card">
+        <div class="tts-heading">
+          <h2>Safety and rollback</h2>
+          <button class="tts-btn" data-tts="Safety and rollback. The import is designed to be safe in three ways. First, Bulma's state directory is never modified. The extract script only reads from it. Second, the importer is checkpointed. If it crashes partway through, re-running it skips completed phases. No data is duplicated. Third, because the import writes into a fresh OpenCAS instance, you can roll back simply by wiping the OpenCAS state directory and starting over with the same staging package. The cutover manifest at dot opencas slash cutover underscore manifest dot json records every file that was processed, with its size and sha256 hash, so you have a full audit trail of what moved.">
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
+            listen
+          </button>
+        </div>
+
+        <div class="grid cols-3" style="gap:12px;">
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">🔒</span><h4>Bulma is never touched</h4></div>
+            <p>The extract script and importer are both read-only with respect to Bulma's state directory. Nothing in <code>/mnt/xtra/openbulma-v4/state</code> is modified or deleted.</p>
+          </div>
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">♻️</span><h4>Checkpointed resumption</h4></div>
+            <p>A checkpoint file tracks completed phases. Re-running the importer after a failure picks up exactly where it left off — no phase is repeated, no data duplicated.</p>
+          </div>
+          <div class="cat-card">
+            <div class="cat-head"><span class="cat-icon">🗑️</span><h4>Simple rollback</h4></div>
+            <p>Because the import writes into a fresh OpenCAS instance, rolling back means wiping <code>.opencas/</code> and re-running. The staging package is reusable.</p>
+          </div>
+        </div>
+
+        <div class="callout info" style="margin-top:1.25rem;">
+          <h4>Audit trail</h4>
+          <p>
+            The cutover manifest at <code>.opencas/cutover_manifest.json</code> lists every source file that was considered, its disposition (imported, retired, skipped), size, and sha256. The import report printed at the end gives per-phase counts for everything that was written.
+          </p>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="site-shell">
+      <div><a href="index.html">Back to release index</a></div>
+      <div class="muted" style="font-size:0.8rem;">TTS uses the Web Speech API — no server required.</div>
+    </div>
+  </footer>
+
+  <!-- Speaking toast -->
+  <div id="tts-toast">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="#6ee7c8"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02zM14 3.23v2.06c2.89.86 5 3.54 5 6.71s-2.11 5.85-5 6.71v2.06c4.01-.91 7-4.49 7-8.77s-2.99-7.86-7-8.77z"/></svg>
+    <span id="tts-toast-text">Reading aloud…</span>
+    <button onclick="ttsStop()" title="Stop">✕</button>
+  </div>
+
+  <script>
+    // ── Web Speech TTS engine ────────────────────────────────
+    let ttsActive = null;
+    const toast = document.getElementById('tts-toast');
+    const toastText = document.getElementById('tts-toast-text');
+
+    function ttsStop() {
+      window.speechSynthesis.cancel();
+      if (ttsActive) {
+        ttsActive.classList.remove('speaking');
+        ttsActive.textContent = '';
+        ttsActive.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg> listen';
+        ttsActive = null;
+      }
+      toast.classList.remove('visible');
+    }
+
+    function ttsSpeak(btn, text) {
+      if (!('speechSynthesis' in window)) {
+        alert('Your browser does not support text-to-speech. Try Chrome or Edge.');
+        return;
+      }
+      // If this button is already speaking, stop
+      if (ttsActive === btn) { ttsStop(); return; }
+      // Stop any current speech
+      ttsStop();
+
+      const utter = new SpeechSynthesisUtterance(text);
+      utter.rate = 0.92;
+      utter.pitch = 1.0;
+
+      // Prefer a natural-sounding voice
+      const voices = window.speechSynthesis.getVoices();
+      const preferred = voices.find(v =>
+        /en[-_](US|GB|AU)/i.test(v.lang) && (
+          /natural|neural|premium|enhanced|samantha|karen|daniel/i.test(v.name) ||
+          v.localService
+        )
+      ) || voices.find(v => /en/i.test(v.lang));
+      if (preferred) utter.voice = preferred;
+
+      utter.onstart = () => {
+        ttsActive = btn;
+        btn.classList.add('speaking');
+        btn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg> stop';
+        toastText.textContent = 'Reading aloud…';
+        toast.classList.add('visible');
+      };
+      utter.onend = utter.onerror = () => {
+        ttsStop();
+      };
+
+      window.speechSynthesis.speak(utter);
+    }
+
+    // Wire all TTS buttons
+    document.querySelectorAll('.tts-btn').forEach(btn => {
+      const text = btn.dataset.tts;
+      if (!text) return;
+      btn.addEventListener('click', e => {
+        e.stopPropagation();
+        ttsSpeak(btn, text);
+      });
+    });
+
+    // Voices may load async in some browsers
+    window.speechSynthesis.onvoiceschanged = () => {};
+  </script>
+
+</body>
+</html>

@@ -1,0 +1,380 @@
+"""Tests for the bootstrap pipeline."""
+
+import json
+import sys
+import pytest
+from pathlib import Path
+from types import SimpleNamespace
+from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
+from opencas.__main__ import _build_bootstrap_config
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_pipeline(tmp_path: Path) -> None:
+    config = BootstrapConfig(
+        state_dir=tmp_path,
+        session_id="test-session",
+    )
+    pipeline = BootstrapPipeline(config)
+    ctx = await pipeline.run()
+
+    assert ctx.config.state_dir == tmp_path
+    assert ctx.identity.continuity.boot_count >= 1
+    assert ctx.identity.continuity.last_session_id == "test-session"
+    assert ctx.memory is not None
+    assert ctx.embeddings is not None
+    assert ctx.somatic is not None
+    assert ctx.tracer is not None
+    assert ctx.llm is not None
+    assert ctx.llm.default_model == config.default_llm_model
+
+    # Verify telemetry recorded bootstrap stages
+    events = ctx.tracer.store.query()
+    assert len(events) > 0
+    stage_events = [e for e in events if "BOOTSTRAP_STAGE" in str(e.kind)]
+    assert len(stage_events) >= 1
+
+    # Clean up
+    await ctx.memory.close()
+    await ctx.embeddings.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_identity_persists(tmp_path: Path) -> None:
+    config = BootstrapConfig(state_dir=tmp_path, session_id="s1")
+    ctx1 = await BootstrapPipeline(config).run()
+    await ctx1.memory.close()
+    await ctx1.embeddings.cache.close()
+
+    ctx2 = await BootstrapPipeline(config).run()
+    assert ctx2.identity.continuity.boot_count == ctx1.identity.continuity.boot_count + 1
+    await ctx2.memory.close()
+    await ctx2.embeddings.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_first_boot_seeds_identity(tmp_path: Path) -> None:
+    config = BootstrapConfig(
+        state_dir=tmp_path,
+        session_id="first-session",
+        persona_name="Aurora",
+        user_name="Alex",
+        user_bio="A software engineer who values brevity and correctness.",
+    )
+    ctx = await BootstrapPipeline(config).run()
+
+    # Self-model should have baseline personality
+    assert ctx.identity.self_model.name == "Aurora"
+    assert "clarity" in ctx.identity.self_model.values
+    assert "action-oriented" in ctx.identity.self_model.traits
+    assert len(ctx.identity.self_model.current_goals) >= 1
+
+    # User-model should have baseline profile
+    assert ctx.identity.user_model.explicit_preferences.get("name") == "Alex"
+    assert ctx.identity.user_model.explicit_preferences.get("bio") == config.user_bio
+    assert len(ctx.identity.user_model.inferred_goals) >= 1
+    assert len(ctx.identity.user_model.known_boundaries) >= 1
+
+    # Moral warning should have been logged
+    events = ctx.tracer.store.query()
+    warnings = [e for e in events if "moral_warning" in str(e.message)]
+    assert len(warnings) == 1
+
+    await ctx.memory.close()
+    await ctx.embeddings.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_subsequent_boot_does_not_reseed(tmp_path: Path) -> None:
+    config = BootstrapConfig(
+        state_dir=tmp_path,
+        session_id="s1",
+        persona_name="Aurora",
+        user_name="Alex",
+    )
+    ctx1 = await BootstrapPipeline(config).run()
+    # Mutate a value to detect re-seeding
+    ctx1.identity.self_model.name = "Modified"
+    ctx1.identity.save()
+    await ctx1.memory.close()
+    await ctx1.embeddings.cache.close()
+
+    ctx2 = await BootstrapPipeline(config).run()
+    assert ctx2.identity.self_model.name == "Modified"
+    await ctx2.memory.close()
+    await ctx2.embeddings.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_clean_boot_reseeds_identity(tmp_path: Path) -> None:
+    config = BootstrapConfig(
+        state_dir=tmp_path,
+        session_id="s1",
+        persona_name="Aurora",
+        user_name="Alex",
+    )
+    ctx1 = await BootstrapPipeline(config).run()
+    ctx1.identity.self_model.name = "Modified"
+    ctx1.identity.save()
+    await ctx1.memory.close()
+    await ctx1.embeddings.cache.close()
+
+    config2 = BootstrapConfig(
+        state_dir=tmp_path,
+        session_id="s2",
+        clean_boot=True,
+        persona_name="Nova",
+        user_name="Jordan",
+    )
+    ctx2 = await BootstrapPipeline(config2).run()
+    assert ctx2.identity.self_model.name == "Nova"
+    assert ctx2.identity.user_model.explicit_preferences.get("name") == "Jordan"
+    await ctx2.memory.close()
+    await ctx2.embeddings.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_restores_executive_snapshot(tmp_path: Path) -> None:
+    config = BootstrapConfig(state_dir=tmp_path, session_id="s1")
+    ctx1 = await BootstrapPipeline(config).run()
+    ctx1.executive.set_intention("restore me")
+    ctx1.executive.add_goal("bootstrap goal")
+    snapshot_path = tmp_path / "executive.json"
+    ctx1.executive.save_snapshot(snapshot_path)
+    await ctx1.memory.close()
+    await ctx1.embeddings.cache.close()
+
+    ctx2 = await BootstrapPipeline(config).run()
+    assert ctx2.executive.intention == "restore me"
+    assert "bootstrap goal" in ctx2.executive.active_goals
+    await ctx2.memory.close()
+    await ctx2.embeddings.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_loads_skills(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    plugins_dir = tmp_path / "plugins"
+    plugins_dir.mkdir(parents=True)
+    skill_file = plugins_dir / "hello_skill.py"
+    skill_file.write_text(
+        "from opencas.plugins import SkillEntry\n"
+        "SKILL_ENTRY = SkillEntry(skill_id='hello', name='Hello', description='Says hello.')\n"
+    )
+    config = BootstrapConfig(state_dir=state_dir, session_id="s1")
+    ctx = await BootstrapPipeline(config).run()
+
+    assert ctx.skill_registry is not None
+    skill = ctx.skill_registry.get("hello")
+    assert skill is not None
+    assert skill.name == "Hello"
+
+    await ctx.memory.close()
+    await ctx.embeddings.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_prefers_explicit_workspace_root(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    workspace_root = tmp_path / "repo"
+    workspace_root.mkdir()
+    config = BootstrapConfig(
+        state_dir=state_dir,
+        session_id="workspace-test",
+        workspace_root=workspace_root,
+    )
+    ctx = await BootstrapPipeline(config).run()
+
+    assert ctx.config.workspace_root == workspace_root.resolve()
+    assert ctx.sandbox.allowed_roots == [workspace_root.resolve()]
+
+    await ctx.memory.close()
+    await ctx.embeddings.cache.close()
+
+
+def test_bootstrap_config_dedupes_workspace_roots(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    primary = tmp_path / "primary"
+    secondary = tmp_path / "secondary"
+    config = BootstrapConfig(
+        state_dir=state_dir,
+        workspace_root=primary,
+        workspace_roots=[secondary, primary],
+    ).resolve_paths()
+
+    roots = config.all_workspace_roots()
+    assert roots == [primary.resolve(), secondary.resolve()]
+    assert config.primary_workspace_root() == primary.resolve()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_copies_provider_material_per_app(tmp_path: Path) -> None:
+    source_dir = tmp_path / "source-auth"
+    source_dir.mkdir()
+    source_config = source_dir / "config.json"
+    source_env = source_dir / ".env"
+    source_env.write_text('GEMINI_API_KEY="gemini-test-key"\n', encoding="utf-8")
+    source_config.write_text(
+        json.dumps(
+            {
+                "authProfiles": {
+                    "kimi-coding:default": {
+                        "provider": "kimi-coding",
+                        "type": "api_key",
+                        "key": "kimi-test-key",
+                    },
+                    "google:default": {
+                        "provider": "google",
+                        "type": "api_key",
+                        "key": "${GEMINI_API_KEY}",
+                    },
+                },
+                "authOrder": {
+                    "kimi-coding": ["kimi-coding:default"],
+                    "google": ["google:default"],
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        session_id="provider-copy-test",
+        default_llm_model="kimi-coding/k2p5",
+        credential_source_config_path=source_config,
+        credential_source_env_path=source_env,
+        credential_profile_ids=["kimi-coding:default", "google:default"],
+        credential_env_keys=["GEMINI_API_KEY"],
+    )
+    ctx = await BootstrapPipeline(config).run()
+
+    copied_config = ctx.config.state_dir / "provider_material" / "config.json"
+    copied_env = ctx.config.state_dir / "provider_material" / ".env"
+    assert copied_config.exists()
+    assert copied_env.exists()
+
+    copied_payload = json.loads(copied_config.read_text(encoding="utf-8"))
+    assert sorted(copied_payload["authProfiles"].keys()) == [
+        "google:default",
+        "kimi-coding:default",
+    ]
+    assert (
+        copied_payload["authProfiles"]["kimi-coding:default"]["key"] == "kimi-test-key"
+    )
+    assert copied_env.read_text(encoding="utf-8").strip() == 'GEMINI_API_KEY="gemini-test-key"'
+
+    await ctx.memory.close()
+    await ctx.embeddings.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_disables_hnsw_on_python_314_plus(tmp_path: Path) -> None:
+    config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        session_id="hnsw-guard-test",
+    )
+    ctx = await BootstrapPipeline(config).run()
+
+    if sys.version_info >= (3, 14):
+        assert ctx.embeddings.cache.hnsw_backend is None
+
+    await ctx.memory.close()
+    await ctx.embeddings.cache.close()
+
+
+def test_cli_bootstrap_config_preserves_default_embedding_model_when_flag_omitted(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        state_dir=str(tmp_path / "state"),
+        session_id="cli-test",
+        agent_profile_id="general_technical_operator",
+        workspace_root=str(tmp_path),
+        workspace_extra_root=[],
+        default_llm_model=None,
+        embedding_model_id=None,
+        provider_config_path=None,
+        provider_env_path=None,
+        credential_source_config_path=None,
+        credential_source_env_path=None,
+        credential_profile_id=[],
+        credential_env_key=[],
+        telegram_enabled=None,
+        telegram_bot_token=None,
+        telegram_dm_policy=None,
+        telegram_allow_from=[],
+        telegram_poll_interval=None,
+        telegram_pairing_ttl=None,
+    )
+    persisted_telegram = SimpleNamespace(
+        enabled=False,
+        bot_token=None,
+        dm_policy="pairing",
+        allow_from=[],
+        poll_interval_seconds=1.0,
+        pairing_ttl_seconds=3600,
+        api_base_url="https://api.telegram.org",
+    )
+
+    config = _build_bootstrap_config(args, persisted_telegram)
+
+    assert config.default_llm_model == "anthropic/claude-sonnet-4-6"
+    assert config.embedding_model_id == "google/gemini-embedding-2-preview"
+
+
+def test_cli_bootstrap_config_prefers_materialized_bundle_default_model(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    provider_material = state_dir / "provider_material"
+    provider_material.mkdir(parents=True)
+    (provider_material / "config.json").write_text(
+        json.dumps({"defaultModel": "kimi-coding/k2p5"}),
+        encoding="utf-8",
+    )
+    args = SimpleNamespace(
+        state_dir=str(state_dir),
+        session_id="cli-test",
+        agent_profile_id="general_technical_operator",
+        workspace_root=str(tmp_path),
+        workspace_extra_root=[],
+        default_llm_model=None,
+        embedding_model_id=None,
+        provider_config_path=None,
+        provider_env_path=None,
+        credential_source_config_path=None,
+        credential_source_env_path=None,
+        credential_profile_id=[],
+        credential_env_key=[],
+        telegram_enabled=None,
+        telegram_bot_token=None,
+        telegram_dm_policy=None,
+        telegram_allow_from=[],
+        telegram_poll_interval=None,
+        telegram_pairing_ttl=None,
+    )
+    persisted_telegram = SimpleNamespace(
+        enabled=False,
+        bot_token=None,
+        dm_policy="pairing",
+        allow_from=[],
+        poll_interval_seconds=1.0,
+        pairing_ttl_seconds=3600,
+        api_base_url="https://api.telegram.org",
+    )
+
+    config = _build_bootstrap_config(args, persisted_telegram)
+
+    assert config.default_llm_model == "kimi-coding/k2p5"
+    assert config.embedding_model_id == "google/gemini-embedding-2-preview"
+
+
+def test_pipeline_prefers_resolvable_gemini_embedding_model(tmp_path: Path) -> None:
+    pipeline = BootstrapPipeline(BootstrapConfig(state_dir=tmp_path, embedding_model_id=None))
+
+    class FakeLLM:
+        def _resolve(self, model_ref: str):
+            if model_ref == "google/gemini-embedding-2-preview":
+                return object()
+            raise ValueError(model_ref)
+
+    pipeline._llm = FakeLLM()
+
+    assert pipeline._resolve_embedding_model() == "google/gemini-embedding-2-preview"

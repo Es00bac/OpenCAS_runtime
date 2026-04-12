@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCAS API Reference</title>
+  <meta name="description" content="Current OpenCAS API reference covering config, chat, memory, operations, usage, identity, executive, Telegram, and WebSocket surfaces.">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-shell">
+      <a class="brand" href="../index.html">
+        <span class="brand-mark mono">O</span>
+        <span>OpenCAS Release</span>
+      </a>
+      <nav class="nav-links">
+        <a href="../index.html">Home</a>
+        <a href="../installation.html">Installation</a>
+        <a href="../usage.html">Usage</a>
+        <a href="../features.html">Features</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="site-shell">
+    <section class="page-hero">
+      <span class="eyebrow">API</span>
+      <h1>Current HTTP and WebSocket surface.</h1>
+      <p>The default server base is <code>http://127.0.0.1:8080</code>. This page focuses on the routes operators and integrations will actually use.</p>
+    </section>
+
+    <div class="content-stack">
+      <section class="page-card">
+        <h3>Core entry points</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Method</th>
+                <th>Path</th>
+                <th>Purpose</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>GET</td><td><code>/health</code></td><td>Basic process health.</td></tr>
+              <tr><td>GET</td><td><code>/readiness</code></td><td>Runtime readiness snapshot.</td></tr>
+              <tr><td>GET</td><td><code>/dashboard</code></td><td>Main operator dashboard.</td></tr>
+              <tr><td>POST</td><td><code>/chat</code></td><td>Legacy simple chat compatibility endpoint.</td></tr>
+              <tr><td>WS</td><td><code>/ws</code></td><td>WebSocket bridge for event and chat traffic.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>API domains</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Domain</th>
+                <th>Representative routes</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Config</td><td><code>/api/config</code>, <code>/api/config/providers</code>, <code>/api/config/overview</code></td></tr>
+              <tr><td>Monitor</td><td><code>/api/monitor/health</code>, <code>/api/monitor/runtime</code>, <code>/api/monitor/events</code>, <code>/api/monitor/embeddings</code></td></tr>
+              <tr><td>Chat</td><td><code>/api/chat/sessions</code>, <code>/api/chat/context-summary</code>, <code>/api/chat/send</code></td></tr>
+              <tr><td>Daydream</td><td><code>/api/daydream/summary</code>, <code>/api/daydream/reflections</code>, <code>/api/daydream/conflicts</code>, <code>/api/daydream/promotions</code></td></tr>
+              <tr><td>Memory</td><td><code>/api/memory/stats</code>, <code>/api/memory/landscape</code>, <code>/api/memory/node-detail</code>, <code>/api/memory/retrieval-inspect</code></td></tr>
+              <tr><td>Operations</td><td><code>/api/operations/sessions</code>, <code>/api/operations/receipts</code>, <code>/api/operations/tasks</code>, <code>/api/operations/work</code>, <code>/api/operations/qualification</code></td></tr>
+              <tr><td>Usage</td><td><code>/api/usage/overview</code></td></tr>
+              <tr><td>Identity</td><td><code>/api/identity</code>, <code>/api/identity/self</code>, <code>/api/identity/user</code>, <code>/api/identity/musubi</code>, <code>/api/identity/somatic</code></td></tr>
+              <tr><td>Executive</td><td><code>/api/executive</code>, <code>/api/executive/snapshot</code>, <code>/api/executive/commitments</code>, <code>/api/executive/plans</code></td></tr>
+              <tr><td>Telegram</td><td><code>/api/telegram/status</code>, <code>/api/telegram/config</code>, <code>/api/telegram/pairings/{code}/approve</code></td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>Example requests</h3>
+        <pre><code>curl -X POST http://127.0.0.1:8080/api/chat/send \
+  -H "Content-Type: application/json" \
+  -d '{"session_id":"default","message":"Hello OpenCAS"}'</code></pre>
+        <pre><code>curl "http://127.0.0.1:8080/api/chat/context-summary"</code></pre>
+        <pre><code>curl "http://127.0.0.1:8080/api/memory/landscape?limit=40&amp;edge_kind=semantic"</code></pre>
+        <pre><code>curl "http://127.0.0.1:8080/api/usage/overview?window_days=7&amp;bucket_hours=6"</code></pre>
+      </section>
+
+      <section class="page-card">
+        <h3>Notes</h3>
+        <ul class="list">
+          <li>The mounted FastAPI app also exposes <code>/openapi.json</code>, <code>/docs</code>, and <code>/redoc</code>.</li>
+          <li>The current running app exposes a large surface; the tables above emphasize the stable operator-facing routes instead of listing every process-control variant inline.</li>
+          <li>For detailed route examples, use the <a href="../../api/README.md">markdown API reference</a> and the live FastAPI schema together.</li>
+        </ul>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="site-shell">
+      <div><a href="../../api/README.md">Markdown source</a></div>
+      <div><a href="../index.html">Back to release index</a></div>
+    </div>
+  </footer>
+</body>
+</html>

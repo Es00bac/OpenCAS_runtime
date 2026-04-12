@@ -1,0 +1,407 @@
+"""ReAct-style tool-use loop for OpenCAS."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from typing import Any, Callable, Dict, List, Optional
+
+from opencas.api import LLMClient
+from opencas.autonomy.models import ActionRiskTier
+from opencas.autonomy.self_approval import SelfApprovalLadder
+from opencas.memory import EpisodeKind
+from opencas.telemetry import EventKind, Tracer
+from opencas.tools.registry import ToolRegistry
+from opencas.tools.schema import build_tool_schemas
+
+from .context import ToolUseContext, ToolUseResult, UserInputRequired
+from .loop_guard import ToolLoopGuard
+
+
+class ToolUseLoop:
+    """Iterative tool-use loop: LLM plans, tools execute, observations feed back."""
+
+    def __init__(
+        self,
+        llm: LLMClient,
+        tools: ToolRegistry,
+        approval: SelfApprovalLadder,
+        tracer: Optional[Tracer] = None,
+    ) -> None:
+        self.llm = llm
+        self.tools = tools
+        self.approval = approval
+        self.tracer = tracer
+
+    async def run(
+        self,
+        objective: str,
+        messages: List[Dict[str, Any]],
+        ctx: ToolUseContext,
+        payload: Optional[Dict[str, Any]] = None,
+        on_focus_enter: Optional[Callable[[], None]] = None,
+        on_focus_exit: Optional[Callable[[], None]] = None,
+    ) -> ToolUseResult:
+        """Run the loop until the LLM finishes or max iterations are reached."""
+        if messages and messages[0].get("role") != "system":
+            messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an autonomous assistant. You have access to tools. "
+                        "Use them only when they materially help accomplish the user's objective. "
+                        "Prefer answering directly when no tool is required. "
+                        "Prefer composite tools over low-level multi-step tool sequences when both are available. "
+                        "Avoid repeated polling or observation loops unless the objective explicitly requires them. "
+                        "When you are done, provide a concise summary of what you did."
+                        + (" You are in PLAN MODE: only read files and write to the plans directory." if ctx.plan_mode else "")
+                    ),
+                },
+                *messages,
+            ]
+        elif messages:
+            # Inject plan mode constraint into existing system message
+            first = messages[0]
+            if ctx.plan_mode and "PLAN MODE" not in str(first.get("content", "")):
+                first["content"] = (
+                    str(first.get("content", ""))
+                    + " You are in PLAN MODE: only read files and write to the plans directory."
+                )
+
+        all_tool_calls: List[Dict[str, Any]] = []
+        iterations = 0
+        guard = ToolLoopGuard()
+        _in_focus_mode = False
+
+        available_tools = self._filter_tools(ctx, objective=objective)
+        schemas = build_tool_schemas(available_tools)
+
+        def _check_guard(tc: Dict[str, Any]) -> Optional[str]:
+            return guard.record_call(ctx.session_id, tc["name"], tc.get("args", {}))
+
+        try:
+            while iterations < ctx.max_iterations:
+                iterations += 1
+                response = await self.llm.chat_completion(
+                    messages=messages,
+                    tools=schemas if schemas else None,
+                    payload=payload,
+                    source="tool_use_loop",
+                    session_id=ctx.session_id,
+                    task_id=ctx.task_id,
+                )
+
+                message = response.get("choices", [{}])[0].get("message", {})
+                raw_tool_calls = message.get("tool_calls") or []
+
+                # Append assistant message (with or without tool calls)
+                assistant_msg: Dict[str, Any] = {"role": "assistant"}
+                content = message.get("content")
+                if content:
+                    assistant_msg["content"] = content
+                if raw_tool_calls:
+                    assistant_msg["tool_calls"] = raw_tool_calls
+                messages.append(assistant_msg)
+
+                if not raw_tool_calls:
+                    final = content or "Done."
+                    return ToolUseResult(
+                        final_output=final,
+                        messages=messages,
+                        tool_calls=all_tool_calls,
+                        iterations=iterations,
+                    )
+
+                tool_calls = self._normalize_tool_calls(raw_tool_calls)
+                all_tool_calls.extend(tool_calls)
+                fulfilled_ids: set[str] = set()
+
+                # Partition into concurrent (readonly) and serial (everything else)
+                concurrent_calls: List[Dict[str, Any]] = []
+                serial_calls: List[Dict[str, Any]] = []
+                for tc in tool_calls:
+                    entry = self.tools.get(tc["name"])
+                    if entry and entry.risk_tier == ActionRiskTier.READONLY:
+                        concurrent_calls.append(tc)
+                    else:
+                        serial_calls.append(tc)
+
+                # Guard check for concurrent batch
+                for tc in concurrent_calls:
+                    guard_reason = _check_guard(tc)
+                    if guard_reason:
+                        self._trace("tool_loop_guard_fired", {"reason": guard_reason, "session_id": ctx.session_id, "tool_loop_guard_fires": 1})
+                        for _tc in tool_calls:
+                            if _tc["id"] not in fulfilled_ids:
+                                messages.append(self._build_tool_result_message(_tc, {
+                                    "success": False,
+                                    "output": f"[Tool loop halted] {guard_reason}",
+                                    "metadata": {"guard_fired": True},
+                                }))
+                                fulfilled_ids.add(_tc["id"])
+                        return ToolUseResult(
+                            final_output=f"[Tool loop halted] {guard_reason}",
+                            messages=messages,
+                            tool_calls=all_tool_calls,
+                            iterations=iterations,
+                            guard_fired=True,
+                        )
+
+                # Execute concurrent batch
+                if concurrent_calls:
+                    results = await asyncio.gather(
+                        *[self._execute_tool_call(tc, ctx) for tc in concurrent_calls],
+                        return_exceptions=True,
+                    )
+                    for tc, result in zip(concurrent_calls, results):
+                        if isinstance(result, Exception):
+                            result = {"success": False, "output": str(result), "metadata": {}}
+                        messages.append(self._build_tool_result_message(tc, result))
+                        fulfilled_ids.add(tc["id"])
+
+                # Guard check and execute serial batch
+                for tc in serial_calls:
+                    guard_reason = _check_guard(tc)
+                    if guard_reason:
+                        self._trace("tool_loop_guard_fired", {"reason": guard_reason, "session_id": ctx.session_id, "tool_loop_guard_fires": 1})
+                        for _tc in tool_calls:
+                            if _tc["id"] not in fulfilled_ids:
+                                messages.append(self._build_tool_result_message(_tc, {
+                                    "success": False,
+                                    "output": f"[Tool loop halted] {guard_reason}",
+                                    "metadata": {"guard_fired": True},
+                                }))
+                                fulfilled_ids.add(_tc["id"])
+                        return ToolUseResult(
+                            final_output=f"[Tool loop halted] {guard_reason}",
+                            messages=messages,
+                            tool_calls=all_tool_calls,
+                            iterations=iterations,
+                            guard_fired=True,
+                        )
+                    try:
+                        result = await self._execute_tool_call(tc, ctx)
+                    except Exception as exc:
+                        result = {"success": False, "output": str(exc), "metadata": {}}
+                    messages.append(self._build_tool_result_message(tc, result))
+                    fulfilled_ids.add(tc["id"])
+
+                # Auto-enter focus mode when round depth crosses the threshold
+                if not _in_focus_mode and guard.is_deep(ctx.session_id) and on_focus_enter:
+                    on_focus_enter()
+                    _in_focus_mode = True
+
+            # Max iterations reached
+            return ToolUseResult(
+                final_output="Reached maximum number of tool-use iterations.",
+                messages=messages,
+                tool_calls=all_tool_calls,
+                iterations=iterations,
+            )
+        finally:
+            guard.reset(ctx.session_id)
+            if _in_focus_mode and on_focus_exit:
+                on_focus_exit()
+
+    def _filter_tools(self, ctx: ToolUseContext, objective: str = "") -> List[Any]:
+        """Filter available tools based on plan mode and runtime constraints."""
+        tools = self.tools.list_tools()
+        if not ctx.plan_mode:
+            return self._select_tools_for_objective(tools, objective)
+        # In plan mode: only read-only tools + write_file restricted to plans dir
+        allowed: List[Any] = []
+        for entry in tools:
+            if entry.risk_tier == ActionRiskTier.READONLY:
+                allowed.append(entry)
+            elif entry.name == "fs_write_file":
+                allowed.append(entry)
+        return allowed
+
+    def _select_tools_for_objective(self, tools: List[Any], objective: str) -> List[Any]:
+        """Select a smaller, relevant tool subset for the current objective."""
+        text = (objective or "").lower()
+        selected_names: set[str] = set()
+
+        if any(token in text for token in ("runtime", "workflow", "status", "profile", "constraint", "operating roots")):
+            selected_names.update({"runtime_status", "workflow_status"})
+            selected_names.update(
+                entry.name for entry in tools if entry.name.startswith("workflow_")
+            )
+
+        if any(token in text for token in ("commitment", "goal", "track", "promise", "deadline")):
+            selected_names.update({
+                "workflow_create_commitment",
+                "workflow_update_commitment",
+                "workflow_list_commitments",
+            })
+        if any(token in text for token in ("write", "writing", "draft", "document", "article", "note", "essay")):
+            selected_names.update({
+                "workflow_create_writing_task",
+                "workflow_create_plan",
+                "workflow_update_plan",
+                "fs_read_file",
+                "fs_write_file",
+            })
+        if any(token in text for token in ("triage", "repo", "overview", "summary", "audit")):
+            selected_names.update({"workflow_repo_triage"})
+        if any(token in text for token in ("supervise", "delegate", "launch claude", "launch codex", "launch kilocode", "launch kilo", "operator")):
+            selected_names.update({"workflow_supervise_session", "pty_kill", "pty_remove"})
+
+        if any(token in text for token in ("browser", "web", "page", "site", "url", "http", "https", "data:text")):
+            selected_names.update(
+                entry.name for entry in tools if entry.name.startswith("browser_")
+            )
+        if any(token in text for token in ("pty", "terminal", "tui", "claude", "codex", "kilocode", "kilo", "kilo-code", "vim", "editor", "shell session")):
+            selected_names.update({"pty_interact", "pty_remove", "pty_clear"})
+        if any(token in text for token in ("poll", "session_id", "resize", "control sequence")):
+            selected_names.update(
+                entry.name for entry in tools if entry.name.startswith("pty_")
+            )
+        if any(token in text for token in ("process", "server", "background", "daemon")):
+            selected_names.update(
+                entry.name for entry in tools if entry.name.startswith("process_")
+            )
+        if any(token in text for token in ("search", "grep", "find", "code", "repo", "project", "write", "file", "edit")):
+            selected_names.update(
+                {
+                    "fs_read_file",
+                    "fs_list_dir",
+                    "fs_write_file",
+                    "bash_run_command",
+                    "lsp_diagnostics",
+                    "agent",
+                }
+            )
+        if any(token in text for token in ("plan", "planning", "checklist", "roadmap")):
+            selected_names.update({"enter_plan_mode", "exit_plan_mode"})
+
+        # Default exploration toolkit when no specific keywords match
+        if not selected_names:
+            selected_names.update({
+                "fs_read_file",
+                "fs_list_dir",
+                "bash_run_command",
+                "agent",
+            })
+
+        selected = [entry for entry in tools if entry.name in selected_names]
+        return selected
+
+    def _normalize_tool_calls(
+        self, raw_tool_calls: List[Dict[str, Any]]
+    ) -> List[Dict[str, Any]]:
+        """Normalize tool call structure from various LLM providers."""
+        normalized: List[Dict[str, Any]] = []
+        for tc in raw_tool_calls:
+            func = tc.get("function", {})
+            name = func.get("name") or tc.get("name", "")
+            arguments = func.get("arguments") or tc.get("arguments", "")
+            if isinstance(arguments, str):
+                try:
+                    args = json.loads(arguments)
+                except json.JSONDecodeError:
+                    args = {"raw": arguments}
+            else:
+                args = dict(arguments)
+            normalized.append(
+                {
+                    "id": tc.get("id", ""),
+                    "name": name,
+                    "args": args,
+                }
+            )
+        return normalized
+
+    async def _execute_tool_call(
+        self, tc: Dict[str, Any], ctx: ToolUseContext
+    ) -> Dict[str, Any]:
+        """Execute a single tool call with approval gating and memory recording."""
+        name = tc["name"]
+        args = tc["args"]
+
+        # Plan mode path restriction for fs_write_file
+        if ctx.plan_mode and name == "fs_write_file":
+            from pathlib import Path
+
+            file_path = str(args.get("file_path", ""))
+            plans_dir = ctx.runtime.ctx.config.state_dir / "plans"
+            resolved = Path(file_path).expanduser().resolve()
+            try:
+                resolved.relative_to(plans_dir)
+            except ValueError:
+                return {
+                    "success": False,
+                    "output": f"Plan mode blocked write outside {plans_dir}: {file_path}",
+                    "metadata": {},
+                }
+
+        # Use the runtime's execute_tool for full approval + somatic + goal tracking
+        result = await ctx.runtime.execute_tool(name, args)
+
+        # Plan mode state transitions
+        if name == "enter_plan_mode" and result.get("success"):
+            ctx.plan_mode = True
+            ctx.active_plan_id = result.get("metadata", {}).get("plan_id")
+        elif name == "exit_plan_mode" and result.get("success"):
+            ctx.plan_mode = False
+            ctx.active_plan_id = None
+
+        # Persist plan actions when in plan mode
+        if ctx.plan_mode and ctx.active_plan_id:
+            plan_id = ctx.active_plan_id
+            plan_store = getattr(ctx.runtime.ctx, "plan_store", None)
+            if plan_store is not None:
+                try:
+                    await plan_store.record_action(
+                        plan_id=plan_id,
+                        tool_name=name,
+                        args=args,
+                        result_summary=str(result.get("output", ""))[:1024],
+                        success=bool(result.get("success", False)),
+                    )
+                except Exception:
+                    pass
+
+        # Record episode for notable actions
+        if result.get("success"):
+            await ctx.runtime._record_episode(
+                content=f"tool {name}: {json.dumps(args)}",
+                kind=EpisodeKind.ACTION,
+                session_id=ctx.session_id,
+            )
+        else:
+            await ctx.runtime._record_episode(
+                content=f"tool {name} failed: {result.get('output', '')}",
+                kind=EpisodeKind.OBSERVATION,
+                session_id=ctx.session_id,
+            )
+
+        # Interactive special case
+        if name == "ask_user_question" and not result.get("success"):
+            # The interactive adapter returns failure with the question when it wants to pause
+            output = result.get("output", "")
+            raise UserInputRequired(output)
+
+        return result
+
+    def _build_tool_result_message(
+        self, tc: Dict[str, Any], result: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Build an OpenAI-compatible tool result message."""
+        content = result.get("output", "")
+        if not isinstance(content, str):
+            content = json.dumps(content)
+        return {
+            "role": "tool",
+            "tool_call_id": tc.get("id", ""),
+            "name": tc["name"],
+            "content": content,
+        }
+
+    def _trace(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
+        if self.tracer:
+            self.tracer.log(
+                EventKind.TOOL_CALL,
+                f"ToolUseLoop: {event}",
+                payload or {},
+            )

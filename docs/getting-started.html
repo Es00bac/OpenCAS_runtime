@@ -1,0 +1,960 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenCAS — Getting Started Guide</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --surface: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --text-muted: #8b949e;
+    --accent: #58a6ff;
+    --accent-dim: #1f6feb;
+    --green: #3fb950;
+    --yellow: #d29922;
+    --red: #f85149;
+    --orange: #db6d28;
+    --code-bg: #0d1117;
+    --code-border: #21262d;
+    --radius: 8px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.7;
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 40px 24px 120px;
+  }
+
+  h1 {
+    font-size: 2.2em;
+    font-weight: 700;
+    margin-bottom: 8px;
+    letter-spacing: -0.5px;
+  }
+
+  h1 small {
+    display: block;
+    font-size: 0.4em;
+    font-weight: 400;
+    color: var(--text-muted);
+    margin-top: 4px;
+  }
+
+  h2 {
+    font-size: 1.5em;
+    font-weight: 600;
+    margin-top: 56px;
+    margin-bottom: 16px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--border);
+    color: var(--accent);
+  }
+
+  h3 {
+    font-size: 1.15em;
+    font-weight: 600;
+    margin-top: 32px;
+    margin-bottom: 12px;
+  }
+
+  p, li { color: var(--text); }
+  p { margin-bottom: 14px; }
+
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  ul, ol { margin: 0 0 16px 24px; }
+  li { margin-bottom: 6px; }
+
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+    font-size: 0.88em;
+    background: var(--code-bg);
+    border: 1px solid var(--code-border);
+    border-radius: 4px;
+    padding: 2px 6px;
+  }
+
+  .code-block {
+    position: relative;
+    margin: 16px 0 20px;
+  }
+
+  .code-block pre {
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
+    font-size: 0.85em;
+    line-height: 1.6;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    overflow-x: auto;
+    white-space: pre;
+    color: var(--text);
+  }
+
+  .code-block .copy-btn {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    background: var(--border);
+    color: var(--text-muted);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 4px 10px;
+    font-size: 0.75em;
+    cursor: pointer;
+    opacity: 0;
+    transition: opacity 0.15s;
+  }
+
+  .code-block:hover .copy-btn { opacity: 1; }
+  .code-block .copy-btn:hover { background: var(--accent-dim); color: #fff; }
+  .code-block .copy-btn.copied { background: var(--green); color: #fff; opacity: 1; }
+
+  .code-block .lang-label {
+    position: absolute;
+    top: 0;
+    left: 16px;
+    background: var(--border);
+    color: var(--text-muted);
+    font-size: 0.7em;
+    font-family: inherit;
+    padding: 1px 8px;
+    border-radius: 0 0 4px 4px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .callout {
+    border-left: 4px solid var(--accent);
+    background: var(--surface);
+    border-radius: 0 var(--radius) var(--radius) 0;
+    padding: 14px 18px;
+    margin: 20px 0;
+  }
+
+  .callout.warn {
+    border-left-color: var(--yellow);
+  }
+
+  .callout.danger {
+    border-left-color: var(--red);
+  }
+
+  .callout.success {
+    border-left-color: var(--green);
+  }
+
+  .callout strong {
+    display: block;
+    margin-bottom: 4px;
+  }
+
+  .step-num {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 28px;
+    height: 28px;
+    background: var(--accent-dim);
+    color: #fff;
+    border-radius: 50%;
+    font-size: 0.85em;
+    font-weight: 700;
+    margin-right: 8px;
+    flex-shrink: 0;
+  }
+
+  .step-header {
+    display: flex;
+    align-items: center;
+    margin-top: 28px;
+    margin-bottom: 10px;
+    font-size: 1.1em;
+    font-weight: 600;
+  }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 16px 0;
+    font-size: 0.9em;
+  }
+
+  th, td {
+    text-align: left;
+    padding: 10px 14px;
+    border: 1px solid var(--border);
+  }
+
+  th {
+    background: var(--surface);
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  td code { font-size: 0.85em; }
+
+  .toc {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 20px 24px;
+    margin: 24px 0 40px;
+  }
+
+  .toc h3 {
+    margin: 0 0 12px;
+    font-size: 0.95em;
+    color: var(--text-muted);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .toc ol { margin: 0; padding-left: 20px; }
+  .toc li { margin-bottom: 4px; font-size: 0.95em; }
+
+  .file-tree {
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 0.82em;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 16px 20px;
+    margin: 16px 0;
+    line-height: 1.8;
+    color: var(--text-muted);
+  }
+  .file-tree .dir { color: var(--accent); }
+  .file-tree .db { color: var(--yellow); }
+  .file-tree .json { color: var(--green); }
+
+  hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 48px 0;
+  }
+
+  .badge {
+    display: inline-block;
+    font-size: 0.75em;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 10px;
+    vertical-align: middle;
+  }
+  .badge.required { background: var(--red); color: #fff; }
+  .badge.optional { background: var(--border); color: var(--text-muted); }
+  .badge.default { background: var(--accent-dim); color: #fff; }
+</style>
+</head>
+<body>
+
+<h1>OpenCAS
+  <small>Operator Guide: Bootstrap, Run, and Supervise Your First Agent</small>
+</h1>
+
+<div class="toc">
+  <h3>Contents</h3>
+  <ol>
+    <li><a href="#prereqs">Prerequisites</a></li>
+    <li><a href="#credentials">Set Up LLM Credentials</a></li>
+    <li><a href="#first-boot">First Boot: Start the Agent</a></li>
+    <li><a href="#state-dir">Understanding the State Directory</a></li>
+    <li><a href="#dashboard">Using the Dashboard</a></li>
+    <li><a href="#terminal-chat">Terminal Chat via API</a></li>
+    <li><a href="#websocket">WebSocket Live Chat</a></li>
+    <li><a href="#give-work">Give the Agent Work</a></li>
+    <li><a href="#inspect">Inspect Agent State</a></li>
+    <li><a href="#operations">Operations Control Plane</a></li>
+    <li><a href="#supervised">Supervised Readiness Checklist</a></li>
+    <li><a href="#shutdown">Shutdown and Restart</a></li>
+    <li><a href="#troubleshooting">Troubleshooting</a></li>
+    <li><a href="#cli-ref">CLI Reference</a></li>
+  </ol>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="prereqs">1. Prerequisites</h2>
+
+<ul>
+  <li><strong>Python 3.11+</strong> (3.12 or 3.13 recommended; 3.14 disables HNSW)</li>
+  <li><strong>open_llm_auth</strong> installed as an editable dependency (already wired in <code>requirements.txt</code>)</li>
+  <li>At least one LLM provider API key (Anthropic, Google, Kimi, OpenAI, etc.)</li>
+  <li>Optional: Qdrant server for production-grade vector search</li>
+</ul>
+
+<div class="step-header"><span class="step-num">1</span> Activate the virtual environment and install dependencies</div>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>cd /mnt/xtra/OpenCAS
+source .venv/bin/activate
+pip install -r requirements.txt</pre>
+</div>
+
+<div class="step-header"><span class="step-num">2</span> Verify the install</div>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>python -m opencas --help</pre>
+</div>
+
+<p>You should see the full argument list. If you get an import error, ensure <code>open_llm_auth</code> is installed:</p>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>pip install -e /mnt/xtra/open_llm_auth/</pre>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="credentials">2. Set Up LLM Credentials</h2>
+
+<p>OpenCAS uses <strong>open_llm_auth</strong> as its LLM gateway. It needs a provider config with at least one working auth profile. There are three approaches:</p>
+
+<h3>Option A: Use your existing OpenLLMAuth config (simplest)</h3>
+
+<p>If you already have <code>~/.open_llm_auth/config.json</code> with profiles configured, OpenCAS will find it automatically. No extra flags needed.</p>
+
+<h3>Option B: Copy specific credentials into app-local state</h3>
+
+<p>This copies selected profiles from your global config into the agent's own state directory, isolating it from your main config:</p>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>python -m opencas \
+  --with-server \
+  --credential-source-config-path ~/.open_llm_auth/config.json \
+  --credential-profile-id "anthropic:claude-code-pro" \
+  --credential-profile-id "kimi-coding:default" \
+  --credential-env-key "GOOGLE_API_KEY"</pre>
+</div>
+
+<h3>Option C: Point to a custom config directly</h3>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>python -m opencas \
+  --with-server \
+  --provider-config-path /path/to/my/config.json \
+  --provider-env-path /path/to/my/.env</pre>
+</div>
+
+<div class="callout warn">
+  <strong>Embedding model</strong>
+  <p>By default, OpenCAS uses <code>google/gemini-embedding-2-preview</code> for embeddings, which requires a Google API key. If you don't have one, override to local-only embeddings:</p>
+</div>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>python -m opencas --with-server --embedding-model-id local-fallback</pre>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="first-boot">3. First Boot: Start the Agent</h2>
+
+<p>The minimum command to start OpenCAS with the dashboard and API server:</p>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>cd /mnt/xtra/OpenCAS
+source .venv/bin/activate
+
+python -m opencas --with-server</pre>
+</div>
+
+<p>This will:</p>
+<ol>
+  <li>Create the state directory at <code>./.opencas/</code> (configurable via <code>--state-dir</code>)</li>
+  <li>Run the full bootstrap pipeline (identity, memory, embeddings, somatic, relational, ToM, plugins, etc.)</li>
+  <li>Start the FastAPI server on <code>http://127.0.0.1:8080</code></li>
+  <li>Start the autonomous background scheduler (creative cycles, daydreaming, BAA heartbeat, consolidation)</li>
+</ol>
+
+<div class="callout success">
+  <strong>First boot is special</strong>
+  <p>On first boot (boot_count == 0), OpenCAS seeds default identity values, emits a moral-warning trace, and initializes the relational field at baseline. Subsequent boots restore existing state.</p>
+</div>
+
+<h3>Full production-style launch example</h3>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>python -m opencas \
+  --with-server \
+  --state-dir ~/.opencas/agents/main \
+  --workspace-root /mnt/xtra/OpenCAS \
+  --workspace-extra-root /mnt/xtra/open_llm_auth \
+  --session-id "session-$(date +%Y%m%d-%H%M%S)" \
+  --default-llm-model "anthropic/claude-sonnet-4-6" \
+  --embedding-model-id "google/gemini-embedding-2-preview" \
+  --host 127.0.0.1 \
+  --port 8080 \
+  --cycle-interval 300 \
+  --consolidation-interval 86400</pre>
+</div>
+
+<h3>Headless mode (no server, background loops only)</h3>
+
+<p>Omit <code>--with-server</code> to run only the autonomous scheduler. The agent will cycle, daydream, and run BAA tasks but won't expose a dashboard or API:</p>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>python -m opencas --state-dir ~/.opencas/agents/main</pre>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="state-dir">4. Understanding the State Directory</h2>
+
+<p>All agent state lives under the <code>--state-dir</code> path. On a fresh boot, the pipeline creates:</p>
+
+<div class="file-tree">
+<span class="dir">.opencas/</span>
+├── <span class="db">memory.db</span>          &larr; episode storage (conversations, events)
+├── <span class="db">embeddings.db</span>       &larr; vector cache (computed embeddings)
+├── <span class="db">context.db</span>          &larr; session conversation history
+├── <span class="db">tasks.db</span>            &larr; BAA task queue and transition records
+├── <span class="db">receipts.db</span>         &larr; execution receipt audit trail
+├── <span class="db">work.db</span>             &larr; creative ladder work objects
+├── <span class="db">relational.db</span>       &larr; musubi state and history
+├── <span class="db">tom.db</span>              &larr; theory of mind beliefs/intentions
+├── <span class="db">plans.db</span>            &larr; structured plans
+├── <span class="db">commitments.db</span>      &larr; durable goal commitments
+├── <span class="db">portfolio.db</span>        &larr; portfolio clusters
+├── <span class="db">daydream.db</span>         &larr; daydream reflections
+├── <span class="db">conflict.db</span>         &larr; conflict registry
+├── <span class="db">governance.db</span>       &larr; approval ledger
+├── <span class="db">plugins.db</span>          &larr; plugin/skill registry
+├── <span class="db">harness.db</span>          &larr; research notebooks, objective loops
+├── <span class="db">curation.db</span>         &larr; consolidation curation
+├── <span class="db">somatic.db</span>          &larr; somatic snapshot history
+├── <span class="json">somatic.json</span>        &larr; live somatic state
+├── <span class="json">executive.json</span>      &larr; executive state snapshot (goals, intention)
+├── <span class="dir">identity/</span>           &larr; self-model, user-model, continuity
+├── <span class="dir">self_knowledge.jsonl</span> &larr; structured self-beliefs
+├── <span class="dir">telemetry/</span>          &larr; JSONL event traces and token usage
+└── <span class="dir">provider_material/</span>  &larr; copied auth credentials (if using --credential-*)
+</div>
+
+<div class="callout">
+  <strong>Multiple agents</strong>
+  <p>You can run multiple agents with separate state dirs. Each one is fully isolated:</p>
+</div>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre># Agent A on port 8080
+python -m opencas --with-server --state-dir ~/.opencas/agents/alpha --port 8080
+
+# Agent B on port 8081 (separate terminal)
+python -m opencas --with-server --state-dir ~/.opencas/agents/beta --port 8081</pre>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="dashboard">5. Using the Dashboard</h2>
+
+<p>Once the server is running, open your browser:</p>
+
+<div class="code-block">
+  <span class="lang-label">url</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>http://127.0.0.1:8080/dashboard</pre>
+</div>
+
+<p>The dashboard has six tabs:</p>
+
+<table>
+  <thead><tr><th>Tab</th><th>What It Shows</th></tr></thead>
+  <tbody>
+    <tr><td><strong>Overview</strong></td><td>Agent identity, readiness state, somatic state, executive snapshot, active goals, musubi score, qualification summary</td></tr>
+    <tr><td><strong>Health</strong></td><td>Doctor health checks (memory, embeddings, BAA queue depth, compaction lag), health check history</td></tr>
+    <tr><td><strong>Chat</strong></td><td>Interactive chat interface &mdash; send messages and see responses directly in the browser</td></tr>
+    <tr><td><strong>Operations</strong></td><td>PTY sessions, browser sessions, background processes, execution receipts, work items, commitments, plans, qualification, validation runs</td></tr>
+    <tr><td><strong>Memory</strong></td><td>Episode browser, memory graph, search, embedding projection, memory stats</td></tr>
+    <tr><td><strong>System</strong></td><td>Provider config, runtime config, model info</td></tr>
+  </tbody>
+</table>
+
+<h3>Chat in the Dashboard</h3>
+
+<p>Go to the <strong>Chat</strong> tab. Type a message and press Enter (or click Send). The agent will process your input through:</p>
+<ol>
+  <li>The conversational refusal gate (safety check)</li>
+  <li>Somatic appraisal of your input</li>
+  <li>Context building (system prompt + retrieved memories + somatic style notes + relational/ToM directives)</li>
+  <li>LLM tool-use loop (conversation + tool calls if needed)</li>
+  <li>Memory recording, ToM belief tracking, relational state update</li>
+</ol>
+
+<!-- ============================================================ -->
+<h2 id="terminal-chat">6. Terminal Chat via API</h2>
+
+<p>You can interact with the agent from the terminal using <code>curl</code>:</p>
+
+<h3>Send a message</h3>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>curl -s http://127.0.0.1:8080/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Hello, what can you do?"}' | python3 -m json.tool</pre>
+</div>
+
+<h3>Send a message to a named session</h3>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>curl -s http://127.0.0.1:8080/chat \
+  -H "Content-Type: application/json" \
+  -d '{"message": "List the files in the project root", "session_id": "work-session-1"}' \
+  | python3 -m json.tool</pre>
+</div>
+
+<h3>Build a simple terminal chat loop</h3>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>#!/usr/bin/env bash
+# opencas-chat.sh — simple terminal chat client
+SESSION="terminal-$(date +%s)"
+echo "OpenCAS Chat (session: $SESSION). Type 'quit' to exit."
+echo "---"
+while true; do
+  printf "\033[1;36mYou:\033[0m "
+  read -r input
+  [ "$input" = "quit" ] && break
+  response=$(curl -s http://127.0.0.1:8080/chat \
+    -H "Content-Type: application/json" \
+    -d "{\"message\": $(echo "$input" | python3 -c 'import sys,json; print(json.dumps(sys.stdin.read().strip()))'), \"session_id\": \"$SESSION\"}" \
+    | python3 -c 'import sys,json; print(json.load(sys.stdin).get("response","[no response]"))')
+  printf "\033[1;32mCAS:\033[0m %s\n\n" "$response"
+done</pre>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="websocket">7. WebSocket Live Chat</h2>
+
+<p>For real-time streaming and event subscriptions, connect via WebSocket:</p>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre># Using websocat (install: pacman -S websocat)
+websocat ws://127.0.0.1:8080/ws</pre>
+</div>
+
+<p>Then send JSON messages:</p>
+
+<div class="code-block">
+  <span class="lang-label">json</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>{"type": "chat", "payload": "What are your current goals?", "session_id": "ws-session"}</pre>
+</div>
+
+<p>The server responds with:</p>
+
+<div class="code-block">
+  <span class="lang-label">json</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>{"type": "chat_response", "session_id": "ws-session", "payload": "..."}</pre>
+</div>
+
+<p>The WebSocket also receives <strong>live telemetry events</strong> pushed by the EventBus, so you can watch bootstrap stages, tool calls, somatic shifts, and creative promotions in real time.</p>
+
+<!-- ============================================================ -->
+<h2 id="give-work">8. Give the Agent Work</h2>
+
+<p>The agent can perform work through several channels:</p>
+
+<h3>Conversational work (via chat)</h3>
+
+<p>Simply tell the agent what to do. It has access to filesystem, shell, PTY, browser, planning, and workflow tools:</p>
+
+<div class="code-block">
+  <span class="lang-label">json</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>{"message": "Read the file opencas/somatic/models.py and summarize the SomaticState fields"}</pre>
+</div>
+
+<div class="code-block">
+  <span class="lang-label">json</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>{"message": "Create a plan for refactoring the memory retrieval pipeline"}</pre>
+</div>
+
+<div class="code-block">
+  <span class="lang-label">json</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>{"message": "Run pytest tests/test_memory.py and report the results"}</pre>
+</div>
+
+<h3>Setting goals (drives autonomous behavior)</h3>
+
+<p>The agent extracts goal directives from natural language. Phrases like "I want to..." or "Our goal is..." are auto-detected:</p>
+
+<div class="code-block">
+  <span class="lang-label">json</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>{"message": "Our goal is to improve test coverage for the somatic module"}</pre>
+</div>
+
+<p>You can also manage goals via the API:</p>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre># View runtime state including active goals
+curl -s http://127.0.0.1:8080/api/monitor/runtime | python3 -m json.tool</pre>
+</div>
+
+<h3>Workflow tools (higher-level operations)</h3>
+
+<p>Ask the agent to use its workflow tools for structured work:</p>
+
+<div class="code-block">
+  <span class="lang-label">json</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>{"message": "Create a writing task: write a technical summary of how memory retrieval works in OpenCAS"}</pre>
+</div>
+
+<div class="code-block">
+  <span class="lang-label">json</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>{"message": "Triage this repo and tell me what's been happening recently"}</pre>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="inspect">9. Inspect Agent State</h2>
+
+<p>The API exposes detailed introspection endpoints. All return JSON.</p>
+
+<table>
+  <thead><tr><th>What</th><th>Endpoint</th></tr></thead>
+  <tbody>
+    <tr><td>Health check</td><td><code>GET /health</code></td></tr>
+    <tr><td>Readiness state</td><td><code>GET /readiness</code></td></tr>
+    <tr><td>Full runtime snapshot</td><td><code>GET /api/monitor/runtime</code></td></tr>
+    <tr><td>Doctor health report</td><td><code>GET /api/monitor/health</code></td></tr>
+    <tr><td>BAA queue status</td><td><code>GET /api/monitor/baa</code></td></tr>
+    <tr><td>Embedding service status</td><td><code>GET /api/monitor/embeddings</code></td></tr>
+    <tr><td>Recent telemetry events</td><td><code>GET /api/monitor/events</code></td></tr>
+    <tr><td>Health check history</td><td><code>GET /api/monitor/health/history</code></td></tr>
+    <tr><td>Provider/model config</td><td><code>GET /api/config</code></td></tr>
+    <tr><td>Chat sessions list</td><td><code>GET /api/chat/sessions</code></td></tr>
+    <tr><td>Session history</td><td><code>GET /api/chat/sessions/{id}/history</code></td></tr>
+    <tr><td>Memory episodes</td><td><code>GET /api/memory/episodes</code></td></tr>
+    <tr><td>Memory graph</td><td><code>GET /api/memory/graph</code></td></tr>
+    <tr><td>Memory search</td><td><code>GET /api/memory/search?q=...</code></td></tr>
+    <tr><td>Memory stats</td><td><code>GET /api/memory/stats</code></td></tr>
+  </tbody>
+</table>
+
+<h3>Quick inspection commands</h3>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre># Is the agent alive?
+curl -s http://127.0.0.1:8080/health
+
+# Full runtime state (goals, somatic, executive, identity, relational)
+curl -s http://127.0.0.1:8080/api/monitor/runtime | python3 -m json.tool
+
+# Doctor health report
+curl -s http://127.0.0.1:8080/api/monitor/health | python3 -m json.tool
+
+# Recent telemetry events
+curl -s "http://127.0.0.1:8080/api/monitor/events?limit=20" | python3 -m json.tool
+
+# Memory stats
+curl -s http://127.0.0.1:8080/api/memory/stats | python3 -m json.tool
+
+# What model is the agent using?
+curl -s http://127.0.0.1:8080/api/config | python3 -m json.tool</pre>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="operations">10. Operations Control Plane</h2>
+
+<p>The <strong>Operations</strong> tab (and <code>/api/operations/*</code>) gives you direct control over running sessions, work items, plans, and commitments.</p>
+
+<h3>Sessions (PTY, Browser, Background Processes)</h3>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre># List all active sessions
+curl -s http://127.0.0.1:8080/api/operations/sessions | python3 -m json.tool
+
+# Inspect a specific PTY session
+curl -s http://127.0.0.1:8080/api/operations/sessions/pty/{session_id} | python3 -m json.tool
+
+# Send input to a PTY session
+curl -s http://127.0.0.1:8080/api/operations/sessions/pty/{session_id}/input \
+  -H "Content-Type: application/json" \
+  -d '{"input": ":wq\n"}' | python3 -m json.tool
+
+# Kill a PTY session
+curl -s -X DELETE http://127.0.0.1:8080/api/operations/sessions/pty/{session_id}
+
+# Bulk cleanup
+curl -s -X DELETE "http://127.0.0.1:8080/api/operations/sessions/pty?scope_key=default"</pre>
+</div>
+
+<h3>Work Items, Commitments, and Plans</h3>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre># List work items
+curl -s http://127.0.0.1:8080/api/operations/work | python3 -m json.tool
+
+# List commitments
+curl -s http://127.0.0.1:8080/api/operations/commitments | python3 -m json.tool
+
+# List plans
+curl -s http://127.0.0.1:8080/api/operations/plans | python3 -m json.tool
+
+# Execution receipts (audit trail)
+curl -s http://127.0.0.1:8080/api/operations/receipts | python3 -m json.tool</pre>
+</div>
+
+<h3>Edit work/commitment/plan status from the dashboard</h3>
+<p>In the Operations tab, click <strong>View</strong> on any work item, commitment, or plan. The detail pane has embedded form controls for updating status, content, and blockers directly.</p>
+
+<!-- ============================================================ -->
+<h2 id="supervised">11. Supervised Readiness Checklist</h2>
+
+<p>For your first session, walk through this checklist to confirm the agent is operating correctly:</p>
+
+<table>
+  <thead><tr><th>#</th><th>Check</th><th>How to Verify</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>1</td>
+      <td>Server is healthy</td>
+      <td><code>curl http://127.0.0.1:8080/health</code> returns <code>{"status":"ok"}</code></td>
+    </tr>
+    <tr>
+      <td>2</td>
+      <td>Readiness is READY</td>
+      <td><code>curl http://127.0.0.1:8080/readiness</code> shows <code>"state": "ready"</code></td>
+    </tr>
+    <tr>
+      <td>3</td>
+      <td>Doctor health passes</td>
+      <td>Dashboard <strong>Health</strong> tab shows all green, or <code>GET /api/monitor/health</code></td>
+    </tr>
+    <tr>
+      <td>4</td>
+      <td>LLM provider works</td>
+      <td>Send a simple chat message. If you get <code>[Error...]</code>, check your credentials.</td>
+    </tr>
+    <tr>
+      <td>5</td>
+      <td>Embeddings compute</td>
+      <td><code>GET /api/monitor/embeddings</code> &mdash; should show a model_id and cache hit count</td>
+    </tr>
+    <tr>
+      <td>6</td>
+      <td>Identity seeded</td>
+      <td>Dashboard <strong>Overview</strong> shows agent name and boot count &ge; 1</td>
+    </tr>
+    <tr>
+      <td>7</td>
+      <td>Somatic state live</td>
+      <td><code>GET /api/monitor/runtime</code> &mdash; somatic section shows non-default values after a few messages</td>
+    </tr>
+    <tr>
+      <td>8</td>
+      <td>Memory records turns</td>
+      <td>After chatting, <code>GET /api/memory/stats</code> shows episode count &gt; 0</td>
+    </tr>
+    <tr>
+      <td>9</td>
+      <td>Tool use works</td>
+      <td>Ask it to <code>"List files in the current directory"</code> &mdash; verify it returns real file names</td>
+    </tr>
+    <tr>
+      <td>10</td>
+      <td>No stale processes</td>
+      <td><code>GET /api/operations/sessions</code> &mdash; process/pty/browser counts should be 0 at startup</td>
+    </tr>
+  </tbody>
+</table>
+
+<div class="callout success">
+  <strong>If all 10 pass</strong>
+  <p>The agent is in a good supervised-readiness state. You can now use it for real work, knowing the substrate is healthy.</p>
+</div>
+
+<div class="callout danger">
+  <strong>If LLM calls fail</strong>
+  <p>The most common issue. Check: (1) your <code>~/.open_llm_auth/config.json</code> has valid, non-expired credentials, (2) the model you're targeting is in the provider catalog, (3) the <code>--default-llm-model</code> matches an available profile's provider.</p>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="shutdown">12. Shutdown and Restart</h2>
+
+<h3>Graceful shutdown</h3>
+<p>Press <code>Ctrl+C</code> in the terminal running OpenCAS. This triggers:</p>
+<ol>
+  <li>Signal handler sets the shutdown event</li>
+  <li>Readiness moves to <code>SHUTDOWN</code></li>
+  <li>FastAPI server stops accepting new requests</li>
+  <li>Scheduler stops all background loops</li>
+  <li>BAA drains and stops</li>
+  <li>All stores are closed cleanly</li>
+</ol>
+
+<h3>Restart with existing state</h3>
+<p>Just start again with the same <code>--state-dir</code>. All state is durable. The boot count increments, identity is restored, executive goals are rehydrated, ToM beliefs and intentions are reloaded from SQLite, and the relational field picks up where it left off.</p>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre># Restart with existing state
+python -m opencas --with-server --state-dir ~/.opencas/agents/main</pre>
+</div>
+
+<h3>Fresh start (clean boot)</h3>
+<p>To wipe identity and start over without deleting databases:</p>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre># Delete the state directory entirely for a true fresh start
+rm -rf ./.opencas
+
+# Or just re-seed identity by removing the identity dir
+rm -rf ./.opencas/identity</pre>
+</div>
+
+<h3>Kill stale background processes</h3>
+<p>If you had PTY/process sessions running when you killed the agent hard:</p>
+
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>python scripts/sweep_operator_processes.py --kill</pre>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="troubleshooting">13. Troubleshooting</h2>
+
+<h3>"Missing critical dependency: open_llm_auth"</h3>
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>pip install -e /mnt/xtra/open_llm_auth/</pre>
+</div>
+
+<h3>"OpenCAS requires Python >= 3.11"</h3>
+<p>Your venv is using an older Python. Recreate it:</p>
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre>python3.12 -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt</pre>
+</div>
+
+<h3>Chat returns "[Error: ...]"</h3>
+<ol>
+  <li>Check <code>GET /api/config</code> to see what model is configured</li>
+  <li>Check <code>GET /api/config/providers</code> to see if auth profiles loaded</li>
+  <li>Look at the terminal output for stack traces</li>
+  <li>Verify your API key or OAuth token hasn't expired</li>
+</ol>
+
+<h3>Embeddings falling back to local-fallback</h3>
+<p>You'll see <code>model_id: local-fallback</code> in the embedding status. This means:</p>
+<ul>
+  <li>No Google API key was found, or</li>
+  <li>You explicitly set <code>--embedding-model-id local-fallback</code></li>
+</ul>
+<p>Local fallback uses a 256-dim deterministic hash. It works, but semantic search quality will be low. For production use, configure a real embedding model.</p>
+
+<h3>Dashboard shows but is empty</h3>
+<p>The dashboard uses Alpine.js and fetches data from the API. If the Overview is blank, check the browser console (F12) for fetch errors. The most common cause is the API returning errors because stores failed to connect.</p>
+
+<h3>Telemetry / debugging</h3>
+<p>All events are logged as JSONL files in the telemetry directory:</p>
+<div class="code-block">
+  <span class="lang-label">bash</span>
+  <button class="copy-btn" onclick="copyCode(this)">Copy</button>
+  <pre># Tail the latest telemetry events
+tail -f .opencas/telemetry/*.jsonl | python3 -m json.tool --no-ensure-ascii</pre>
+</div>
+
+<!-- ============================================================ -->
+<h2 id="cli-ref">14. CLI Reference</h2>
+
+<table>
+  <thead><tr><th>Flag</th><th>Default</th><th>Description</th></tr></thead>
+  <tbody>
+    <tr><td><code>--state-dir</code></td><td><code>./.opencas</code></td><td>Agent state directory</td></tr>
+    <tr><td><code>--session-id</code></td><td>auto</td><td>Session identifier for telemetry grouping</td></tr>
+    <tr><td><code>--agent-profile-id</code></td><td><code>general_technical_operator</code></td><td>Built-in profile (<code>general_technical_operator</code> or <code>debug_validation_operator</code>)</td></tr>
+    <tr><td><code>--workspace-root</code></td><td><code>.</code></td><td>Primary workspace the agent can access</td></tr>
+    <tr><td><code>--workspace-extra-root</code></td><td>&mdash;</td><td>Additional workspace roots (repeatable)</td></tr>
+    <tr><td><code>--default-llm-model</code></td><td><code>anthropic/claude-sonnet-4-6</code></td><td>Default model for conversation and tool use</td></tr>
+    <tr><td><code>--embedding-model-id</code></td><td><code>google/gemini-embedding-2-preview</code></td><td>Embedding model (<code>local-fallback</code> for offline)</td></tr>
+    <tr><td><code>--with-server</code></td><td>off</td><td>Enable FastAPI server + dashboard</td></tr>
+    <tr><td><code>--host</code></td><td><code>127.0.0.1</code></td><td>Server bind address</td></tr>
+    <tr><td><code>--port</code></td><td><code>8080</code></td><td>Server port</td></tr>
+    <tr><td><code>--cycle-interval</code></td><td><code>300</code></td><td>Creative cycle interval (seconds)</td></tr>
+    <tr><td><code>--consolidation-interval</code></td><td><code>86400</code></td><td>Nightly consolidation interval (seconds)</td></tr>
+    <tr><td><code>--provider-config-path</code></td><td>auto-detect</td><td>Explicit OpenLLMAuth config.json path</td></tr>
+    <tr><td><code>--provider-env-path</code></td><td>auto-detect</td><td>Explicit .env path for provider secrets</td></tr>
+    <tr><td><code>--credential-source-config-path</code></td><td>&mdash;</td><td>Source config to copy credentials from</td></tr>
+    <tr><td><code>--credential-source-env-path</code></td><td>&mdash;</td><td>Source .env to copy env vars from</td></tr>
+    <tr><td><code>--credential-profile-id</code></td><td>&mdash;</td><td>Auth profile to copy (repeatable)</td></tr>
+    <tr><td><code>--credential-env-key</code></td><td>&mdash;</td><td>Env var to copy (repeatable)</td></tr>
+  </tbody>
+</table>
+
+<hr>
+
+<p style="color: var(--text-muted); font-size: 0.85em; text-align: center; margin-top: 40px;">
+  OpenCAS Getting Started Guide &mdash; Generated 2026-04-09
+</p>
+
+<script>
+function copyCode(btn) {
+  const pre = btn.parentElement.querySelector('pre');
+  const text = pre.textContent;
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => {
+      btn.textContent = 'Copy';
+      btn.classList.remove('copied');
+    }, 1500);
+  });
+}
+</script>
+
+</body>
+</html>

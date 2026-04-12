@@ -1,0 +1,122 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCAS Features</title>
+  <meta name="description" content="Current OpenCAS features: memory, retrieval, autonomy, daydreaming, usage telemetry, Telegram, and the operator dashboard.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-shell">
+      <a class="brand" href="index.html">
+        <span class="brand-mark mono">O</span>
+        <span>OpenCAS Release</span>
+      </a>
+      <nav class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="installation.html">Installation</a>
+        <a href="usage.html">Usage</a>
+        <a href="terminology.html">Terminology</a>
+        <a href="import.html">Import</a>
+        <a href="api/">API</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="site-shell">
+    <section class="page-hero">
+      <span class="eyebrow">Features</span>
+      <h1>Subsystems that are present in the current code.</h1>
+      <p>This page avoids aspirational claims and external comparisons. It describes the major capabilities that exist now.</p>
+    </section>
+
+    <div class="content-stack">
+      <section class="grid cols-3">
+        <article class="content-card">
+          <h3>Persistent memory</h3>
+          <p>SQLite-backed episodic and distilled memory, edge graph storage, semantic retrieval, and artifact-backed autobiographical recall.</p>
+        </article>
+        <article class="content-card">
+          <h3>Retrieval fusion</h3>
+          <p>Semantic, keyword, recency, salience, graph, emotional resonance, temporal echo, and reliability signals, plus somatic and relational adjustments.</p>
+        </article>
+        <article class="content-card">
+          <h3>Embeddings</h3>
+          <p>Provider-backed embeddings through <code>open_llm_auth</code>, with <code>google/gemini-embedding-2-preview</code> as the default lane and a deterministic local fallback path.</p>
+        </article>
+      </section>
+
+      <section class="grid cols-3">
+        <article class="content-card">
+          <h3>Somatic state</h3>
+          <p>Arousal, fatigue, tension, valence, focus, energy, certainty, and a derived somatic tag that modulate pacing and retrieval.</p>
+        </article>
+        <article class="content-card">
+          <h3>Relational state</h3>
+          <p>Musubi tracking and user/self-model continuity surfaces that influence interpretation and tone.</p>
+        </article>
+        <article class="content-card">
+          <h3>Executive state</h3>
+          <p>Current intention, active goals, work queue, commitments, and persistent plans.</p>
+        </article>
+      </section>
+
+      <section class="grid cols-3">
+        <article class="content-card">
+          <h3>Creative ladder</h3>
+          <p>Promotion from spark to note, artifact, micro-task, project seed, project, and durable work.</p>
+        </article>
+        <article class="content-card">
+          <h3>Daydreaming</h3>
+          <p>Idle-time reflection, keeper selection, conflict tracking, and promotion of daydream-origin work.</p>
+        </article>
+        <article class="content-card">
+          <h3>Self-approval</h3>
+          <p>Risk-tiered approval, evidence-sensitive escalation, and durable approval history.</p>
+        </article>
+      </section>
+
+      <section class="page-card">
+        <h3>Operator surfaces</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Surface</th>
+                <th>Current capability</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Chat</td><td>Session history, active lane, somatic context, per-message lane metadata, and message send.</td></tr>
+              <tr><td>Operations</td><td>Receipts, tasks, work, commitments, plans, qualification, PTY/browser/process control.</td></tr>
+              <tr><td>Usage</td><td>Token telemetry, dominant sources/models, provider notes, and process hygiene context.</td></tr>
+              <tr><td>Memory</td><td>Atlas, projections, neighborhood detail, search, and retrieval inspection.</td></tr>
+              <tr><td>System</td><td>Config overview, effective model visibility, and Telegram setup/status.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>Telegram integration</h3>
+        <p>
+          The current release includes persisted Telegram configuration, pairing and DM policies, typing indicators, edited replies, and dashboard setup/control surfaces.
+        </p>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="site-shell">
+      <div><a href="../features.md">Markdown source</a></div>
+      <div><a href="index.html">Back to release index</a></div>
+    </div>
+  </footer>
+</body>
+</html>

@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCAS Usage Guide</title>
+  <meta name="description" content="How to run OpenCAS, use the dashboard, and work through its current operator surfaces.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-shell">
+      <a class="brand" href="index.html">
+        <span class="brand-mark mono">O</span>
+        <span>OpenCAS Release</span>
+      </a>
+      <nav class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="installation.html">Installation</a>
+        <a href="features.html">Features</a>
+        <a href="terminology.html">Terminology</a>
+        <a href="import.html">Import</a>
+        <a href="api/">API</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="site-shell">
+    <section class="page-hero">
+      <span class="eyebrow">Usage</span>
+      <h1>Operate through the dashboard, API, and configured channels.</h1>
+      <p>
+        The current repo does not expose a separate interactive <code>python -m opencas chat</code> terminal mode. The practical operator paths are the dashboard, the HTTP API, and Telegram when enabled.
+      </p>
+    </section>
+
+    <div class="page-grid">
+      <aside class="sidebar">
+        <a href="#launch">Launch modes</a>
+        <a href="#dashboard">Dashboard tabs</a>
+        <a href="#chat">Chat lane</a>
+        <a href="#memory">Memory and daydream</a>
+        <a href="#operations">Operations and usage</a>
+      </aside>
+
+      <div class="content-stack">
+        <section class="page-card" id="launch">
+          <h3>Launch modes</h3>
+          <pre><code>python -m opencas --with-server</code></pre>
+          <p>This is the primary operator mode. It serves the dashboard and the HTTP/WebSocket APIs on <code>127.0.0.1:8080</code> by default.</p>
+          <pre><code>python -m opencas --tui</code></pre>
+          <p>Use the TUI when you need to set up or change provider material, model selection, and Telegram settings.</p>
+        </section>
+
+        <section class="page-card" id="dashboard">
+          <h3>Dashboard tabs</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tab</th>
+                  <th>Purpose</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td>Overview</td><td>High-level runtime, health, token, and memory summaries.</td></tr>
+                <tr><td>Health</td><td>Doctor status, recent health history, runtime and event visibility.</td></tr>
+                <tr><td>Chat</td><td>Session history, current provider/model lane, somatic context, current work, and message send.</td></tr>
+                <tr><td>Operations</td><td>Receipts, tasks, work objects, qualification runs, approval audit, and live process control.</td></tr>
+                <tr><td>Usage</td><td>Token telemetry, dominant models and sources, provider telemetry notes, and process hygiene clues.</td></tr>
+                <tr><td>Daydream</td><td>Reflections, conflicts, keeper promotion, and daydream-origin work.</td></tr>
+                <tr><td>Memory</td><td>Memory atlas, retrieval inspection, embeddings projection, and node detail.</td></tr>
+                <tr><td>Identity</td><td>Self-model, user model, continuity, musubi, and somatic state.</td></tr>
+                <tr><td>Executive</td><td>Goals, plans, commitments, and executive snapshot.</td></tr>
+                <tr><td>System</td><td>Config overview, model/configured option visibility, and Telegram control.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="page-card" id="chat">
+          <h3>Chat lane behavior</h3>
+          <ul class="list">
+            <li>The chat rail shows the active lane: provider, resolved model, auth profile, and auth source.</li>
+            <li>New assistant messages carry their own lane metadata in history.</li>
+            <li>Older assistant messages that predate lane metadata should be treated as legacy historical entries.</li>
+            <li>The chat context panel also surfaces somatic state, current work, executive intent, and recent background-task counts.</li>
+          </ul>
+        </section>
+
+        <section class="page-card" id="memory">
+          <h3>Memory and daydream behavior</h3>
+          <p>
+            OpenCAS uses provider-backed embeddings by default for semantic memory retrieval. Artifact-backed autobiographical memory is also part of the current system, which means authored plans and stories can be ingested into recall instead of only being found as raw files.
+          </p>
+          <div class="grid cols-2">
+            <article class="content-card">
+              <h3>Memory tools</h3>
+              <p>Episode list, search, graph view, landscape view, embedding projection, node detail, and retrieval inspection.</p>
+            </article>
+            <article class="content-card">
+              <h3>Daydream tools</h3>
+              <p>Reflections, keepers, conflicts, promotion lineage, and daydream-origin work visibility.</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="page-card" id="operations">
+          <h3>Operations and usage</h3>
+          <ul class="list">
+            <li>Use the Operations tab to inspect receipts, task state, work objects, commitments, plans, and live process sessions.</li>
+            <li>Use the Usage tab to inspect token usage, expensive sources, dominant models, and provider telemetry notes.</li>
+            <li>Use the System tab to confirm the effective provider/model configuration before assuming a lane is active.</li>
+          </ul>
+          <div class="callout">
+            <strong>Good operator habit.</strong> When something looks wrong in chat, verify the active lane in the Chat panel and the effective runtime model in the System panel before assuming the dashboard is lying.
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="site-shell">
+      <div><a href="../usage.md">Markdown source</a></div>
+      <div><a href="index.html">Back to release index</a></div>
+    </div>
+  </footer>
+</body>
+</html>

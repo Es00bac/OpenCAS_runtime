@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCAS Installation Guide</title>
+  <meta name="description" content="Install OpenCAS from the repo, configure provider material, and launch the dashboard with the current CLI surface.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-shell">
+      <a class="brand" href="index.html">
+        <span class="brand-mark mono">O</span>
+        <span>OpenCAS Release</span>
+      </a>
+      <nav class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="usage.html">Usage</a>
+        <a href="features.html">Features</a>
+        <a href="terminology.html">Terminology</a>
+        <a href="import.html">Import</a>
+        <a href="api/">API</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="site-shell">
+    <section class="page-hero">
+      <span class="eyebrow">Installation</span>
+      <h1>Install the repo as it exists now.</h1>
+      <p>
+        This guide matches the current codebase. It assumes the sibling <code>open_llm_auth</code> workspace is available, because the repo installs it through <code>requirements.txt</code>.
+      </p>
+    </section>
+
+    <div class="page-grid">
+      <aside class="sidebar">
+        <a href="#prereqs">Prerequisites</a>
+        <a href="#install">Install</a>
+        <a href="#configure">Configure</a>
+        <a href="#launch">Launch</a>
+        <a href="#troubleshooting">Troubleshooting</a>
+      </aside>
+
+      <div class="content-stack">
+        <section class="page-card" id="prereqs">
+          <h3>Prerequisites</h3>
+          <ul class="list">
+            <li>Python <code>3.11+</code></li>
+            <li>A working checkout of <code>/mnt/xtra/open_llm_auth/</code></li>
+            <li>Network access to whichever providers you plan to use through <code>open_llm_auth</code></li>
+            <li>Optional: Telegram bot token if you want Telegram integration</li>
+            <li>Optional: Qdrant if you want an external vector backend</li>
+          </ul>
+        </section>
+
+        <section class="page-card" id="install">
+          <h3>Install from repo</h3>
+          <pre><code>git clone https://github.com/Es00bac/OpenCAS.git
+cd opencas
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt</code></pre>
+          <div class="callout">
+            <strong>Current repo boundary.</strong> There is no packaged PyPI release path documented here. This guide is for the current repository layout.
+          </div>
+        </section>
+
+        <section class="page-card" id="configure">
+          <h3>Recommended configuration path</h3>
+          <pre><code>python -m opencas --tui</code></pre>
+          <p class="lede">
+            The TUI bootstrap is the cleanest way to configure provider material, choose actual discovered chat and embedding models, and set up Telegram.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>What you can configure</th>
+                  <th>Current support</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr>
+                  <td>Provider material mode</td>
+                  <td>Copied-local or explicit linked config/env</td>
+                </tr>
+                <tr>
+                  <td>Chat model</td>
+                  <td>Selected from configured discovered models</td>
+                </tr>
+                <tr>
+                  <td>Embedding model</td>
+                  <td>Selected from configured discovered models</td>
+                </tr>
+                <tr>
+                  <td>Credential import</td>
+                  <td>Specific profile ids and environment keys</td>
+                </tr>
+                <tr>
+                  <td>Telegram</td>
+                  <td>Enablement, bot token, DM policy, allowlist</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section class="page-card" id="launch">
+          <h3>Launch</h3>
+          <pre><code>python -m opencas --with-server</code></pre>
+          <p>The current default address is <code>http://127.0.0.1:8080/dashboard</code>.</p>
+          <div class="callout warn">
+            <strong>Truthful deployment note.</strong> OpenCAS keeps its state locally, but normal chat and embedding calls go through the configured provider lane. It is not accurate to describe the default setup as cloud-free.
+          </div>
+          <p class="muted">Useful overrides: <code>--state-dir</code>, <code>--default-llm-model</code>, <code>--embedding-model-id</code>, <code>--provider-config-path</code>, <code>--provider-env-path</code>, <code>--telegram-enabled</code>.</p>
+        </section>
+
+        <section class="page-card" id="troubleshooting">
+          <h3>Troubleshooting</h3>
+          <ul class="list">
+            <li>If <code>open_llm_auth</code> cannot be imported, confirm the editable dependency path in <code>requirements.txt</code> matches your local checkout.</li>
+            <li>If the dashboard does not load, verify you are opening <code>127.0.0.1:8080</code>, not the older <code>8000</code> default used in stale docs.</li>
+            <li>If the wrong provider or model is active, reopen the TUI bootstrap or inspect the dashboard System tab.</li>
+          </ul>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="site-shell">
+      <div><a href="../installation.md">Markdown source</a></div>
+      <div><a href="index.html">Back to release index</a></div>
+    </div>
+  </footer>
+</body>
+</html>

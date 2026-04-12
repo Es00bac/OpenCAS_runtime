@@ -1,0 +1,21 @@
+# Core dependencies for OpenCAS
+numpy>=1.24.0
+pydantic>=2.0.0
+pytest>=7.4.0
+pytest-asyncio>=0.21.0
+python-dotenv>=1.0.0
+aiosqlite>=0.19.0
+httpx>=0.24.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.29.0
+websockets>=12.0
+qdrant-client>=1.8.0
+hnswlib>=0.7.0
+playwright>=1.58.0
+textual>=0.52.0
+
+# Optional MCP support
+mcp>=1.0.0
+
+# Editable local dependency
+-e /mnt/xtra/open_llm_auth/
