@@ -1,6 +1,6 @@
 {
-  "history_path": "/mnt/xtra/OpenCAS/.opencas_live_test_state/qualification_rerun_history.jsonl",
-  "runs_dir": "/mnt/xtra/OpenCAS/.opencas_live_test_state",
+  "history_path": "(workspace_root)/.opencas_live_test_state/qualification_rerun_history.jsonl",
+  "runs_dir": "(workspace_root)/.opencas_live_test_state",
   "count": 2,
   "items": [
     {
@@ -15,7 +15,7 @@
         "run_id": "debug-validation-20260409-164343",
         "success": true,
         "outcome": "artifact_verified",
-        "response": "Factual summary:\n- Created an active plan with ID `plan-5d1ebdd9` via `workflow_create_plan`.\n- Opened the provided `data:text/html` page in a headless browser, extracted the mission and three bullet points, then closed the browser session.\n- Launched `vim -Nu NONE -n` in a PTY session, wrote the required report to `/mnt/xtra/OpenCAS/.opencas_live_test_state/debug-validation-20260409-164343/workspace_artifacts/notes/integrated_operator_validation.md`, saved with `:wq`, and exited successfully (14 lines, 422 bytes written).\n- Verified the file contents with `fs_read_file`; all required sections and bullets are present."
+        "response": "Factual summary:\n- Created an active plan with ID `plan-5d1ebdd9` via `workflow_create_plan`.\n- Opened the provided `data:text/html` page in a headless browser, extracted the mission and three bullet points, then closed the browser session.\n- Launched `vim -Nu NONE -n` in a PTY session, wrote the required report to `(workspace_root)/.opencas_live_test_state/debug-validation-20260409-164343/workspace_artifacts/notes/integrated_operator_validation.md`, saved with `:wq`, and exited successfully (14 lines, 422 bytes written).\n- Verified the file contents with `fs_read_file`; all required sections and bullets are present."
       },
       "latest_run": null,
       "recommended_action": "investigate_runner"
@@ -34,13 +34,13 @@
         "run_id": "debug-validation-20260409-003117",
         "success": true,
         "outcome": "artifact_verified",
-        "response": "Summary:\n\n- Created plan `plan-52f3015f` for Integrated Operator Validation.\n- Opened the data URL in a headless browser, extracted the mission and three bullet points.\n- Wrote the final report via `vim -Nu NONE` in a PTY session to:\n  `/mnt/xtra/OpenCAS/.opencas_live_test_state/debug-validation-20260409-003117/workspace_artifacts/notes/integrated_operator_validation.md`\n- Verified the file exists and contains the required sections.\n\nNote: there was minor friction where the first vim session did not cleanly exit and left a swap file; recovery and a second vim session succeeded, and the final file was written and verified. The file includes an extra `:wq` artifact at the end because the first session\u2019s buffer was recovered with the command line still in the buffer. If desired, I can clean that up."
+        "response": "Summary:\n\n- Created plan `plan-52f3015f` for Integrated Operator Validation.\n- Opened the data URL in a headless browser, extracted the mission and three bullet points.\n- Wrote the final report via `vim -Nu NONE` in a PTY session to:\n  `(workspace_root)/.opencas_live_test_state/debug-validation-20260409-003117/workspace_artifacts/notes/integrated_operator_validation.md`\n- Verified the file exists and contains the required sections.\n\nNote: there was minor friction where the first vim session did not cleanly exit and left a swap file; recovery and a second vim session succeeded, and the final file was written and verified. The file includes an extra `:wq` artifact at the end because the first session\u2019s buffer was recovered with the command line still in the buffer. If desired, I can clean that up."
       },
       "latest_run": {
         "run_id": "debug-validation-20260409-160102",
         "success": true,
         "outcome": "artifact_verified",
-        "response": "**Summary**\n\n- **Plan created:** `plan-0b490a76` for Integrated Operator Validation.\n- **Browser inspection:** Opened the data URL, extracted the mission (\"validate coordinated planning, browser inspection, and PTY editing\") and three bullet points (Priority, Evidence, Closure).\n- **PTY editing:** Launched `vim -Nu NONE -n`, wrote the report, saved, and exited successfully (14 lines, 423 bytes written).\n- **Verification:** File confirmed at `/mnt/xtra/OpenCAS/.opencas_live_test_state/debug-validation-20260409-160102/workspace_artifacts/notes/integrated_operator_validation.md` with the required sections and bullets. No failures encountered."
+        "response": "**Summary**\n\n- **Plan created:** `plan-0b490a76` for Integrated Operator Validation.\n- **Browser inspection:** Opened the data URL, extracted the mission (\"validate coordinated planning, browser inspection, and PTY editing\") and three bullet points (Priority, Evidence, Closure).\n- **PTY editing:** Launched `vim -Nu NONE -n`, wrote the report, saved, and exited successfully (14 lines, 423 bytes written).\n- **Verification:** File confirmed at `(workspace_root)/.opencas_live_test_state/debug-validation-20260409-160102/workspace_artifacts/notes/integrated_operator_validation.md` with the required sections and bullets. No failures encountered."
       },
       "recommended_action": "continue_testing"
     }

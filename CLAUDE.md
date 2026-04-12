@@ -12,19 +12,19 @@ This project is actively developed by multiple AI systems (Claude Code, Gemini C
 
 **Conventions:**
 
-1. **Use the task list.** Check [TaskList.md](/mnt/xtra/OpenCAS/TaskList.md) at session start. Claim tasks before starting. Mark done immediately.
+1. **Use the task list.** Check [TaskList.md]((workspace_root)/TaskList.md) at session start. Claim tasks before starting. Mark done immediately.
 2. **Write durable context.** Put discoveries in this file, the spec, or a module README — not just inline comments.
 3. **Prefer clear interfaces.** Other models read your code without session context. Make module boundaries and contracts obvious.
 4. **Leave traces, not mess.** Don't leave the repo broken. If you change an interface, update all call sites.
 5. **Don't duplicate work.** Coordinate through task ownership rather than parallel implementations.
-6. **Cross-project rhythm.** Every few cycles, compare against [OpenBulma v4](/mnt/xtra/openbulma-v4/) (embedding, telemetry, runtime patterns) and Claw Code (modular separation, compaction, diagnostics). Alternate between them. Note borrowed patterns here and update the task list.
+6. **Cross-project rhythm.** Every few cycles, compare against [LegacyPrototype v4]((legacy_path)/) (embedding, telemetry, runtime patterns) and Claw Code (modular separation, compaction, diagnostics). Alternate between them. Note borrowed patterns here and update the task list.
 7. **Sync Public Documentation.** If you modify the website at `docs/release/website`, remind the user to sync the changes to the public `OpenCAS_Documentation` GitHub repository. Provide them with the `cp -r` script to stage the website in `/tmp` and push it, ensuring the main private codebase is not accidentally exposed.
 
 Canonical status docs:
-- [TaskList.md](/mnt/xtra/OpenCAS/TaskList.md)
-- [documentation-map.md](/mnt/xtra/OpenCAS/docs/documentation-map.md)
-- [production-readiness-status-2026-04-09.md](/mnt/xtra/OpenCAS/docs/production-readiness-status-2026-04-09.md)
-- [first-regular-use-deployment-checklist.md](/mnt/xtra/OpenCAS/docs/first-regular-use-deployment-checklist.md)
+- [TaskList.md]((workspace_root)/TaskList.md)
+- [documentation-map.md]((workspace_root)/docs/documentation-map.md)
+- [production-readiness-status-2026-04-09.md]((workspace_root)/docs/production-readiness-status-2026-04-09.md)
+- [first-regular-use-deployment-checklist.md]((workspace_root)/docs/first-regular-use-deployment-checklist.md)
 
 ## Build, Test, and Development
 
@@ -99,7 +99,7 @@ tests/              # pytest suite mirroring opencas/
 
 **Phase 5: Hardening** — complete. BAA RECOVERING retry loop, git checkpoints, HookBus, execution receipt store, approval ledger, plugin/skill registry, somatic modulators, memory edge graph, compaction continuation, consolidation curation, token telemetry analytics, reliability coordinator.
 
-**Post-Phase 5 additions** (all complete): ConversationalRefusalGate, RelationalEngine (musubi), AgenticHarness, Qdrant vector backend, auto-scheduling and daydream timer, deep code audit fixes (3 P0 bugs), PTY screen-state heuristics and adaptive supervision, workflow composite tools, operations API and dashboard, live validation harness, qualification tooling with rerun provenance, durable scheduling system, operator action provenance, and six long-scenario local validations. Full change history: [docs/release/](/mnt/xtra/OpenCAS/docs/release/).
+**Post-Phase 5 additions** (all complete): ConversationalRefusalGate, RelationalEngine (musubi), AgenticHarness, Qdrant vector backend, auto-scheduling and daydream timer, deep code audit fixes (3 P0 bugs), PTY screen-state heuristics and adaptive supervision, workflow composite tools, operations API and dashboard, live validation harness, qualification tooling with rerun provenance, durable scheduling system, operator action provenance, and six long-scenario local validations. Full change history: [docs/release/]((workspace_root)/docs/release/).
 
 **Phase 6: Post-Roundtable Unified Plan** — operational hardening (Phase 1) and ToM/identity (Phase 5) complete. Remaining: memory/retrieval fusion, agency/autonomy layer, inner life/psychology, plugin lifecycle. Full plan in archived docs.
 
@@ -145,8 +145,8 @@ tests/              # pytest suite mirroring opencas/
 ## References
 
 - `OPENCAS_PRODUCT_SPEC.md` — requirements, scope, acceptance criteria, phase roadmap.
-- `/mnt/xtra/openbulma-v4/` — prior implementation of embedding service, memory store, agent loops, telemetry, OpenLLMAuth. Check before designing new features.
-- `notes/openbulma-v4-comparison.md` — gap analysis against OpenBulma v4.
+- `(legacy_path)/` — prior implementation of embedding service, memory store, agent loops, telemetry, OpenLLMAuth. Check before designing new features.
+- `notes/legacy_agent_v4-comparison.md` — gap analysis against LegacyPrototype v4.
 - `notes/claw-code-comparison.md` — gap analysis against Claw Code patterns.
 - This file — check at session start; update when conventions change.
 

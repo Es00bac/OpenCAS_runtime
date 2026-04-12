@@ -4,7 +4,7 @@
 # This script triggers the Gemini CLI to analyze the OpenCAS repository and
 # generate two markdown reports (Overall State & Delta State).
 
-AUDIT_DIR="/mnt/xtra/OpenCAS/docs/audits"
+AUDIT_DIR="(workspace_root)/docs/audits"
 mkdir -p "$AUDIT_DIR"
 
 DATE=$(date +%Y-%m-%d_%H-%M)
@@ -25,8 +25,8 @@ echo "Triggering Gemini CLI to generate reports..."
 
 # The prompt instructions for the Gemini CLI
 PROMPT="Run the OpenCAS Progress Audit workflow:
-1. Scan the current state of the /mnt/xtra/OpenCAS repository.
-2. Read the initial baseline report: /mnt/xtra/OpenCAS/docs/opencas-architecture-and-comparison.md.
+1. Scan the current state of the (workspace_root) repository.
+2. Read the initial baseline report: (workspace_root)/docs/opencas-architecture-and-comparison.md.
 3. Read the previous state: $PREV_MSG.
 4. Generate and write a file to '$AUDIT_DIR/Overall_State_$DATE.md' that compares the current state of the repo directly to the initial baseline report. Include metrics, fixed gaps, and remaining gaps. Use the 'run_shell_command' to create the file if it falls outside of your current workspace boundary.
 5. Generate and write a file to '$AUDIT_DIR/Delta_State_$DATE.md' that outlines ONLY the changes made since the previous overall state report (or since the baseline if no previous report exists). Use the 'run_shell_command' to create the file if it falls outside of your current workspace boundary.

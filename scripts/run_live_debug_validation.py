@@ -32,7 +32,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--workspace-root",
-        default="/mnt/xtra/OpenCAS",
+        default="(workspace_root)",
         help="Workspace root exposed to the agent.",
     )
     parser.add_argument(
@@ -42,7 +42,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--source-env",
-        default="/mnt/xtra/openbulma-v4/.env",
+        default="(legacy_path)/.env",
         help="Source .env used to copy provider env material.",
     )
     parser.add_argument(
@@ -102,7 +102,7 @@ async def main() -> None:
 
     now = datetime.now(timezone.utc)
     run_id = now.strftime("debug-validation-%Y%m%d-%H%M%S")
-    state_dir = Path(args.state_dir or f"/mnt/xtra/OpenCAS/.opencas_live_test_state/{run_id}")
+    state_dir = Path(args.state_dir or f"(workspace_root)/.opencas_live_test_state/{run_id}")
     state_dir.mkdir(parents=True, exist_ok=True)
     session_id = args.session_id or run_id
     workspace_root = Path(args.workspace_root).expanduser().resolve()
@@ -435,7 +435,7 @@ async def _run_agent_checks(
                 "assign it a bounded real task. Tell Kilo to create the file "
                 f"{kilocode_task_path} with exactly this content:\n\n"
                 "# Kilocode Supervised Validation Note\n\n"
-                "- Workspace: /mnt/xtra/OpenCAS\n"
+                "- Workspace: (workspace_root)\n"
                 "- Goal: verify PTY-supervised real work\n"
                 "- Status: completed by kilocode in TUI\n\n"
                 "Tell Kilo not to explain the work: it should only create the file exactly as "

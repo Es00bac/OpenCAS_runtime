@@ -1,5 +1,5 @@
 import sys
-content = open("/mnt/xtra/OpenCAS/opencas/execution/baa.py").read()
+content = open("(workspace_root)/opencas/execution/baa.py").read()
 # We know lines 148+ have bad indentation
 lines = content.split('\n')
 new_lines = []
@@ -27,4 +27,4 @@ for i, line in enumerate(lines):
     else:
         new_lines.append(line)
 
-open("/mnt/xtra/OpenCAS/opencas/execution/baa.py", "w").write('\n'.join(new_lines))
+open("(workspace_root)/opencas/execution/baa.py", "w").write('\n'.join(new_lines))

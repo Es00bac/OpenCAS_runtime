@@ -7,9 +7,9 @@ Purpose:
 - make PR-003 concrete enough to execute without inventing test scope ad hoc
 
 Related:
-- [TaskList.md](/mnt/xtra/OpenCAS/TaskList.md)
-- [first-regular-use-deployment-checklist.md](/mnt/xtra/OpenCAS/docs/first-regular-use-deployment-checklist.md)
-- [testing-execution-plan-2026-04-09.md](/mnt/xtra/OpenCAS/docs/qualification/testing-execution-plan-2026-04-09.md)
+- [TaskList.md]((workspace_root)/TaskList.md)
+- [first-regular-use-deployment-checklist.md]((workspace_root)/docs/first-regular-use-deployment-checklist.md)
+- [testing-execution-plan-2026-04-09.md]((workspace_root)/docs/qualification/testing-execution-plan-2026-04-09.md)
 
 ## Scenario 1: Technical Research To Report
 

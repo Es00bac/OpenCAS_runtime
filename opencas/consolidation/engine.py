@@ -242,8 +242,8 @@ class NightlyConsolidationEngine:
         """Detect references to superseded systems/workspace paths."""
         text = str(getattr(obj, "content", "")).lower()
         payload = getattr(obj, "payload", {}) or {}
-        source = str(payload.get("bulma_source", "")).lower()
-        markers = ["openbulma-v4", "openbulma-v3", "openbulma-v2", "openclaw"]
+        source = str(payload.get("legacy_agent_source", "")).lower()
+        markers = ["legacy_agent_v4", "legacy_agent-v3", "legacy_agent-v2", "openclaw"]
         combined = f"{text} {source}"
         return any(marker in combined for marker in markers)
 

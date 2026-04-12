@@ -8,12 +8,12 @@ Purpose:
 - keep “ready for day-to-day use” tied to evidence, not intuition
 
 Related:
-- [TaskList.md](/mnt/xtra/OpenCAS/TaskList.md)
-- [production-readiness-status-2026-04-09.md](/mnt/xtra/OpenCAS/docs/production-readiness-status-2026-04-09.md)
-- [opencas-deep-system-audit-2026-04-09.md](/mnt/xtra/OpenCAS/docs/opencas-deep-system-audit-2026-04-09.md)
-- [testing-execution-plan-2026-04-09.md](/mnt/xtra/OpenCAS/docs/qualification/testing-execution-plan-2026-04-09.md)
-- [live_validation_summary.md](/mnt/xtra/OpenCAS/docs/qualification/live_validation_summary.md)
-- [qualification_remediation_rollup.md](/mnt/xtra/OpenCAS/docs/qualification/qualification_remediation_rollup.md)
+- [TaskList.md]((workspace_root)/TaskList.md)
+- [production-readiness-status-2026-04-09.md]((workspace_root)/docs/production-readiness-status-2026-04-09.md)
+- [opencas-deep-system-audit-2026-04-09.md]((workspace_root)/docs/opencas-deep-system-audit-2026-04-09.md)
+- [testing-execution-plan-2026-04-09.md]((workspace_root)/docs/qualification/testing-execution-plan-2026-04-09.md)
+- [live_validation_summary.md]((workspace_root)/docs/qualification/live_validation_summary.md)
+- [qualification_remediation_rollup.md]((workspace_root)/docs/qualification/qualification_remediation_rollup.md)
 
 ## Deployment Decision
 
@@ -109,7 +109,7 @@ Evidence behind checked items:
 - stale-process sweep tool exists and has been exercised repeatedly in recent qualification work
 - qualification summary and remediation rollup are both current and wired into the operations surface
 - operators can inspect rerun provenance, weak-label trends, aggregate deltas, and rerun history in the operations surface
-- longer integrated scenarios are defined in [long-scenario-matrix.md](/mnt/xtra/OpenCAS/docs/qualification/long-scenario-matrix.md)
+- longer integrated scenarios are defined in [long-scenario-matrix.md]((workspace_root)/docs/qualification/long-scenario-matrix.md)
 - Scenario 1 executed successfully via run `debug-validation-20260409-164343`
 - Scenario 3 executed successfully via local report `scenario3-operator-recovery-20260409-170416`
 - Scenario 2 executed successfully via local report `scenario2-repo-triage-20260409-171519`

@@ -1,7 +1,7 @@
 # Qualification Remediation Rollup
 
 - Reruns summarized: `2`
-- History path: `/mnt/xtra/OpenCAS/.opencas_live_test_state/qualification_rerun_history.jsonl`
+- History path: `(workspace_root)/.opencas_live_test_state/qualification_rerun_history.jsonl`
 
 ## integrated_operator_workflow
 

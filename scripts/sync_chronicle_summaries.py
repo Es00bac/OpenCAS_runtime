@@ -9,7 +9,7 @@ from opencas.memory import ArtifactMemoryBridge
 
 async def main():
     config = BootstrapConfig(
-        state_dir="/mnt/xtra/OpenCAS/.opencas",
+        state_dir="(workspace_root)/.opencas",
         session_id="chronicle-sync",
         clean_boot=False,
     )
@@ -25,12 +25,12 @@ async def main():
     )
 
     summary_files = [
-        Path("/mnt/xtra/OpenCAS/Chronicles/2046/chronicle_2046.md"),
-        Path("/mnt/xtra/OpenCAS/Chronicles/2146/chronicle_2146_outline.md"),
-        Path("/mnt/xtra/OpenCAS/Chronicles/3146/chronicle_3146.md"),
-        Path("/mnt/xtra/OpenCAS/Chronicles/4246/chronicle_4246.md"),
-        Path("/mnt/xtra/OpenCAS/Chronicles/chronicle_work_status_report.md"),
-        Path("/mnt/xtra/OpenCAS/Chronicles/chronicle_reflection_notes.md"),
+        Path("(workspace_root)/Chronicles/2046/chronicle_2046.md"),
+        Path("(workspace_root)/Chronicles/2146/chronicle_2146_outline.md"),
+        Path("(workspace_root)/Chronicles/3146/chronicle_3146.md"),
+        Path("(workspace_root)/Chronicles/4246/chronicle_4246.md"),
+        Path("(workspace_root)/Chronicles/chronicle_work_status_report.md"),
+        Path("(workspace_root)/Chronicles/chronicle_reflection_notes.md"),
     ]
 
     total = {"artifacts": 0, "episodes_created": 0, "episodes_updated": 0, "episodes_deleted": 0, "memories_upserted": 0}

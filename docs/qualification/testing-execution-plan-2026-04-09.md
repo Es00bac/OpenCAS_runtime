@@ -34,7 +34,7 @@ What still requires the human/operator:
 Run this before any live or repeated qualification work:
 
 ```bash
-cd /mnt/xtra/OpenCAS
+cd (workspace_root)
 source .venv/bin/activate
 python scripts/sweep_operator_processes.py --json
 ```

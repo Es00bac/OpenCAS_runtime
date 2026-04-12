@@ -218,7 +218,7 @@ class IdentityManager:
     ) -> None:
         """Atomically import an external identity profile into the self-model and user-model."""
         if auto_activate:
-            self._self.name = "Bulma" if source_system == "openbulma-v4" else self._self.name
+            self._self.name = "LegacyAgent" if source_system == "legacy_agent_v4" else self._self.name
             self._self.narrative = narrative
             self._self.values = list(values)
             self._self.current_goals = list(ongoing_goals)

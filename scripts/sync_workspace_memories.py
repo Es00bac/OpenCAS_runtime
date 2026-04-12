@@ -9,7 +9,7 @@ from opencas.memory import ArtifactMemoryBridge
 
 async def main():
     config = BootstrapConfig(
-        state_dir="/mnt/xtra/OpenCAS/.opencas",
+        state_dir="(workspace_root)/.opencas",
         session_id="workspace-sync",
         clean_boot=False,
     )
@@ -25,7 +25,7 @@ async def main():
     )
 
     # Sync the Chronicles directory
-    chronicles_dir = Path("/mnt/xtra/OpenCAS/Chronicles")
+    chronicles_dir = Path("(workspace_root)/Chronicles")
     if chronicles_dir.exists():
         print(f"Syncing {chronicles_dir} ...")
         result = await bridge.sync_directory(chronicles_dir)
@@ -34,7 +34,7 @@ async def main():
         print(f"Chronicles directory not found: {chronicles_dir}")
 
     # Also sync top-level markdown files in the workspace by creating a temp dir wrapper
-    workspace_root = Path("/mnt/xtra/OpenCAS")
+    workspace_root = Path("(workspace_root)")
     md_files = [p for p in workspace_root.glob("*.md") if p.is_file()]
     if md_files:
         print(f"Syncing {len(md_files)} top-level markdown files ...")

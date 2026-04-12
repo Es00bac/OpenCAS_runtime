@@ -40,7 +40,7 @@ def _make_mock_runtime():
                 "pid": 4242,
                 "scope_key": "qualification",
                 "command": "python scripts/run_qualification_cycle.py --agent-check-label integrated_operator_workflow",
-                "cwd": "/mnt/xtra/OpenCAS",
+                "cwd": "(workspace_root)",
                 "metadata": {
                     "kind": "qualification_rerun",
                     "source_label": "integrated_operator_workflow",

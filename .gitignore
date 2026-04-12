@@ -89,7 +89,7 @@ keep-working.txt
 conversation_deleteme_when_read_claude_please.txt
 2026-*.txt
 relational-changelog*.md
-AUDIT_OPENCAS_VS_BULMA.md
+AUDIT_OPENCAS_VS_LEGACY_AGENT.md
 patch_*.py
 test_landscape*.py
 test_script.sh

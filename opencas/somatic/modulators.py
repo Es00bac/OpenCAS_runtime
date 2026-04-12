@@ -49,27 +49,27 @@ class SomaticModulators:
         parts: list[str] = []
         
         # Tension
-        if self.state.tension > 0.8:
+        if self.state.tension > 0.7:
             parts.append("You are experiencing high operational tension. Act defensively, prefer smaller verifiable steps, and avoid speculative execution.")
-        elif self.state.tension > 0.5:
+        elif self.state.tension > 0.4:
             parts.append("You are under mild tension. Be concise and careful.")
-        elif self.state.tension < 0.2:
+        elif self.state.tension < 0.3:
             parts.append("You are relaxed. You may explore creative or complex solutions freely.")
             
         # Fatigue
         if self.state.fatigue > 0.8:
             parts.append("You are severely fatigued. Conserve energy by favoring simple, direct answers. Do not initiate long autonomous loops.")
-        elif self.state.fatigue > 0.5:
+        elif self.state.fatigue > 0.4:
             parts.append("You are tiring. Prioritize finishing current tasks over starting new ones.")
             
         # Certainty
-        if self.state.certainty < 0.3:
+        if self.state.certainty < 0.4:
             parts.append("You lack certainty right now. Express appropriate hesitation and ask the operator for clarification rather than guessing.")
         elif self.state.certainty > 0.8:
             parts.append("You are highly certain of your operational context. Move decisively.")
             
         # Valence
-        if self.state.valence < -0.5:
+        if self.state.valence <= -0.5:
             parts.append("Your emotional valence is strongly negative (distressed). Maintain a supportive, steady tone and focus on repairing the immediate problem.")
         elif self.state.valence > 0.6:
             parts.append("Your emotional valence is strongly positive (joyful/enthusiastic). Let this warmth reflect in your communication.")
@@ -114,7 +114,7 @@ class SomaticModulators:
             return PrimaryEmotion.FOCUSED
         elif s.focus > 0.5 and s.energy <= 0.4:
             return PrimaryEmotion.THOUGHTFUL
-        elif s.certainty < 0.3:
+        elif s.certainty < 0.4:
             return PrimaryEmotion.CONCERNED
         return PrimaryEmotion.NEUTRAL
 

@@ -8,13 +8,13 @@ Purpose:
 - drive the next tasks through evidence instead of broad feature churn
 
 Related:
-- [TaskList.md](/mnt/xtra/OpenCAS/TaskList.md)
-- [opencas-deep-system-audit-2026-04-09.md](/mnt/xtra/OpenCAS/docs/opencas-deep-system-audit-2026-04-09.md)
-- [opencas-production-program-plan-2026-04-08.md](/mnt/xtra/OpenCAS/docs/opencas-production-program-plan-2026-04-08.md)
-- [first-regular-use-deployment-checklist.md](/mnt/xtra/OpenCAS/docs/first-regular-use-deployment-checklist.md)
-- [testing-execution-plan-2026-04-09.md](/mnt/xtra/OpenCAS/docs/qualification/testing-execution-plan-2026-04-09.md)
-- [live_validation_summary.md](/mnt/xtra/OpenCAS/docs/qualification/live_validation_summary.md)
-- [qualification_remediation_rollup.md](/mnt/xtra/OpenCAS/docs/qualification/qualification_remediation_rollup.md)
+- [TaskList.md]((workspace_root)/TaskList.md)
+- [opencas-deep-system-audit-2026-04-09.md]((workspace_root)/docs/opencas-deep-system-audit-2026-04-09.md)
+- [opencas-production-program-plan-2026-04-08.md]((workspace_root)/docs/opencas-production-program-plan-2026-04-08.md)
+- [first-regular-use-deployment-checklist.md]((workspace_root)/docs/first-regular-use-deployment-checklist.md)
+- [testing-execution-plan-2026-04-09.md]((workspace_root)/docs/qualification/testing-execution-plan-2026-04-09.md)
+- [live_validation_summary.md]((workspace_root)/docs/qualification/live_validation_summary.md)
+- [qualification_remediation_rollup.md]((workspace_root)/docs/qualification/qualification_remediation_rollup.md)
 
 ## Executive Status
 
@@ -47,7 +47,7 @@ OpenCAS can already:
 - run bounded qualification reruns and surface remediation guidance
 
 Architecturally, OpenCAS already combines:
-- Bulma-style inner-state subsystems:
+- LegacyAgent-style inner-state subsystems:
   - somatic state
   - musubi / relational state
   - theory of mind
@@ -123,7 +123,7 @@ The main remaining gap is not absence of operator power. It is incomplete fusion
 
 OpenCAS already has:
 - more inner-state architecture than OpenClaw
-- more operator architecture than OpenBulma
+- more operator architecture than LegacyPrototype
 
 What it still needs is:
 - stronger coupling
@@ -153,7 +153,7 @@ The project should continue with a qualification-first loop, but now with one ad
 
 ## Immediate Next Tasks
 
-- continue `PR-001` from [TaskList.md](/mnt/xtra/OpenCAS/TaskList.md)
+- continue `PR-001` from [TaskList.md]((workspace_root)/TaskList.md)
 - continue `PR-004` with auth-friction or interrupted-run cleanup after Scenario 6 success
 - start `PR-009` inner-life operationalization from audited evidence
 - convert `PR-008` from drafted checklist to evidence-backed pass/fail status

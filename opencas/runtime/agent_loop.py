@@ -2693,21 +2693,7 @@ class AgentRuntime:
         await self._close_stores()
         self._trace("autonomous_with_server_shutdown", {})
 
-    async def import_bulma(
-        self,
-        bulma_state_dir: Path,
-        checkpoint_path: Optional[Path] = None,
-        curated_workspace_dir: Optional[Path] = None,
-    ) -> Any:
-        """Run a one-way cutover import from an OpenBulma v4 state directory."""
-        from opencas.legacy.importer import BulmaImportTask
-        task = BulmaImportTask(
-            bulma_state_dir,
-            runtime=self,
-            checkpoint_store=checkpoint_path,
-            curated_workspace_dir=curated_workspace_dir,
-        )
-        return await task.run()
+
 
     async def _maybe_record_somatic_snapshot(
         self,

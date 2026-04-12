@@ -18,7 +18,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger("live_test")
 
 async def main():
-    test_dir = Path("/mnt/xtra/OpenCAS/.opencas_live_test_state")
+    test_dir = Path("(workspace_root)/.opencas_live_test_state")
     if test_dir.exists():
         shutil.rmtree(test_dir)
     test_dir.mkdir(parents=True, exist_ok=True)

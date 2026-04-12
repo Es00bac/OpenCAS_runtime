@@ -156,26 +156,4 @@ def build_executive_router(runtime: Any) -> APIRouter:
             return []
         return [PlanResponse(**_plan_to_dict(p)) for p in items]
 
-    @r.get("/events/summary")
-    async def get_bulma_event_summary() -> Dict[str, Any]:
-        from opencas.legacy.executive_event_index import load_executive_event_summary
-
-        return load_executive_event_summary(runtime.ctx.config.state_dir)
-
-    @r.get("/events/search")
-    async def search_bulma_events(
-        event_type: Optional[str] = None,
-        query: Optional[str] = None,
-        limit: int = 50,
-    ) -> Dict[str, Any]:
-        from opencas.legacy.executive_event_index import search_executive_events
-
-        items = search_executive_events(
-            runtime.ctx.config.state_dir,
-            event_type=event_type,
-            query=query,
-            limit=limit,
-        )
-        return {"count": len(items), "items": items}
-
     return r

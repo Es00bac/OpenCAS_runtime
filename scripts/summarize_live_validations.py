@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 
-DEFAULT_RUNS_DIR = Path("/mnt/xtra/OpenCAS/.opencas_live_test_state")
+DEFAULT_RUNS_DIR = Path("(workspace_root)/.opencas_live_test_state")
 
 
 @dataclass

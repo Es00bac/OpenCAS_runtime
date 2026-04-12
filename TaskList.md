@@ -3,7 +3,7 @@
 Last updated: 2026-04-12
 
 Purpose:
-- provide the canonical task list referenced by [AGENTS.md](/mnt/xtra/OpenCAS/AGENTS.md) and [CLAUDE.md](/mnt/xtra/OpenCAS/CLAUDE.md)
+- provide the canonical task list referenced by [AGENTS.md]((workspace_root)/AGENTS.md) and [CLAUDE.md]((workspace_root)/CLAUDE.md)
 - track the active path to first regular-use deployment readiness
 - keep multi-model collaboration grounded in one current execution list
 
@@ -13,14 +13,14 @@ Rules:
 - treat this file as the execution source of truth; older audits and handoff notes are reference only
 
 Canonical current docs:
-- [TaskList.md](/mnt/xtra/OpenCAS/TaskList.md)
-- [documentation-map.md](/mnt/xtra/OpenCAS/docs/documentation-map.md)
-- [opencas-deep-system-audit-2026-04-09.md](/mnt/xtra/OpenCAS/docs/opencas-deep-system-audit-2026-04-09.md)
-- [production-readiness-status-2026-04-09.md](/mnt/xtra/OpenCAS/docs/production-readiness-status-2026-04-09.md)
-- [opencas-production-program-plan-2026-04-08.md](/mnt/xtra/OpenCAS/docs/opencas-production-program-plan-2026-04-08.md)
-- [testing-execution-plan-2026-04-09.md](/mnt/xtra/OpenCAS/docs/qualification/testing-execution-plan-2026-04-09.md)
-- [live_validation_summary.md](/mnt/xtra/OpenCAS/docs/qualification/live_validation_summary.md)
-- [qualification_remediation_rollup.md](/mnt/xtra/OpenCAS/docs/qualification/qualification_remediation_rollup.md)
+- [TaskList.md]((workspace_root)/TaskList.md)
+- [documentation-map.md]((workspace_root)/docs/documentation-map.md)
+- [opencas-deep-system-audit-2026-04-09.md]((workspace_root)/docs/opencas-deep-system-audit-2026-04-09.md)
+- [production-readiness-status-2026-04-09.md]((workspace_root)/docs/production-readiness-status-2026-04-09.md)
+- [opencas-production-program-plan-2026-04-08.md]((workspace_root)/docs/opencas-production-program-plan-2026-04-08.md)
+- [testing-execution-plan-2026-04-09.md]((workspace_root)/docs/qualification/testing-execution-plan-2026-04-09.md)
+- [live_validation_summary.md]((workspace_root)/docs/qualification/live_validation_summary.md)
+- [qualification_remediation_rollup.md]((workspace_root)/docs/qualification/qualification_remediation_rollup.md)
 
 ## Pending
 
@@ -51,7 +51,7 @@ Canonical current docs:
   - status: in_progress
   - goal: validate longer multi-step daily-use runs, not just bounded artifact tasks
   - current output:
-    - [long-scenario-matrix.md](/mnt/xtra/OpenCAS/docs/qualification/long-scenario-matrix.md)
+    - [long-scenario-matrix.md]((workspace_root)/docs/qualification/long-scenario-matrix.md)
   - current focus:
     - Scenario 1: completed successfully through run `debug-validation-20260409-164343`
     - Scenario 2: completed successfully through local report `scenario2-repo-triage-20260409-171519`

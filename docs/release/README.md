@@ -83,7 +83,7 @@ The current dashboard includes these top-level tabs:
 This repo is not yet packaged as a polished PyPI install. The current `requirements.txt` expects the editable gateway dependency at:
 
 ```text
-/mnt/xtra/open_llm_auth/
+(external_volumes)/open_llm_auth/
 ```
 
 If you move the repo to another machine or directory layout, update that dependency path or install `open_llm_auth` separately before running OpenCAS.

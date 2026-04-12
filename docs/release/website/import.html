@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Bulma → OpenCAS Import Guide</title>
-  <meta name="description" content="How your OpenBulma v4 memory, identity, and creative history move into OpenCAS — step by step, with your role as operator explained.">
+  <title>LegacyAgent → OpenCAS Import Guide</title>
+  <meta name="description" content="How your LegacyPrototype v4 memory, identity, and creative history move into OpenCAS — step by step, with your role as operator explained.">
   <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -235,10 +235,10 @@
     <!-- Hero -->
     <section class="page-hero">
       <span class="eyebrow">Migration Guide</span>
-      <h1>Bringing your Bulma memory into OpenCAS.</h1>
+      <h1>Bringing your LegacyAgent memory into OpenCAS.</h1>
       <p>
-        A one-way, checkpointed transfer of your episodes, identity, creative history, and relational state — from OpenBulma&nbsp;v4 into a persistent autonomous agent.
-        <button class="tts-btn" data-tts="Bringing your Bulma memory into OpenCAS. A one-way, checkpointed transfer of your episodes, identity, creative history, and relational state from OpenBulma version 4 into a persistent autonomous agent.">
+        A one-way, checkpointed transfer of your episodes, identity, creative history, and relational state — from LegacyPrototype&nbsp;v4 into a persistent autonomous agent.
+        <button class="tts-btn" data-tts="Bringing your LegacyAgent memory into OpenCAS. A one-way, checkpointed transfer of your episodes, identity, creative history, and relational state from LegacyPrototype version 4 into a persistent autonomous agent.">
           <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
           listen
         </button>
@@ -251,22 +251,22 @@
       <section class="page-card">
         <div class="tts-heading">
           <h2>What this import is</h2>
-          <button class="tts-btn" data-tts="What this import is. OpenBulma version 4 and OpenCAS are two different agents. Bulma was the predecessor — a TypeScript system with its own SQLite and JSONL state. OpenCAS is its Python successor with a richer autonomy stack, relational engine, scheduling, and operator dashboard. The import is a one-way migration. It reads Bulma's state directory, maps every data category to OpenCAS equivalents, and writes them into the live agent's stores. After the import, OpenCAS boots with your full history, your identity profile, your creative workspace, your daydream sparks, and your relational trust already in place. Bulma's state directory is never modified.">
+          <button class="tts-btn" data-tts="What this import is. LegacyPrototype version 4 and OpenCAS are two different agents. LegacyAgent was the predecessor — a TypeScript system with its own SQLite and JSONL state. OpenCAS is its Python successor with a richer autonomy stack, relational engine, scheduling, and operator dashboard. The import is a one-way migration. It reads LegacyAgent's state directory, maps every data category to OpenCAS equivalents, and writes them into the live agent's stores. After the import, OpenCAS boots with your full history, your identity profile, your creative workspace, your daydream sparks, and your relational trust already in place. LegacyAgent's state directory is never modified.">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
             listen
           </button>
         </div>
         <p>
-          OpenBulma&nbsp;v4 and OpenCAS are two different agents. Bulma was the predecessor — a TypeScript system with its own SQLite and JSONL state. OpenCAS is its Python successor with a richer autonomy stack, relational engine, scheduling, and operator dashboard.
+          LegacyPrototype&nbsp;v4 and OpenCAS are two different agents. LegacyAgent was the predecessor — a TypeScript system with its own SQLite and JSONL state. OpenCAS is its Python successor with a richer autonomy stack, relational engine, scheduling, and operator dashboard.
         </p>
         <p>
-          The import is a one-way migration. It reads Bulma's state directory, maps every data category to OpenCAS equivalents, and writes them into the live agent's stores. After the import, OpenCAS boots with your full history, your identity profile, your creative workspace, your daydream sparks, and your relational trust already in place. Bulma's state directory is never modified.
+          The import is a one-way migration. It reads LegacyAgent's state directory, maps every data category to OpenCAS equivalents, and writes them into the live agent's stores. After the import, OpenCAS boots with your full history, your identity profile, your creative workspace, your daydream sparks, and your relational trust already in place. LegacyAgent's state directory is never modified.
         </p>
 
         <div class="callout info" style="margin-top:1.25rem;">
           <h4>One-way and checkpointed</h4>
           <p>
-            The import writes into OpenCAS and does not touch Bulma. If it fails partway through, re-running it resumes from the last completed phase — no data is duplicated or lost.
+            The import writes into OpenCAS and does not touch LegacyAgent. If it fails partway through, re-running it resumes from the last completed phase — no data is duplicated or lost.
           </p>
         </div>
       </section>
@@ -275,15 +275,15 @@
       <section class="page-card">
         <div class="tts-heading">
           <h2>How the data flows</h2>
-          <button class="tts-btn" data-tts="How the data flows. Your Bulma state directory is first copied into a clean staging package by the extract script. You review and prune the package. Then the import task reads the package and writes each category into OpenCAS's live stores, producing an audit manifest when done.">
+          <button class="tts-btn" data-tts="How the data flows. Your LegacyAgent state directory is first copied into a clean staging package by the extract script. You review and prune the package. Then the import task reads the package and writes each category into OpenCAS's live stores, producing an audit manifest when done.">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
             listen
           </button>
         </div>
-        <p class="muted" style="margin-bottom:1.25rem;">Your Bulma state is first extracted into a clean staging package. You review and prune it. Then the importer reads that package and writes into OpenCAS's live stores.</p>
+        <p class="muted" style="margin-bottom:1.25rem;">Your LegacyAgent state is first extracted into a clean staging package. You review and prune it. Then the importer reads that package and writes into OpenCAS's live stores.</p>
         <div class="flow-wrap">
           <!-- Flow SVG -->
-          <svg class="flow-svg" width="860" height="200" viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Data flow from Bulma state through extract script to staging package to importer to OpenCAS">
+          <svg class="flow-svg" width="860" height="200" viewBox="0 0 860 200" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Data flow from LegacyAgent state through extract script to staging package to importer to OpenCAS">
 
             <!-- Background glow -->
             <defs>
@@ -304,12 +304,12 @@
               </marker>
             </defs>
 
-            <!-- Node 1: Bulma State -->
+            <!-- Node 1: LegacyAgent State -->
             <rect x="10" y="60" width="150" height="80" rx="14" fill="rgba(17,21,34,0.9)" stroke="rgba(99,182,255,0.5)" stroke-width="1.5"/>
             <ellipse cx="85" cy="34" rx="30" ry="18" fill="url(#gA)"/>
             <text x="85" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" fill="#63b6ff">📁</text>
-            <text x="85" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">Bulma State Dir</text>
-            <text x="85" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">openbulma-v4/state</text>
+            <text x="85" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">LegacyAgent State Dir</text>
+            <text x="85" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">legacy_agent_v4/state</text>
             <text x="85" y="137" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#8590ad">3,174 eps · 177k edges</text>
 
             <!-- Arrow 1 -->
@@ -319,7 +319,7 @@
             <rect x="200" y="60" width="150" height="80" rx="14" fill="rgba(17,21,34,0.9)" stroke="rgba(110,231,200,0.45)" stroke-width="1.5"/>
             <text x="275" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" fill="#6ee7c8">🔧</text>
             <text x="275" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">Extract Script</text>
-            <text x="275" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">extract_bulma_package.py</text>
+            <text x="275" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">extract_legacy_agent_package.py</text>
             <text x="275" y="137" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#8590ad">preflight · copy · redact</text>
 
             <!-- Operator label below arrow 1→2 -->
@@ -332,7 +332,7 @@
             <rect x="390" y="60" width="150" height="80" rx="14" fill="rgba(17,21,34,0.9)" stroke="rgba(255,191,117,0.45)" stroke-width="1.5"/>
             <text x="465" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" fill="#ffbf75">📦</text>
             <text x="465" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">Staging Package</text>
-            <text x="465" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">/mnt/xtra/bulma-package</text>
+            <text x="465" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">(external_volumes)/legacy_agent-package</text>
             <text x="465" y="137" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#8590ad">65 MB · you review &amp; prune</text>
 
             <!-- Operator label -->
@@ -344,7 +344,7 @@
             <!-- Node 4: Importer -->
             <rect x="580" y="60" width="140" height="80" rx="14" fill="rgba(17,21,34,0.9)" stroke="rgba(192,132,252,0.45)" stroke-width="1.5"/>
             <text x="650" y="82" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="22" fill="#c084fc">⚙️</text>
-            <text x="650" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">BulmaImportTask</text>
+            <text x="650" y="105" text-anchor="middle" font-family="Inter,sans-serif" font-size="11" font-weight="600" fill="#edf2ff">LegacyAgentImportTask</text>
             <text x="650" y="122" text-anchor="middle" font-family="JetBrains Mono,monospace" font-size="9" fill="#8590ad">21 phases · checkpointed</text>
             <text x="650" y="137" text-anchor="middle" font-family="Inter,sans-serif" font-size="9" fill="#8590ad">needs live runtime + embeddings</text>
 
@@ -364,7 +364,7 @@
 
       <!-- Stats -->
       <section>
-        <div class="section-label">What's in your Bulma state</div>
+        <div class="section-label">What's in your LegacyAgent state</div>
         <div class="grid cols-3" style="gap:12px;">
           <div class="stat-card">
             <div class="stat-num">3,174</div>
@@ -397,7 +397,7 @@
       <section class="page-card">
         <div class="tts-heading">
           <h2>Your role as operator</h2>
-          <button class="tts-btn" data-tts="Your role as operator. You have six steps. First, run the extract script to create a clean staging package from the Bulma state directory. Second, open REVIEW.md inside the package and read the notes. Third, prune anything you don't want to carry forward — old work products, low-confidence edges, workspace directories you no longer need. Fourth, start OpenCAS with the server flag. Fifth, call import underscore bulma on the runtime, pointing it at your staging package. Sixth, verify — check the import report, browse memory in the dashboard, confirm your identity profile came through.">
+          <button class="tts-btn" data-tts="Your role as operator. You have six steps. First, run the extract script to create a clean staging package from the LegacyAgent state directory. Second, open REVIEW.md inside the package and read the notes. Third, prune anything you don't want to carry forward — old work products, low-confidence edges, workspace directories you no longer need. Fourth, start OpenCAS with the server flag. Fifth, call import underscore legacy_agent on the runtime, pointing it at your staging package. Sixth, verify — check the import report, browse memory in the dashboard, confirm your identity profile came through.">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
             listen
           </button>
@@ -409,9 +409,9 @@
             <div class="step-num">1</div>
             <div class="step-body">
               <h4>Run the extract script</h4>
-              <p>Creates a clean, 65 MB staging package from Bulma's state directory. Runs a preflight scan, copies only the essential categories, redacts any secret-bearing files, and writes <code>REVIEW.md</code> and <code>manifest.json</code>. Takes about 30 seconds. Does not modify Bulma.</p>
+              <p>Creates a clean, 65 MB staging package from LegacyAgent's state directory. Runs a preflight scan, copies only the essential categories, redacts any secret-bearing files, and writes <code>REVIEW.md</code> and <code>manifest.json</code>. Takes about 30 seconds. Does not modify LegacyAgent.</p>
               <div class="code-block" style="margin-top:10px;">
-                <pre>python scripts/extract_bulma_package.py --out /mnt/xtra/bulma-package</pre>
+                <pre>python scripts/extract_legacy_agent_package.py --out (external_volumes)/legacy_agent-package</pre>
               </div>
             </div>
           </div>
@@ -453,7 +453,7 @@ python -m opencas --with-server</pre>
           <div class="step">
             <div class="step-num">5</div>
             <div class="step-body">
-              <h4>Call <code>import_bulma()</code></h4>
+              <h4>Call <code>import_legacy_agent()</code></h4>
               <p>Point the importer at your staging package. It runs 21 phases, checkpointing after each one. If it fails partway through, re-running resumes from the last completed phase. The embedding provider must be available — this is where Kimi (or another configured model) is used to embed imported episodes.</p>
               <div class="code-block" style="margin-top:10px;">
                 <pre><span class="c"># In a Python session with the venv active:</span>
@@ -462,8 +462,8 @@ python -m opencas --with-server</pre>
 <span class="k">import</span> asyncio
 
 <span class="c"># runtime = your running AgentRuntime instance</span>
-report = asyncio.run(runtime.import_bulma(
-    bulma_state_dir=Path(<span class="s">"/mnt/xtra/bulma-package"</span>),
+report = asyncio.run(runtime.import_legacy_agent(
+    legacy_agent_state_dir=Path(<span class="s">"(external_volumes)/legacy_agent-package"</span>),
 ))
 <span class="k">print</span>(report.model_dump_json(indent=2))</pre>
               </div>
@@ -537,7 +537,7 @@ report = asyncio.run(runtime.import_bulma(
       <section class="page-card">
         <div class="tts-heading">
           <h2>What each category becomes</h2>
-          <button class="tts-btn" data-tts="What each category becomes in OpenCAS. Episodes become OpenCAS Episode objects in memory dot db, each assigned a new UUID while preserving its original Bulma ID for deduplication. Memory edges become EpisodeEdge records with confidence and weight fields mapped from Bulma's semantic, emotional, recency, and salience weights. Identity becomes the OpenCAS SelfModel — narrative, values, traits, and goals are mapped directly, and the partner trust and musubi scores seed the relational engine. Daydream sparks and initiatives become DaydreamReflection objects in daydream dot db. Workspace files are copied into OpenCAS workspace storage under a named project. Work products become WorkObject entries in the creative ladder's work store. Somatic history seeds the somatic store so the agent's starting emotional state reflects recent Bulma history rather than defaults. Executive state becomes active goals and commitments. Skills are registered in the plugin skill registry if they are enabled.">
+          <button class="tts-btn" data-tts="What each category becomes in OpenCAS. Episodes become OpenCAS Episode objects in memory dot db, each assigned a new UUID while preserving its original LegacyAgent ID for deduplication. Memory edges become EpisodeEdge records with confidence and weight fields mapped from LegacyAgent's semantic, emotional, recency, and salience weights. Identity becomes the OpenCAS SelfModel — narrative, values, traits, and goals are mapped directly, and the partner trust and musubi scores seed the relational engine. Daydream sparks and initiatives become DaydreamReflection objects in daydream dot db. Workspace files are copied into OpenCAS workspace storage under a named project. Work products become WorkObject entries in the creative ladder's work store. Somatic history seeds the somatic store so the agent's starting emotional state reflects recent LegacyAgent history rather than defaults. Executive state becomes active goals and commitments. Skills are registered in the plugin skill registry if they are enabled.">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
             listen
           </button>
@@ -546,13 +546,13 @@ report = asyncio.run(runtime.import_bulma(
 
           <div class="cat-card">
             <div class="cat-head"><span class="cat-icon">💬</span><h4>Episodes</h4></div>
-            <p>Each Bulma episode becomes an OpenCAS <code>Episode</code> in <code>memory.db</code>, assigned a new UUID while preserving the original Bulma ID for deduplication. Source, content, salience, emotion tags, and <code>identityCore</code> flag are all mapped.</p>
+            <p>Each LegacyAgent episode becomes an OpenCAS <code>Episode</code> in <code>memory.db</code>, assigned a new UUID while preserving the original LegacyAgent ID for deduplication. Source, content, salience, emotion tags, and <code>identityCore</code> flag are all mapped.</p>
             <div class="becomes">→ memory.db / episodes table</div>
           </div>
 
           <div class="cat-card">
             <div class="cat-head"><span class="cat-icon">🔗</span><h4>Memory edges</h4></div>
-            <p>Bulma's semantic, emotional, recency, and salience weights are averaged into OpenCAS <code>EpisodeEdge</code> confidence scores. Orphan edges (pointing to missing episodes) are skipped with a count in the report.</p>
+            <p>LegacyAgent's semantic, emotional, recency, and salience weights are averaged into OpenCAS <code>EpisodeEdge</code> confidence scores. Orphan edges (pointing to missing episodes) are skipped with a count in the report.</p>
             <div class="becomes">→ memory.db / episode_edges table</div>
           </div>
 
@@ -576,13 +576,13 @@ report = asyncio.run(runtime.import_bulma(
 
           <div class="cat-card">
             <div class="cat-head"><span class="cat-icon">📝</span><h4>Work products</h4></div>
-            <p>Each Bulma work-product draft JSON becomes a <code>WorkObject</code> entry in the creative ladder's work store, with objective, summary, and status carried through.</p>
+            <p>Each LegacyAgent work-product draft JSON becomes a <code>WorkObject</code> entry in the creative ladder's work store, with objective, summary, and status carried through.</p>
             <div class="becomes">→ work.db</div>
           </div>
 
           <div class="cat-card">
             <div class="cat-head"><span class="cat-icon">🌡️</span><h4>Somatic history</h4></div>
-            <p>The most recent somatic snapshot (arousal, fatigue, valence, certainty) seeds the OpenCAS somatic store so the agent's starting emotional state reflects recent Bulma history rather than cold defaults.</p>
+            <p>The most recent somatic snapshot (arousal, fatigue, valence, certainty) seeds the OpenCAS somatic store so the agent's starting emotional state reflects recent LegacyAgent history rather than cold defaults.</p>
             <div class="becomes">→ somatic.db</div>
           </div>
 
@@ -640,7 +640,7 @@ report = asyncio.run(runtime.import_bulma(
         <div class="callout" style="margin-top:1rem;">
           <h4>Why the import is waiting</h4>
           <p>
-            Kimi usage resets on an 11-hour cycle. Once it resets, the embedding provider is available and the import can run with full semantic vector quality. The staging package at <code>/mnt/xtra/bulma-package</code> is already prepared and ready — no further extract steps are needed.
+            Kimi usage resets on an 11-hour cycle. Once it resets, the embedding provider is available and the import can run with full semantic vector quality. The staging package at <code>(external_volumes)/legacy_agent-package</code> is already prepared and ready — no further extract steps are needed.
           </p>
         </div>
       </section>
@@ -649,7 +649,7 @@ report = asyncio.run(runtime.import_bulma(
       <section class="page-card">
         <div class="tts-heading">
           <h2>Safety and rollback</h2>
-          <button class="tts-btn" data-tts="Safety and rollback. The import is designed to be safe in three ways. First, Bulma's state directory is never modified. The extract script only reads from it. Second, the importer is checkpointed. If it crashes partway through, re-running it skips completed phases. No data is duplicated. Third, because the import writes into a fresh OpenCAS instance, you can roll back simply by wiping the OpenCAS state directory and starting over with the same staging package. The cutover manifest at dot opencas slash cutover underscore manifest dot json records every file that was processed, with its size and sha256 hash, so you have a full audit trail of what moved.">
+          <button class="tts-btn" data-tts="Safety and rollback. The import is designed to be safe in three ways. First, LegacyAgent's state directory is never modified. The extract script only reads from it. Second, the importer is checkpointed. If it crashes partway through, re-running it skips completed phases. No data is duplicated. Third, because the import writes into a fresh OpenCAS instance, you can roll back simply by wiping the OpenCAS state directory and starting over with the same staging package. The cutover manifest at dot opencas slash cutover underscore manifest dot json records every file that was processed, with its size and sha256 hash, so you have a full audit trail of what moved.">
             <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"/></svg>
             listen
           </button>
@@ -657,8 +657,8 @@ report = asyncio.run(runtime.import_bulma(
 
         <div class="grid cols-3" style="gap:12px;">
           <div class="cat-card">
-            <div class="cat-head"><span class="cat-icon">🔒</span><h4>Bulma is never touched</h4></div>
-            <p>The extract script and importer are both read-only with respect to Bulma's state directory. Nothing in <code>/mnt/xtra/openbulma-v4/state</code> is modified or deleted.</p>
+            <div class="cat-head"><span class="cat-icon">🔒</span><h4>LegacyAgent is never touched</h4></div>
+            <p>The extract script and importer are both read-only with respect to LegacyAgent's state directory. Nothing in <code>(legacy_path)/state</code> is modified or deleted.</p>
           </div>
           <div class="cat-card">
             <div class="cat-head"><span class="cat-icon">♻️</span><h4>Checkpointed resumption</h4></div>

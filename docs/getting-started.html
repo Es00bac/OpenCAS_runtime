@@ -299,7 +299,7 @@
 <div class="code-block">
   <span class="lang-label">bash</span>
   <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-  <pre>cd /mnt/xtra/OpenCAS
+  <pre>cd (workspace_root)
 source .venv/bin/activate
 pip install -r requirements.txt</pre>
 </div>
@@ -317,7 +317,7 @@ pip install -r requirements.txt</pre>
 <div class="code-block">
   <span class="lang-label">bash</span>
   <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-  <pre>pip install -e /mnt/xtra/open_llm_auth/</pre>
+  <pre>pip install -e (external_volumes)/open_llm_auth/</pre>
 </div>
 
 <!-- ============================================================ -->
@@ -374,7 +374,7 @@ pip install -r requirements.txt</pre>
 <div class="code-block">
   <span class="lang-label">bash</span>
   <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-  <pre>cd /mnt/xtra/OpenCAS
+  <pre>cd (workspace_root)
 source .venv/bin/activate
 
 python -m opencas --with-server</pre>
@@ -401,8 +401,8 @@ python -m opencas --with-server</pre>
   <pre>python -m opencas \
   --with-server \
   --state-dir ~/.opencas/agents/main \
-  --workspace-root /mnt/xtra/OpenCAS \
-  --workspace-extra-root /mnt/xtra/open_llm_auth \
+  --workspace-root (workspace_root) \
+  --workspace-extra-root (external_volumes)/open_llm_auth \
   --session-id "session-$(date +%Y%m%d-%H%M%S)" \
   --default-llm-model "anthropic/claude-sonnet-4-6" \
   --embedding-model-id "google/gemini-embedding-2-preview" \
@@ -869,7 +869,7 @@ rm -rf ./.opencas/identity</pre>
 <div class="code-block">
   <span class="lang-label">bash</span>
   <button class="copy-btn" onclick="copyCode(this)">Copy</button>
-  <pre>pip install -e /mnt/xtra/open_llm_auth/</pre>
+  <pre>pip install -e (external_volumes)/open_llm_auth/</pre>
 </div>
 
 <h3>"OpenCAS requires Python >= 3.11"</h3>

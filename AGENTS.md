@@ -24,8 +24,7 @@ The human user and the CAS agent are **partners**. The primary user of the syste
 
 The user authorized a comprehensive 4-plan autonomous pass. Every phase was implemented, tested, and committed.
 
-### Phase A — OpenLLMAuth Configurability
-**Goal:** Break the global singleton so OpenCAS and OpenBulma-v4 can share `open_llm_auth` without collision, and make `kimi` / `kimi k2.5` first-class choices.
+**Goal:** Break the global singleton so OpenCAS can use `open_llm_auth` without configuration collisions, and make `kimi` / `kimi k2.5` first-class choices.
 
 **Done:**
 - `ProviderManager` now accepts `config_path` and `env_path` constructor args.
@@ -35,7 +34,7 @@ The user authorized a comprehensive 4-plan autonomous pass. Every phase was impl
 - OpenCAS `BootstrapPipeline` passes these into `ProviderManager`.
 
 ### Phase B — OpenCAS Memory Retrieval "Inner-Mind"
-**Goal:** Port OpenBulma-v4's rich multi-signal scoring into OpenCAS so retrieval feels organic.
+**Goal:** Port rich multi-signal scoring patterns from legacy prototypes into OpenCAS so retrieval feels organic.
 
 **Done:**
 - New module: `opencas/context/resonance.py` with `compute_emotional_resonance`, `compute_temporal_echo`, `compute_reliability_score`, `compute_edge_strength`.
@@ -89,19 +88,18 @@ The user authorized a comprehensive 4-plan autonomous pass. Every phase was impl
    - The `SelfApprovalLadder`, `HookBus`, `CommandSafetyValidator`, and `ConversationalRefusalGate` exist for this purpose. Do not bypass them.
 
 4. **Git discipline.**
-   - Both `/mnt/xtra/OpenCAS` and `/mnt/xtra/open_llm_auth` are now git repositories.
+   - Both `(workspace_root)` and `(external_volumes)/open_llm_auth` are now git repositories.
    - The user specifically requested this: *"make it a git repo"* and *"all projects need to have a git repo, Local"*.
    - Create commits for meaningful milestones. Do not leave repos in a broken state.
 
-5. **Do not run the Bulma importer.**
-   - `opencas/legacy/importer.py` and `AgentRuntime.import_bulma()` are **forbidden** until this directive is removed. Running it causes unrecoverable data loss.
+
 
 ---
 
 ## 4. Workspace Layout
 
 ```
-/mnt/xtra/OpenCAS/          # Main OpenCAS repo (Python)
+(workspace_root)/          # Main OpenCAS repo (Python)
   opencas/
     api/                    # FastAPI server + new dashboard routers
     bootstrap/              # BootstrapPipeline, BootstrapContext, BootstrapConfig
@@ -121,7 +119,7 @@ The user authorized a comprehensive 4-plan autonomous pass. Every phase was impl
   CLAUDE.md                 # Multi-model collaboration guidelines
   AGENTS.md                 # This file
 
-/mnt/xtra/open_llm_auth/    # Editable dependency, now a git repo
+(external_volumes)/open_llm_auth/    # Editable dependency, now a git repo
   src/open_llm_auth/
     server/
       templates/dashboard.html
@@ -163,7 +161,7 @@ python -m opencas --with-server
   - `OpenCAS`: commit `c37b0a2` — Add OpenCAS comprehensive dashboard (Phase C)
   - `open_llm_auth`: commit `0b7e667` — Initial commit: OpenLLMAuth gateway with advanced admin dashboard
 - **No known blockers.** 
-- **OpenLLMAuth** can be installed in editable mode from `/mnt/xtra/open_llm_auth` (already in `requirements.txt`).
+- **OpenLLMAuth** can be installed in editable mode from `(external_volumes)/open_llm_auth` (already in `requirements.txt`).
 
 ---
 
@@ -195,7 +193,7 @@ If you need to understand *why* a specific file was changed, what test failed th
 ## 9. Key Contacts / References
 
 - **Spec:** `OPENCAS_PRODUCT_SPEC.md` (authoritative requirements).
-- **Comparison repos:** `/mnt/xtra/openbulma-v4/` (Bulma patterns), `claw-code` patterns in spec §16.
+- **Comparison repos:** Legacy patterns and `claw-code` patterns in spec §16.
 - **LLM Gateway:** `open_llm_auth` (editable install in same workspace).
 - **Default models:**
   - Chat: `anthropic/claude-sonnet-4-6` (override via `default_llm_model`)
@@ -209,5 +207,5 @@ If you need to understand *why* a specific file was changed, what test failed th
 - We just finished a massive 4-plan enhancement: config portability, emotional memory retrieval, OpenLLMAuth admin GUI, and an OpenCAS comprehensive dashboard.
 - **Everything is committed and passing tests.**
 - The user hates busy-work and wants the agent to act as a partner, not a tool.
-- **Do not run the Bulma importer.**
+
 - When in doubt, read the session transcript at the path above.

@@ -4,7 +4,7 @@
 import sys
 import asyncio
 
-sys.path.insert(0, '/mnt/xtra/openbulma-v4/workspaces/v3-projects')
+
 
 from async_http_client import (
     AsyncHTTPClient,

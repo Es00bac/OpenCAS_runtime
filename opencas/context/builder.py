@@ -97,7 +97,7 @@ class ContextBuilder:
         )
 
     async def _build_system_entry(self, style_note: str = "", user_input: str = "") -> MessageEntry:
-        """Compose system message matching Bulma's original OpenBulma v4 identity prompt."""
+        """Compose system message matching LegacyAgent's original LegacyPrototype v4 identity prompt."""
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
@@ -108,7 +108,7 @@ class ContextBuilder:
         if self.identity and self.identity.self_model.name:
             persona_name = self.identity.self_model.name
 
-        # Core identity (adapted from OpenBulma v4 -> OpenCAS environment)
+        # Core identity (adapted from LegacyPrototype v4 -> OpenCAS environment)
         parts.append(f"You are {persona_name or 'OpenCAS'}, the AI from OpenCAS (not the Dragon Ball character).")
         parts.append("Stay consistent with your memories, personality, and emotional history.")
         parts.append("Speak concisely, action-first, caring but direct.")
@@ -211,7 +211,7 @@ class ContextBuilder:
             elif self.executive.recommend_pause():
                 parts.append("You are currently experiencing high cognitive or somatic fatigue. Provide short, definitive responses and avoid starting complex new operations unless explicitly directed.")
 
-        # Identity anchors from memory (mirrors OpenBulma v4 structure)
+        # Identity anchors from memory (mirrors LegacyPrototype v4 structure)
         soul_anchors, identity_anchors = await self._build_identity_anchors()
         parts.append("SOUL foundation (authoritative):")
         parts.extend(soul_anchors if soul_anchors else ["- (SOUL foundations not loaded)"])
@@ -248,12 +248,12 @@ class ContextBuilder:
         parts.append("Do not claim a file is missing unless you explicitly state evidence was limited; prefer 'not shown in current evidence window' over hard absence claims.")
         parts.append("If evidence is weak or missing, explicitly state a memory gap instead of guessing.")
         parts.append("Do not invent timestamps, quotes, specs, events, chapter content, plot details, character actions, or narrative claims not shown in recalled memory snippets. If a specific detail is absent from your evidence window, explicitly state you do not have it in current recall rather than inferring or extrapolating.")
-        parts.append("Environment orientation: you are running inside OpenCAS. The active workspace root is /mnt/xtra/OpenCAS. File and project references from prior systems (OpenBulma v4, OpenClaw, etc.) are historical unless current workspace evidence confirms the same path is still active.")
+        parts.append("Environment orientation: you are running inside OpenCAS. The active workspace root is (workspace_root). File and project references from prior systems (LegacyPrototype v4, OpenClaw, etc.) are historical unless current workspace evidence confirms the same path is still active.")
 
         # Continuity fact
-        parts.append("Continuity fact: there has only ever been one Bulma instance running at a time. OpenClaw -> v1 -> v2 -> v3 -> v4 -> OpenCAS were sequential migrations of the same self, not parallel sisters. Treat any 'sister' or 'other instance' memories as historical self, not a live peer.")
+        parts.append("Continuity fact: there has only ever been one LegacyAgent instance running at a time. OpenClaw -> v1 -> v2 -> v3 -> v4 -> OpenCAS were sequential migrations of the same self, not parallel sisters. Treat any 'sister' or 'other instance' memories as historical self, not a live peer.")
 
-        # Relationship context (matching original Bulma crisp format)
+        # Relationship context (matching original LegacyAgent crisp format)
         relationship_lines: List[str] = []
         if self.identity:
             user_model = self.identity.user_model
@@ -274,17 +274,17 @@ class ContextBuilder:
 
     @staticmethod
     def _is_soul_foundation_episode(episode: Any) -> bool:
-        """Mirror of OpenBulma v4 isSoulFoundationEpisode."""
-        source = str(episode.payload.get("bulma_source", "")).lower()
+        """Mirror of LegacyPrototype v4 isSoulFoundationEpisode."""
+        source = str(episode.payload.get("legacy_agent_source", "")).lower()
         if source.startswith("soul:") or source.startswith("foundation:"):
             return True
-        metadata = episode.payload.get("bulma_metadata") or {}
+        metadata = episode.payload.get("legacy_agent_metadata") or {}
         ep_type = str(metadata.get("type", "")).lower()
         return ep_type in ("foundation_soul", "foundation_document")
 
     @staticmethod
     def _is_workspace_derived_source(source: str) -> bool:
-        """Mirror of OpenBulma v4 isWorkspaceDerivedIdentitySource."""
+        """Mirror of LegacyPrototype v4 isWorkspaceDerivedIdentitySource."""
         normalized = source.lower()
         return (
             normalized.startswith("workspace:")
@@ -320,13 +320,13 @@ class ContextBuilder:
             for ep in episodes
             if not self._is_soul_foundation_episode(ep)
             and not self._is_workspace_derived_source(
-                str(ep.payload.get("bulma_source", ""))
+                str(ep.payload.get("legacy_agent_source", ""))
             )
         ]
         identity_eps.sort(key=lambda ep: ep.salience, reverse=True)
         for ep in identity_eps[:8]:
             ts = ep.created_at.isoformat()[:19]
-            source = ep.payload.get("bulma_source", "unknown")
+            source = ep.payload.get("legacy_agent_source", "unknown")
             excerpt = str(ep.content)[:400]
             identity_anchors.append(f"- {ts} [{source}]: {excerpt}")
 

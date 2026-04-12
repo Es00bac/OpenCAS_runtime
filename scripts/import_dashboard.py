@@ -22,8 +22,8 @@ from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PORT = 8765
-STATE_DIR = Path("/mnt/xtra/OpenCAS/.opencas")
-CHECKPOINT_PATH = Path("/mnt/xtra/OpenCAS/.opencas_import_checkpoint.json")
+STATE_DIR = Path("(workspace_root)/.opencas")
+CHECKPOINT_PATH = Path("(workspace_root)/.opencas_import_checkpoint.json")
 LOG_FILE = Path("/tmp/opencas_import.log")
 TOTAL_EPISODES = 3108
 ALL_PHASES = [

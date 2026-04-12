@@ -2,7 +2,7 @@
  * DaydreamService.ts
  * 
  * Core service for managing daydream sparks, notification configuration,
- * state tracking, and persistence. Implements Bulma's desire to
+ * state tracking, and persistence. Implements LegacyAgent's desire to
  * "become someone who can genuinely surprise you" while respecting
  * boundaries and user control.
  */
@@ -44,7 +44,7 @@ export interface NotificationState {
   notificationsToday: number;
   lastResetDate: string; // YYYY-MM-DD
   totalNotificationsSent: number;
-  currentFocus: string | null; // What Bulma is currently "thinking about"
+  currentFocus: string | null; // What LegacyAgent is currently "thinking about"
   focusUpdatedAt: number | null;
 }
 

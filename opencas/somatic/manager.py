@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Coroutine, List, Optional, Sequence, Tuple
+from typing import Any, Coroutine, Dict, List, Optional, Sequence, Tuple
 
 from opencas.embeddings import EmbeddingService
 
