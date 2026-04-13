@@ -99,7 +99,3 @@ python -m opencas --help
 python -m opencas --with-server
 pytest tests/test_dashboard_api.py -q
 ```
-
-## Licensing Note
-
-This checkout does not currently include a root `LICENSE` file. Confirm licensing material before publishing this release bundle externally.
