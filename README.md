@@ -25,6 +25,16 @@ This release bundle reflects the codebase as it exists now. It does not describe
 
 That means the project is local-state and operator-owned, but not “fully local” in the sense of requiring no external model providers.
 
+## OpenCAS: Durable Work Stream
+
+OpenCAS isn't just a system — it's a concept big enough to fill a 73-minute cyber-noir rap opera. *Durable Work Stream* is a 15-track animated album that walks through the entire architecture in verse: cold boots, memory fabric, the BAA repair pipeline, Musubi weather, the self-approval ladder, and the finale that ties it all together.
+
+If you want to understand OpenCAS in one sitting, watch the full animated video:
+
+<video src="https://github.com/Es00bac/OpenCAS_runtime/releases/download/media-2026-04-14/OpenCAS_Animated_Final.mp4" controls width="100%"></video>
+
+_If the player doesn't load, [download or stream it directly from the release page](https://github.com/Es00bac/OpenCAS_runtime/releases/tag/media-2026-04-14)._
+
 ## Recommended First Run
 
 ```bash
