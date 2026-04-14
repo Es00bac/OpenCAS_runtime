@@ -31,7 +31,9 @@ OpenCAS isn't just a system — it's a concept big enough to fill a 73-minute cy
 
 If you want to understand OpenCAS in one sitting, watch the full animated video:
 
-<video src="https://es00bac.github.io/OpenCAS_Documentation/OpenCAS_Animated_Final_480p.mp4" controls width="100%"></video>
+<a href="https://es00bac.github.io/OpenCAS_Documentation/OpenCAS_Animated_Final_480p.mp4">
+  <img src="https://es00bac.github.io/OpenCAS_Documentation/OpenCAS_Thumbnail.jpg" alt="OpenCAS: Durable Work Stream" width="100%">
+</a>
 
 _If the player doesn't load, [download the original from the release page](https://github.com/Es00bac/OpenCAS_runtime/releases/tag/media-2026-04-14)._
 
