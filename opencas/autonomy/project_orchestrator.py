@@ -80,7 +80,11 @@ class ProjectOrchestrator:
                     },
                     {"role": "user", "content": prompt},
                 ]
-                response = await self.llm.chat_completion(messages)
+                response = await self.llm.chat_completion(
+                    messages,
+                    complexity="high",
+                    source="project_decomposition",
+                )
                 raw_text = (
                     response.get("choices", [{}])[0].get("message", {}).get("content", "")
                 )

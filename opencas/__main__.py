@@ -10,6 +10,10 @@ import sys
 from pathlib import Path
 
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
+from opencas.model_routing import (
+    ModelRoutingMode,
+    load_persisted_model_routing_state,
+)
 from opencas.runtime import AgentRuntime
 from opencas.telegram_config import load_telegram_runtime_config
 
@@ -31,6 +35,7 @@ def _read_materialized_default_model(state_dir: Path) -> str | None:
 def _build_bootstrap_config(args, persisted_telegram) -> BootstrapConfig:
     """Build BootstrapConfig without clobbering model defaults with None."""
     state_dir = Path(args.state_dir).expanduser().resolve()
+    persisted_model_routing = load_persisted_model_routing_state(state_dir)
     config_kwargs = {
         "state_dir": state_dir,
         "session_id": args.session_id,
@@ -69,8 +74,18 @@ def _build_bootstrap_config(args, persisted_telegram) -> BootstrapConfig:
         ),
         "telegram_api_base_url": persisted_telegram.api_base_url,
     }
+    if persisted_model_routing is not None:
+        routing = persisted_model_routing.model_routing
+        if args.default_llm_model is not None and routing.mode == ModelRoutingMode.SINGLE:
+            routing = routing.model_copy(update={"single_model": args.default_llm_model})
+        config_kwargs["model_routing"] = routing
     if args.default_llm_model is not None:
         config_kwargs["default_llm_model"] = args.default_llm_model
+    elif (
+        persisted_model_routing is not None
+        and persisted_model_routing.default_llm_model
+    ):
+        config_kwargs["default_llm_model"] = persisted_model_routing.default_llm_model
     else:
         materialized_default = _read_materialized_default_model(state_dir)
         if materialized_default:

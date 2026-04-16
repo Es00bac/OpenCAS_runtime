@@ -138,6 +138,7 @@ class IdentityRebuilder:
         try:
             response = await self.llm.chat_completion(
                 messages=messages,
+                complexity="high",
                 payload={"temperature": 0.4, "max_tokens": 512},
                 source="identity_rebuild",
             )

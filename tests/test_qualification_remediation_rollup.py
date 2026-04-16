@@ -42,6 +42,7 @@ def test_build_rollup_classifies_runner_issue(tmp_path: Path) -> None:
 
     payload = build_rollup(runs_dir, history_path)
 
+    assert payload["rate_scope"] == "retained_label_runs"
     assert payload["items"][0]["recommended_action"] == "investigate_runner"
     assert payload["items"][0]["latest_run"] is None
 
@@ -82,10 +83,34 @@ def test_build_rollup_classifies_code_change_vs_continue_testing(tmp_path: Path)
     assert by_request["req-bad"]["recommended_action"] == "code_change_justified"
 
 
+def test_build_rollup_classifies_stable_success_as_watch_only(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    _write_run(runs_dir, "run-1", "integrated_operator_workflow", True, "artifact_verified")
+    _write_run(runs_dir, "run-2", "integrated_operator_workflow", True, "artifact_verified")
+    history_path = tmp_path / "qualification_rerun_history.jsonl"
+    history_path.write_text(
+        json.dumps({
+            "event": "completed",
+            "request_id": "req-stable",
+            "labels": ["integrated_operator_workflow"],
+            "returncode": 0,
+            "generated_run_ids": ["run-2"],
+            "latest_run_id": "run-2",
+        })
+        + "\n",
+        encoding="utf-8",
+    )
+
+    payload = build_rollup(runs_dir, history_path)
+
+    assert payload["items"][0]["recommended_action"] == "watch_only"
+
+
 def test_render_markdown_mentions_recommended_action(tmp_path: Path) -> None:
     payload = {
         "count": 1,
         "history_path": str(tmp_path / "qualification_rerun_history.jsonl"),
+        "rate_scope": "retained_label_runs",
         "items": [
             {
                 "request_id": "req-1",
@@ -105,3 +130,5 @@ def test_render_markdown_mentions_recommended_action(tmp_path: Path) -> None:
 
     assert "Recommended action" in rendered
     assert "`continue_testing`" in rendered
+    assert "retained_label_runs" in rendered
+    assert "before_rate` and `after_rate` are computed from the label runs currently retained" in rendered

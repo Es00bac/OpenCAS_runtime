@@ -1,6 +1,7 @@
 """Bootstrap module for OpenCAS: staged startup pipeline."""
 
 from .config import BootstrapConfig
-from .pipeline import BootstrapContext, BootstrapPipeline
+from .context import BootstrapContext
+from .pipeline import BootstrapPipeline
 
 __all__ = ["BootstrapConfig", "BootstrapContext", "BootstrapPipeline"]

@@ -22,8 +22,9 @@ from pathlib import Path
 
 # ── Config ────────────────────────────────────────────────────────────────────
 PORT = 8765
-STATE_DIR = Path("(workspace_root)/.opencas")
-CHECKPOINT_PATH = Path("(workspace_root)/.opencas_import_checkpoint.json")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+STATE_DIR = REPO_ROOT / ".opencas"
+CHECKPOINT_PATH = REPO_ROOT / ".opencas_import_checkpoint.json"
 LOG_FILE = Path("/tmp/opencas_import.log")
 TOTAL_EPISODES = 3108
 ALL_PHASES = [

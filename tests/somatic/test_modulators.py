@@ -42,7 +42,7 @@ def test_prompt_style_note_certainty() -> None:
     state = SomaticState(certainty=0.2)
     mod = SomaticModulators(state)
     note = mod.to_prompt_style_note()
-    assert "certainty" in note.lower()
+    assert "uncertainty" in note.lower()
 
 
 def test_prompt_style_note_valence() -> None:
@@ -55,9 +55,7 @@ def test_prompt_style_note_valence() -> None:
 def test_prompt_style_note_empty_when_neutral() -> None:
     state = SomaticState()
     mod = SomaticModulators(state)
-    # Default SomaticState has tension=0.1, arousal=0.5, focus=0.5, valence=0.0
-    # It will NOT be empty because tension < 0.3.
-    assert "relaxed" in mod.to_prompt_style_note().lower()
+    assert mod.to_prompt_style_note() == ""
 
 
 def test_memory_retrieval_boost_neutral() -> None:

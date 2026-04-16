@@ -2,16 +2,30 @@
 
 from __future__ import annotations
 
-from collections import Counter, defaultdict
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
-import numpy as np
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from opencas.context.retriever import MemoryRetriever
+
+from opencas.api.memory_projection import (
+    build_memory_retriever,
+    collect_embedding_points,
+    enrich_nodes_with_embeddings,
+    get_total_episode_count,
+)
 from opencas.context.resonance import compute_edge_strength
+from opencas.api.memory_serialization import (
+    affect_to_dict,
+    edge_signal_summary,
+    edge_to_dict,
+    episode_to_dict,
+    memory_to_dict,
+    truncate_memory_text,
+)
+from opencas.context.retriever import MemoryRetriever
 from opencas.memory import EdgeKind
 
 router = APIRouter(tags=["memory"])
@@ -71,280 +85,6 @@ class NodeDetailResponse(BaseModel):
     stats: Dict[str, Any]
 
 
-def _truncate(text: str, limit: int = 200) -> str:
-    text = text.strip()
-    if len(text) <= limit:
-        return text
-    return text[: max(0, limit - 1)].rstrip() + "…"
-
-
-def _affect_to_dict(affect: Any) -> Optional[Dict[str, Any]]:
-    if affect is None:
-        return None
-    return {
-        "primary_emotion": affect.primary_emotion.value,
-        "valence": affect.valence,
-        "arousal": affect.arousal,
-        "certainty": affect.certainty,
-        "intensity": affect.intensity,
-        "social_target": affect.social_target.value,
-        "emotion_tags": affect.emotion_tags,
-    }
-
-
-def _episode_to_dict(ep: Any) -> Dict[str, Any]:
-    artifact = (ep.payload or {}).get("artifact") if getattr(ep, "payload", None) else None
-    return {
-        "episode_id": str(ep.episode_id),
-        "created_at": ep.created_at.isoformat(),
-        "kind": ep.kind.value,
-        "session_id": ep.session_id,
-        "content": ep.content,
-        "content_preview": _truncate(ep.content, 240),
-        "salience": ep.salience,
-        "compacted": ep.compacted,
-        "identity_core": ep.identity_core,
-        "confidence_score": ep.confidence_score,
-        "used_successfully": ep.used_successfully,
-        "used_unsuccessfully": ep.used_unsuccessfully,
-        "somatic_tag": ep.somatic_tag,
-        "embedding_id": ep.embedding_id,
-        "affect": _affect_to_dict(ep.affect),
-        "artifact": artifact,
-    }
-
-
-def _memory_to_dict(memory: Any) -> Dict[str, Any]:
-    return {
-        "memory_id": str(memory.memory_id),
-        "created_at": memory.created_at.isoformat(),
-        "updated_at": memory.updated_at.isoformat(),
-        "content": memory.content,
-        "content_preview": _truncate(memory.content, 240),
-        "embedding_id": memory.embedding_id,
-        "source_episode_ids": list(memory.source_episode_ids),
-        "tags": list(memory.tags),
-        "salience": memory.salience,
-        "access_count": memory.access_count,
-        "last_accessed": memory.last_accessed.isoformat() if memory.last_accessed else None,
-    }
-
-
-def _edge_to_dict(edge: Any) -> Dict[str, Any]:
-    return {
-        "edge_id": str(edge.edge_id),
-        "source_id": edge.source_id,
-        "target_id": edge.target_id,
-        "kind": edge.kind.value,
-        "confidence": edge.confidence,
-        "semantic_weight": edge.semantic_weight,
-        "emotional_weight": edge.emotional_weight,
-        "recency_weight": edge.recency_weight,
-        "structural_weight": edge.structural_weight,
-        "salience_weight": edge.salience_weight,
-        "causal_weight": edge.causal_weight,
-        "verification_weight": edge.verification_weight,
-        "actor_affinity_weight": edge.actor_affinity_weight,
-        "strength": round(float(compute_edge_strength(edge)), 6),
-        "created_at": edge.created_at.isoformat(),
-    }
-
-
-async def _enrich_nodes_with_embeddings(
-    embeddings: Any,
-    nodes: List[Dict[str, Any]],
-) -> Dict[str, Any]:
-    projection = await _collect_embedding_points(
-        embeddings,
-        [
-            (node.get("node_type", "node"), node, node.get("embedding_id"))
-            for node in nodes
-        ],
-        requested_method="auto",
-    )
-    for node in nodes:
-        point = projection["points"].get(node["node_id"])
-        if point is None:
-            continue
-        node.update(
-            {
-                "x": point["x"],
-                "y": point["y"],
-                "projection_group": point["projection_group"],
-                "projection_dimension": point["projection_dimension"],
-                "projection_method": point["projection_method"],
-                "embedding_model_id": point["embedding_model_id"],
-            }
-        )
-    return projection
-
-
-def _edge_signal_summary(edge_payload: Dict[str, Any]) -> Dict[str, Any]:
-    signal_weights = {
-        "semantic": float(edge_payload.get("semantic_weight", 0.0)),
-        "emotional": float(edge_payload.get("emotional_weight", 0.0)),
-        "recency": float(edge_payload.get("recency_weight", 0.0)),
-        "structural": float(edge_payload.get("structural_weight", 0.0)),
-        "salience": float(edge_payload.get("salience_weight", 0.0)),
-        "causal": float(edge_payload.get("causal_weight", 0.0)),
-        "verification": float(edge_payload.get("verification_weight", 0.0)),
-        "actor_affinity": float(edge_payload.get("actor_affinity_weight", 0.0)),
-    }
-    ordered = sorted(signal_weights.items(), key=lambda item: item[1], reverse=True)
-    strongest_kind, strongest_value = ordered[0]
-    return {
-        "strongest_signal": strongest_kind,
-        "strongest_signal_weight": round(strongest_value, 6),
-        "signal_weights": signal_weights,
-    }
-
-
-def _normalize_projection(points: np.ndarray) -> np.ndarray:
-    centered = points - np.mean(points, axis=0, keepdims=True)
-    scale = float(np.max(np.abs(centered))) if centered.size else 1.0
-    if scale <= 0.0:
-        scale = 1.0
-    return centered / scale
-
-
-def _project_matrix(vectors: np.ndarray, requested_method: str = "auto") -> tuple[np.ndarray, str]:
-    if len(vectors) == 1:
-        return np.array([[0.0, 0.0]], dtype=np.float32), "single-point"
-
-    methods = ["umap", "pca", "random"] if requested_method == "auto" else [requested_method, "random"]
-    last_error: Optional[Exception] = None
-    for method in methods:
-        try:
-            if method == "umap":
-                from umap import UMAP
-
-                reducer = UMAP(n_components=2, random_state=42)
-                return reducer.fit_transform(vectors), "umap"
-            if method == "pca":
-                from sklearn.decomposition import PCA
-
-                reducer = PCA(n_components=2)
-                return reducer.fit_transform(vectors), "pca"
-            if method == "random":
-                rng = np.random.default_rng(seed=42)
-                projection = vectors @ rng.standard_normal(size=(vectors.shape[1], 2))
-                return projection, "random"
-        except Exception as exc:  # pragma: no cover - fallback path depends on env extras
-            last_error = exc
-            continue
-    raise RuntimeError(f"projection failed: {last_error}")
-
-
-async def _collect_embedding_points(
-    embeddings: Any,
-    items: Iterable[tuple[str, Dict[str, Any], Optional[str]]],
-    requested_method: str = "auto",
-) -> Dict[str, Any]:
-    grouped: Dict[int, List[Dict[str, Any]]] = defaultdict(list)
-    missing: List[Dict[str, Any]] = []
-
-    for node_type, node, embedding_id in items:
-        if not embedding_id:
-            missing.append({"node_type": node_type, "node_id": node["node_id"]})
-            continue
-        try:
-            record = await embeddings.cache.get(embedding_id)
-        except Exception:
-            record = None
-        if record is None or not record.vector:
-            missing.append({"node_type": node_type, "node_id": node["node_id"]})
-            continue
-        node["embedding_model_id"] = record.model_id
-        node["embedding_dimension"] = record.dimension
-        grouped[int(record.dimension)].append(
-            {
-                "node_type": node_type,
-                "node_id": node["node_id"],
-                "vector": np.array(record.vector, dtype=np.float32),
-                "model_id": record.model_id,
-            }
-        )
-
-    point_map: Dict[str, Dict[str, Any]] = {}
-    group_summaries: List[Dict[str, Any]] = []
-    method_labels: List[str] = []
-    x_offset = 0.0
-
-    for dimension, group_items in sorted(grouped.items(), key=lambda item: (-len(item[1]), -item[0])):
-        vectors = np.stack([entry["vector"] for entry in group_items])
-        projection, method = _project_matrix(vectors, requested_method=requested_method)
-        normalized = _normalize_projection(np.asarray(projection, dtype=np.float32))
-        method_labels.append(method)
-        for entry, coords in zip(group_items, normalized):
-            point_map[entry["node_id"]] = {
-                "x": round(float(coords[0] + x_offset), 6),
-                "y": round(float(coords[1]), 6),
-                "projection_group": f"{dimension}d",
-                "projection_dimension": dimension,
-                "projection_method": method,
-                "embedding_model_id": entry["model_id"],
-            }
-        group_summaries.append(
-            {
-                "dimension": dimension,
-                "count": len(group_items),
-                "method": method,
-                "model_ids": sorted({entry["model_id"] for entry in group_items}),
-                "x_offset": round(x_offset, 3),
-            }
-        )
-        x_offset += 3.0
-
-    if missing:
-        for index, entry in enumerate(missing):
-            point_map[entry["node_id"]] = {
-                "x": round(float(x_offset), 6),
-                "y": round(float(-1.25 + index * 0.14), 6),
-                "projection_group": "no-embedding",
-                "projection_dimension": None,
-                "projection_method": "none",
-                "embedding_model_id": None,
-            }
-        group_summaries.append(
-            {
-                "dimension": None,
-                "count": len(missing),
-                "method": "none",
-                "model_ids": [],
-                "x_offset": round(x_offset, 3),
-            }
-        )
-        method_labels.append("none")
-
-    method_label = method_labels[0] if len(set(method_labels)) == 1 else "mixed"
-    return {
-        "points": point_map,
-        "method": method_label,
-        "groups": group_summaries,
-        "missing_count": len(missing),
-    }
-
-
-def _build_memory_retriever(runtime: Any) -> MemoryRetriever:
-    retriever = getattr(runtime, "retriever", None)
-    if retriever is not None:
-        return retriever
-    return MemoryRetriever(
-        memory=runtime.memory,
-        embeddings=runtime.ctx.embeddings,
-        episode_graph=getattr(runtime, "episode_graph", None),
-        somatic_manager=getattr(runtime.ctx, "somatic", None),
-        relational_engine=getattr(runtime, "relational", None),
-    )
-
-
-async def _get_total_episode_count(memory: Any) -> int:
-    assert memory._db is not None
-    cursor = await memory._db.execute("SELECT COUNT(*) FROM episodes")
-    row = await cursor.fetchone()
-    return row[0] if row else 0
-
-
 def build_memory_router(runtime: Any) -> APIRouter:
     """Build memory routes wired to *runtime*."""
     r = APIRouter(prefix="/api/memory", tags=["memory"])
@@ -353,9 +93,9 @@ def build_memory_router(runtime: Any) -> APIRouter:
     async def list_episodes(limit: int = 50, offset: int = 0) -> EpisodesResponse:
         mem = runtime.memory
         episodes = await mem.list_episodes(limit=limit, offset=offset)
-        total = await _get_total_episode_count(mem)
+        total = await get_total_episode_count(mem)
         return EpisodesResponse(
-            episodes=[_episode_to_dict(ep) for ep in episodes],
+            episodes=[episode_to_dict(ep) for ep in episodes],
             total=total,
         )
 
@@ -373,8 +113,8 @@ def build_memory_router(runtime: Any) -> APIRouter:
         episodes = await runtime.memory.get_episodes_by_ids(node_ids)
         return GraphResponse(
             episode_id=episode_id,
-            nodes=[_episode_to_dict(ep) for ep in episodes],
-            edges=[_edge_to_dict(e) for e in edges],
+            nodes=[episode_to_dict(ep) for ep in episodes],
+            edges=[edge_to_dict(e) for e in edges],
         )
 
     @r.get("/stats", response_model=MemoryStatsResponse)
@@ -395,7 +135,7 @@ def build_memory_router(runtime: Any) -> APIRouter:
         episodes = await runtime.memory.search_episodes_by_content(query, limit=limit)
         return SearchResponse(
             query=query,
-            results=[_episode_to_dict(ep) for ep in episodes],
+            results=[episode_to_dict(ep) for ep in episodes],
         )
 
     @r.get("/embedding-projection", response_model=ProjectionResponse)
@@ -405,7 +145,7 @@ def build_memory_router(runtime: Any) -> APIRouter:
     ) -> ProjectionResponse:
         mem = runtime.memory
         episodes = await mem.list_episodes(limit=limit)
-        points_data = await _collect_embedding_points(
+        points_data = await collect_embedding_points(
             runtime.ctx.embeddings,
             [
                 (
@@ -493,7 +233,7 @@ def build_memory_router(runtime: Any) -> APIRouter:
                 "node_id": node_id,
                 "node_type": "episode",
                 "episode_id": str(episode.episode_id),
-                "label": _truncate(episode.content, 72),
+                "label": truncate_memory_text(episode.content, 72),
                 "content": episode.content,
                 "created_at": episode.created_at.isoformat(),
                 "age_days": round(age_days, 3),
@@ -506,7 +246,7 @@ def build_memory_router(runtime: Any) -> APIRouter:
                 "identity_core": episode.identity_core,
                 "used_successfully": episode.used_successfully,
                 "used_unsuccessfully": episode.used_unsuccessfully,
-                "affect": _affect_to_dict(episode.affect),
+                "affect": affect_to_dict(episode.affect),
                 "embedding_id": episode.embedding_id,
                 "connection_count": 0,
             }
@@ -522,7 +262,7 @@ def build_memory_router(runtime: Any) -> APIRouter:
                 "node_id": node_id,
                 "node_type": "memory",
                 "memory_id": str(memory_item.memory_id),
-                "label": _truncate(memory_item.content, 72),
+                "label": truncate_memory_text(memory_item.content, 72),
                 "content": memory_item.content,
                 "created_at": memory_item.created_at.isoformat(),
                 "updated_at": memory_item.updated_at.isoformat(),
@@ -545,7 +285,7 @@ def build_memory_router(runtime: Any) -> APIRouter:
                 "connection_count": 0,
             }
 
-        projection = await _collect_embedding_points(
+        projection = await collect_embedding_points(
             runtime.ctx.embeddings,
             [
                 (node["node_type"], node, node.get("embedding_id"))
@@ -724,8 +464,8 @@ def build_memory_router(runtime: Any) -> APIRouter:
             node_payload = {
                 "node_id": node_id,
                 "node_type": "episode",
-                **_episode_to_dict(episode),
-                "label": _truncate(episode.content, 72),
+                **episode_to_dict(episode),
+                "label": truncate_memory_text(episode.content, 72),
                 "age_days": round(age_days, 3),
             }
 
@@ -753,12 +493,12 @@ def build_memory_router(runtime: Any) -> APIRouter:
                 neighbor_payload = {
                     "node_id": f"episode:{other_id}",
                     "node_type": "episode",
-                    **_episode_to_dict(other_episode),
-                    "label": _truncate(other_episode.content, 72),
+                    **episode_to_dict(other_episode),
+                    "label": truncate_memory_text(other_episode.content, 72),
                     "age_days": round(other_age_days, 3),
                 }
                 neighbors.append(neighbor_payload)
-                edge_dict = _edge_to_dict(edge)
+                edge_dict = edge_to_dict(edge)
                 edge_dict.update(
                     {
                         "source_node_id": f"episode:{edge.source_id}",
@@ -770,7 +510,7 @@ def build_memory_router(runtime: Any) -> APIRouter:
                         ),
                     }
                 )
-                edge_dict.update(_edge_signal_summary(edge_dict))
+                edge_dict.update(edge_signal_summary(edge_dict))
                 edge_payloads.append(edge_dict)
 
             if edge_kind in (None, "", "distilled_from"):
@@ -785,8 +525,8 @@ def build_memory_router(runtime: Any) -> APIRouter:
                     neighbor_payload = {
                         "node_id": f"memory:{memory_item.memory_id}",
                         "node_type": "memory",
-                        **_memory_to_dict(memory_item),
-                        "label": _truncate(memory_item.content, 72),
+                        **memory_to_dict(memory_item),
+                        "label": truncate_memory_text(memory_item.content, 72),
                         "age_days": round(memory_age_days, 3),
                     }
                     neighbors.append(neighbor_payload)
@@ -815,8 +555,8 @@ def build_memory_router(runtime: Any) -> APIRouter:
             node_payload = {
                 "node_id": node_id,
                 "node_type": "memory",
-                **_memory_to_dict(memory_item),
-                "label": _truncate(memory_item.content, 72),
+                **memory_to_dict(memory_item),
+                "label": truncate_memory_text(memory_item.content, 72),
                 "age_days": round(age_days, 3),
             }
 
@@ -826,8 +566,8 @@ def build_memory_router(runtime: Any) -> APIRouter:
                 neighbor_payload = {
                     "node_id": f"episode:{episode.episode_id}",
                     "node_type": "episode",
-                    **_episode_to_dict(episode),
-                    "label": _truncate(episode.content, 72),
+                    **episode_to_dict(episode),
+                    "label": truncate_memory_text(episode.content, 72),
                     "age_days": round(other_age_days, 3),
                 }
                 neighbors.append(neighbor_payload)
@@ -859,7 +599,7 @@ def build_memory_router(runtime: Any) -> APIRouter:
             unique_neighbors[neighbor["node_id"]] = neighbor
         neighbors = list(unique_neighbors.values())
 
-        await _enrich_nodes_with_embeddings(
+        await enrich_nodes_with_embeddings(
             runtime.ctx.embeddings,
             [node_payload, *neighbors],
         )
@@ -927,14 +667,14 @@ def build_memory_router(runtime: Any) -> APIRouter:
                 "source_type": item.source_type,
                 "source_id": item.source_id,
                 "content": item.content,
-                "content_preview": _truncate(item.content, 200),
+                "content_preview": truncate_memory_text(item.content, 200),
                 "score": round(float(item.score), 6),
             }
             if item.episode is not None:
-                payload["episode"] = _episode_to_dict(item.episode)
+                payload["episode"] = episode_to_dict(item.episode)
                 payload["node_id"] = f"episode:{item.source_id}"
             if item.memory is not None:
-                payload["memory"] = _memory_to_dict(item.memory)
+                payload["memory"] = memory_to_dict(item.memory)
                 payload["node_id"] = f"memory:{item.source_id}"
             results.append(payload)
 

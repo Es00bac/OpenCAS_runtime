@@ -8,7 +8,14 @@ from typing import Any, Dict, List, Optional
 from opencas.identity import IdentityManager
 from opencas.telemetry import EventKind, Tracer
 
-from .models import Belief, BeliefSubject, Intention, IntentionStatus, MetacognitiveResult
+from .models import (
+    Belief,
+    BeliefSubject,
+    Intention,
+    IntentionStatus,
+    MetacognitiveResult,
+    PromiseFollowthroughSignal,
+)
 from .store import TomStore
 
 
@@ -44,28 +51,89 @@ class ToMEngine:
         evidence_ids: Optional[List[str]] = None,
         meta: Optional[Dict[str, Any]] = None,
     ) -> Belief:
-        """Record a new belief, surfacing key beliefs to the identity model."""
+        """Record a new belief or reinforce an existing one with the same subject+predicate."""
+        normalized = predicate.strip().lower()
+        now = datetime.now(timezone.utc)
+
+        # Check for existing belief with same subject+predicate
+        existing = await self._find_existing_belief(subject, normalized)
+
+        if existing is not None:
+            # Reinforce: merge confidence upward, increment count
+            old_conf = existing.confidence
+            new_confidence = old_conf + (1.0 - old_conf) * 0.1
+            new_confidence = max(0.0, min(1.0, new_confidence))
+            existing.confidence = new_confidence
+            existing.reinforcement_count += 1
+            existing.last_reinforced = now
+            # Merge evidence IDs (dedup)
+            merged_ids = list(set(existing.evidence_ids + (evidence_ids or [])))
+            existing.evidence_ids = merged_ids
+            if meta:
+                existing.meta.update(meta)
+
+            # Update in-memory list (replace the old entry)
+            for i, b in enumerate(self._beliefs):
+                if b.belief_id == existing.belief_id:
+                    self._beliefs[i] = existing
+                    break
+
+            if self.store is not None:
+                await self.store.increment_belief_reinforcement(
+                    str(existing.belief_id),
+                    new_confidence,
+                    existing.reinforcement_count,
+                    now,
+                )
+            self._sync_to_identity(subject, normalized, new_confidence)
+            self._trace("belief_reinforced", {
+                "belief_id": str(existing.belief_id),
+                "subject": subject.value,
+                "predicate": normalized,
+                "old_confidence": old_conf,
+                "new_confidence": new_confidence,
+                "reinforcement_count": existing.reinforcement_count,
+                "belief_count": len(self._beliefs),
+            })
+            return existing
+
+        # New belief — no existing match
         belief = Belief(
             subject=subject,
-            predicate=predicate.strip().lower(),
+            predicate=normalized,
             confidence=max(0.0, min(1.0, confidence)),
             evidence_ids=evidence_ids or [],
             meta=meta or {},
+            reinforcement_count=1,
+            last_reinforced=now,
         )
         self._beliefs.append(belief)
         if len(self._beliefs) > 1000:
             self._beliefs = self._beliefs[-1000:]
         if self.store is not None:
             await self.store.save_belief(belief)
-        self._sync_to_identity(subject, predicate, confidence)
+        self._sync_to_identity(subject, normalized, confidence)
         self._trace("belief_recorded", {
             "belief_id": str(belief.belief_id),
             "subject": subject.value,
-            "predicate": belief.predicate,
+            "predicate": normalized,
             "confidence": belief.confidence,
             "belief_count": len(self._beliefs),
         })
         return belief
+
+    async def _find_existing_belief(
+        self, subject: BeliefSubject, predicate: str
+    ) -> Optional[Belief]:
+        """Find an existing belief by subject+predicate. Checks store if available."""
+        # Check in-memory first
+        for b in reversed(self._beliefs):
+            if b.subject == subject and b.predicate == predicate:
+                return b
+        # Fallback to store query
+        if self.store is not None:
+            return await self.store.get_belief_by_predicate(subject, predicate)
+        return None
 
     async def record_intention(
         self,
@@ -219,6 +287,69 @@ class ToMEngine:
             "active_intention_count": result.intention_count,
         })
         return result
+
+    def evaluate_promise_followthrough(
+        self,
+        somatic_state: Optional[Any] = None,
+        relational_engine: Optional[Any] = None,
+        metacognitive_result: Optional[MetacognitiveResult] = None,
+    ) -> PromiseFollowthroughSignal:
+        """Interpret unresolved self-commitments for follow-through behavior."""
+        pending = [
+            intention
+            for intention in self._intentions
+            if intention.status == IntentionStatus.ACTIVE
+            and intention.actor == BeliefSubject.SELF
+            and str(intention.meta.get("source", "")).lower() == "self_commitment_capture"
+        ]
+        if not pending:
+            return PromiseFollowthroughSignal()
+
+        check = metacognitive_result or self.check_consistency()
+        contradictions = check.contradictions
+        fatigue = float(getattr(somatic_state, "fatigue", 0.0) or 0.0)
+        tension = float(getattr(somatic_state, "tension", 0.0) or 0.0)
+        certainty = float(getattr(somatic_state, "certainty", 1.0) or 1.0)
+
+        trust = 0.0
+        resonance = 0.0
+        if relational_engine is not None:
+            try:
+                relational_state = relational_engine.state
+            except AssertionError:
+                relational_state = None
+            if relational_state is not None:
+                trust = float(relational_state.dimensions.get("trust", 0.0))
+                resonance = float(relational_state.dimensions.get("resonance", 0.0))
+
+        should_acknowledge_delay = (
+            fatigue > 0.58
+            or tension > 0.64
+            or certainty < 0.40
+            or bool(contradictions)
+        )
+        should_repair_trust = should_acknowledge_delay and (
+            trust < -0.10
+            or resonance < -0.10
+            or any(
+                "boundary" in item.lower() or "preference" in item.lower()
+                for item in contradictions
+            )
+        )
+        should_resume_now = not should_acknowledge_delay and fatigue < 0.72 and tension < 0.75
+
+        pending_contents: List[str] = []
+        for intention in pending:
+            if intention.content not in pending_contents:
+                pending_contents.append(intention.content)
+
+        return PromiseFollowthroughSignal(
+            pending_count=len(pending_contents),
+            pending_contents=pending_contents[:5],
+            should_acknowledge_delay=should_acknowledge_delay,
+            should_repair_trust=should_repair_trust,
+            should_resume_now=should_resume_now,
+        )
 
     def snapshot(self) -> Dict[str, Any]:
         return {

@@ -1,25 +1,39 @@
 # Qualification Remediation Rollup
 
-- Reruns summarized: `2`
-- History path: `(workspace_root)/.opencas_live_test_state/qualification_rerun_history.jsonl`
+- Reruns summarized: `3`
+- History path: `./.opencas_live_test_state/qualification_rerun_history.jsonl`
+- Rate scope id: `retained_label_runs`
+- Historical note: `before_rate` and `after_rate` are computed from the label runs currently retained under `.opencas_live_test_state`; use the request IDs plus task/readiness docs for longer-history decisions.
 
 ## integrated_operator_workflow
 
-- Request ID: `eba545433ee84ad494552f5ed13bc1cf`
-- Return code: `1`
-- Latest run: `None`
-- Before rate: `0.75`
-- After rate: `0.75`
-- Previous outcome: `artifact_verified` success `True`
-- Recommended action: `investigate_runner`
-
-## integrated_operator_workflow
-
-- Request ID: `24a6b4e5b1b2423297c8fb0ff5da3752`
+- Request ID: `7ddf2492ba1946328ca6398e7b541fed`
 - Return code: `0`
-- Latest run: `debug-validation-20260409-160102`
-- Before rate: `0.5`
-- After rate: `0.667`
+- Latest run: `debug-validation-20260415-155925`
+- Before rate: `1.0`
+- After rate: `1.0`
 - Latest outcome: `artifact_verified` success `True`
 - Previous outcome: `artifact_verified` success `True`
-- Recommended action: `continue_testing`
+- Recommended action: `watch_only`
+
+## kilocode_supervised_work
+
+- Request ID: `0249235e74ae4b8382c83c76e30f8e91`
+- Return code: `0`
+- Latest run: `debug-validation-20260415-162602`
+- Before rate: `0.0`
+- After rate: `0.0`
+- Latest outcome: `artifact_missing` success `False`
+- Previous outcome: `artifact_missing` success `False`
+- Recommended action: `code_change_justified`
+
+## kilocode_supervised_work
+
+- Request ID: `b404b54a8f414e36a6f96d531708b6bf`
+- Return code: `0`
+- Latest run: `debug-validation-20260415-163002`
+- Before rate: `0.333`
+- After rate: `0.5`
+- Latest outcome: `artifact_verified` success `True`
+- Previous outcome: `artifact_verified` success `True`
+- Recommended action: `watch_only`

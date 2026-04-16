@@ -170,3 +170,31 @@ def test_to_approval_risk_modifier() -> None:
     rel._state = MusubiState(musubi=-0.8)
     mod = rel.to_approval_risk_modifier()
     assert mod < 0.0
+
+
+def test_to_promise_priority_boost_tracks_bond_strength() -> None:
+    store = MusubiStore(Path(":memory:"))
+    rel = RelationalEngine(store)
+    from opencas.relational import MusubiState
+
+    rel._state = MusubiState(
+        musubi=0.8,
+        dimensions={
+            ResonanceDimension.TRUST.value: 0.7,
+            ResonanceDimension.RESONANCE.value: 0.5,
+            ResonanceDimension.PRESENCE.value: 0.2,
+            ResonanceDimension.ATTUNEMENT.value: 0.6,
+        },
+    )
+    assert rel.to_promise_priority_boost(user_facing=True) > 0.0
+
+    rel._state = MusubiState(
+        musubi=-0.8,
+        dimensions={
+            ResonanceDimension.TRUST.value: -0.7,
+            ResonanceDimension.RESONANCE.value: -0.4,
+            ResonanceDimension.PRESENCE.value: 0.0,
+            ResonanceDimension.ATTUNEMENT.value: -0.6,
+        },
+    )
+    assert rel.to_promise_priority_boost(user_facing=True) < 0.0

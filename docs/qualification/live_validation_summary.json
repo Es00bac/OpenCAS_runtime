@@ -1,525 +1,123 @@
 {
-  "total_runs": 27,
-  "total_direct_checks": 135,
-  "total_direct_successes": 128,
-  "total_agent_checks": 123,
-  "total_agent_successes": 119,
-  "direct_success_rate": 0.948,
-  "agent_success_rate": 0.967,
-  "average_run_duration_seconds": 120.45,
+  "summary_scope": "retained_runs_dir_snapshot",
+  "total_runs": 6,
+  "total_direct_checks": 0,
+  "total_direct_successes": 0,
+  "total_agent_checks": 6,
+  "total_agent_successes": 4,
+  "direct_success_rate": null,
+  "agent_success_rate": 0.667,
+  "average_run_duration_seconds": 63.53,
   "models": [
-    "google/gemini-2.5-flash",
     "kimi-coding/k2p5"
   ],
   "embedding_models": [
-    "google/gemini-embedding-2-preview",
-    "local-fallback"
+    "google/gemini-embedding-2-preview"
   ],
   "recent_runs": [
     {
-      "run_id": "debug-validation-20260409-183455",
-      "started_at": "2026-04-09T18:34:55.822038+00:00",
-      "finished_at": "2026-04-09T18:35:04.538568+00:00",
-      "model": "google/gemini-2.5-flash",
-      "direct_successes": 0,
-      "direct_total": 0,
-      "agent_successes": 1,
-      "agent_total": 1,
-      "duration_seconds": 8.71653
-    },
-    {
-      "run_id": "debug-validation-20260409-164343",
-      "started_at": "2026-04-09T16:43:43.912391+00:00",
-      "finished_at": "2026-04-09T16:44:26.179617+00:00",
+      "run_id": "debug-validation-20260415-163002",
+      "started_at": "2026-04-15T16:30:02.093810+00:00",
+      "finished_at": "2026-04-15T16:30:45.932199+00:00",
       "model": "kimi-coding/k2p5",
       "direct_successes": 0,
       "direct_total": 0,
       "agent_successes": 1,
       "agent_total": 1,
-      "duration_seconds": 42.267226
+      "duration_seconds": 43.838389
     },
     {
-      "run_id": "debug-validation-20260409-160102",
-      "started_at": "2026-04-09T16:01:02.949499+00:00",
-      "finished_at": "2026-04-09T16:02:22.594512+00:00",
+      "run_id": "debug-validation-20260415-162921",
+      "started_at": "2026-04-15T16:29:21.367743+00:00",
+      "finished_at": "2026-04-15T16:30:01.446014+00:00",
       "model": "kimi-coding/k2p5",
       "direct_successes": 0,
       "direct_total": 0,
       "agent_successes": 1,
       "agent_total": 1,
-      "duration_seconds": 79.645013
+      "duration_seconds": 40.078271
     },
     {
-      "run_id": "debug-validation-20260409-155243",
-      "started_at": "2026-04-09T15:52:43.903365+00:00",
-      "finished_at": "2026-04-09T15:53:47.905437+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 0,
-      "direct_total": 0,
-      "agent_successes": 1,
-      "agent_total": 1,
-      "duration_seconds": 64.002072
-    },
-    {
-      "run_id": "debug-validation-20260409-003117",
-      "started_at": "2026-04-09T00:31:17.341139+00:00",
-      "finished_at": "2026-04-09T00:33:10.146350+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 0,
-      "direct_total": 0,
-      "agent_successes": 1,
-      "agent_total": 1,
-      "duration_seconds": 112.805211
-    },
-    {
-      "run_id": "debug-validation-20260409-002851",
-      "started_at": "2026-04-09T00:28:51.837517+00:00",
-      "finished_at": "2026-04-09T00:30:16.456116+00:00",
+      "run_id": "debug-validation-20260415-162602",
+      "started_at": "2026-04-15T16:26:02.422853+00:00",
+      "finished_at": "2026-04-15T16:26:44.906029+00:00",
       "model": "kimi-coding/k2p5",
       "direct_successes": 0,
       "direct_total": 0,
       "agent_successes": 0,
       "agent_total": 1,
-      "duration_seconds": 84.618599
+      "duration_seconds": 42.483176
     },
     {
-      "run_id": "debug-validation-20260409-000125",
-      "started_at": "2026-04-09T00:01:25.100276+00:00",
-      "finished_at": "2026-04-09T00:02:16.604789+00:00",
+      "run_id": "debug-validation-20260415-162521",
+      "started_at": "2026-04-15T16:25:21.594332+00:00",
+      "finished_at": "2026-04-15T16:26:01.831121+00:00",
+      "model": "kimi-coding/k2p5",
+      "direct_successes": 0,
+      "direct_total": 0,
+      "agent_successes": 0,
+      "agent_total": 1,
+      "duration_seconds": 40.236789
+    },
+    {
+      "run_id": "debug-validation-20260415-155925",
+      "started_at": "2026-04-15T15:59:25.933501+00:00",
+      "finished_at": "2026-04-15T16:00:04.220500+00:00",
       "model": "kimi-coding/k2p5",
       "direct_successes": 0,
       "direct_total": 0,
       "agent_successes": 1,
       "agent_total": 1,
-      "duration_seconds": 51.504513
+      "duration_seconds": 38.286999
     },
     {
-      "run_id": "debug-validation-20260408-235606",
-      "started_at": "2026-04-08T23:56:06.231287+00:00",
-      "finished_at": "2026-04-08T23:56:30.330565+00:00",
+      "run_id": "debug-validation-20260415-155629",
+      "started_at": "2026-04-15T15:56:29.065217+00:00",
+      "finished_at": "2026-04-15T15:59:25.322544+00:00",
       "model": "kimi-coding/k2p5",
       "direct_successes": 0,
       "direct_total": 0,
       "agent_successes": 1,
       "agent_total": 1,
-      "duration_seconds": 24.099278
-    },
-    {
-      "run_id": "debug-validation-20260408-234917",
-      "started_at": "2026-04-08T23:49:17.523764+00:00",
-      "finished_at": "2026-04-08T23:49:35.387482+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 0,
-      "direct_total": 0,
-      "agent_successes": 1,
-      "agent_total": 1,
-      "duration_seconds": 17.863718
-    },
-    {
-      "run_id": "debug-validation-20260408-234755",
-      "started_at": "2026-04-08T23:47:55.015203+00:00",
-      "finished_at": "2026-04-08T23:48:09.849974+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 0,
-      "direct_total": 0,
-      "agent_successes": 1,
-      "agent_total": 1,
-      "duration_seconds": 14.834771
-    },
-    {
-      "run_id": "debug-validation-20260408-232901",
-      "started_at": "2026-04-08T23:29:01.355932+00:00",
-      "finished_at": "2026-04-08T23:29:57.831549+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 0,
-      "direct_total": 0,
-      "agent_successes": 1,
-      "agent_total": 1,
-      "duration_seconds": 56.475617
-    },
-    {
-      "run_id": "debug-validation-20260408-232647",
-      "started_at": "2026-04-08T23:26:47.329018+00:00",
-      "finished_at": "2026-04-08T23:27:50.588558+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 0,
-      "direct_total": 0,
-      "agent_successes": 1,
-      "agent_total": 1,
-      "duration_seconds": 63.25954
-    },
-    {
-      "run_id": "debug-validation-20260408-231052",
-      "started_at": "2026-04-08T23:10:52.733339+00:00",
-      "finished_at": "2026-04-08T23:14:53.506675+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 8,
-      "agent_total": 8,
-      "duration_seconds": 240.773336
-    },
-    {
-      "run_id": "debug-validation-20260408-223339",
-      "started_at": "2026-04-08T22:33:39.577747+00:00",
-      "finished_at": "2026-04-08T22:38:17.421460+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 8,
-      "duration_seconds": 277.843713
-    },
-    {
-      "run_id": "debug-validation-20260408-222443",
-      "started_at": "2026-04-08T22:24:43.394540+00:00",
-      "finished_at": "2026-04-08T22:29:24.361056+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 8,
-      "duration_seconds": 280.966516
-    },
-    {
-      "run_id": "debug-validation-20260408-221926",
-      "started_at": "2026-04-08T22:19:26.523308+00:00",
-      "finished_at": "2026-04-08T22:22:59.576255+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 8,
-      "agent_total": 8,
-      "duration_seconds": 213.052947
-    },
-    {
-      "run_id": "debug-validation-20260408-220155",
-      "started_at": "2026-04-08T22:01:55.063030+00:00",
-      "finished_at": "2026-04-08T22:06:52.154765+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 8,
-      "duration_seconds": 297.091735
-    },
-    {
-      "run_id": "debug-validation-20260408-214117",
-      "started_at": "2026-04-08T21:41:17.097679+00:00",
-      "finished_at": "2026-04-08T21:47:13.594642+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 8,
-      "agent_total": 8,
-      "duration_seconds": 356.496963
-    },
-    {
-      "run_id": "debug-validation-20260408-213733",
-      "started_at": "2026-04-08T21:37:33.356681+00:00",
-      "finished_at": "2026-04-08T21:39:15.968737+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 7,
-      "duration_seconds": 102.612056
-    },
-    {
-      "run_id": "debug-validation-20260408-213322",
-      "started_at": "2026-04-08T21:33:22.834403+00:00",
-      "finished_at": "2026-04-08T21:35:17.921630+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 7,
-      "duration_seconds": 115.087227
-    },
-    {
-      "run_id": "debug-validation-20260408-204416",
-      "started_at": "2026-04-08T20:44:16.510821+00:00",
-      "finished_at": "2026-04-08T20:46:03.125389+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 7,
-      "duration_seconds": 106.614568
-    },
-    {
-      "run_id": "debug-validation-20260408-201845",
-      "started_at": "2026-04-08T20:18:45.937662+00:00",
-      "finished_at": "2026-04-08T20:20:57.164012+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 8,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 7,
-      "duration_seconds": 131.22635
-    },
-    {
-      "run_id": "debug-validation-20260408-201426",
-      "started_at": "2026-04-08T20:14:26.357165+00:00",
-      "finished_at": "2026-04-08T20:16:24.069683+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 7,
-      "duration_seconds": 117.712518
-    },
-    {
-      "run_id": "debug-validation-20260408-201011",
-      "started_at": "2026-04-08T20:10:11.270892+00:00",
-      "finished_at": "2026-04-08T20:12:19.876117+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 9,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 7,
-      "duration_seconds": 128.605225
-    },
-    {
-      "run_id": "debug-validation-20260408-200216",
-      "started_at": "2026-04-08T20:02:16.960311+00:00",
-      "finished_at": "2026-04-08T20:05:05.429517+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 8,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 7,
-      "duration_seconds": 168.469206
-    },
-    {
-      "run_id": "debug-validation-20260408-195802",
-      "started_at": "2026-04-08T19:58:02.649385+00:00",
-      "finished_at": "2026-04-08T19:59:12.247415+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 8,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 7,
-      "duration_seconds": 69.59803
-    },
-    {
-      "run_id": "debug-validation-20260408-195359",
-      "started_at": "2026-04-08T19:53:59.473376+00:00",
-      "finished_at": "2026-04-08T19:54:25.263394+00:00",
-      "model": "kimi-coding/k2p5",
-      "direct_successes": 5,
-      "direct_total": 9,
-      "agent_successes": 7,
-      "agent_total": 7,
-      "duration_seconds": 25.790018
+      "duration_seconds": 176.257327
     }
   ],
   "agent_checks": {
-    "browser_probe": {
-      "runs": 15,
-      "successes": 15,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 3.47,
-      "outcomes": {
-        "completed": 15
-      },
-      "recent_failures": []
-    },
-    "claude_tui_probe": {
-      "runs": 15,
-      "successes": 15,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 2.6,
-      "outcomes": {
-        "completed": 15
-      },
-      "recent_failures": []
-    },
-    "codex_supervised_work": {
-      "runs": 1,
-      "successes": 1,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 9.0,
-      "outcomes": {
-        "artifact_verified": 1
-      },
-      "recent_failures": []
-    },
-    "codex_tui_probe": {
-      "runs": 10,
-      "successes": 10,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 3.9,
-      "outcomes": {
-        "completed": 10
-      },
-      "recent_failures": []
-    },
-    "inspect_runtime": {
-      "runs": 15,
-      "successes": 15,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 1.73,
-      "outcomes": {
-        "completed": 15
-      },
-      "recent_failures": []
-    },
     "integrated_operator_workflow": {
-      "runs": 4,
-      "successes": 3,
-      "failures": 1,
-      "success_rate": 0.75,
+      "runs": 2,
+      "successes": 2,
+      "failures": 0,
+      "success_rate": 1.0,
       "timeouts": 0,
-      "average_tool_messages": 15.5,
+      "average_tool_messages": 13.5,
       "outcomes": {
-        "artifact_verified": 3,
-        "artifact_missing": 1
+        "artifact_verified": 2
       },
-      "recent_failures": [
-        {
-          "run_id": "debug-validation-20260409-002851",
-          "outcome": "artifact_missing",
-          "response": "[Tool loop halted] Tool loop circuit breaker: exceeded 16 consecutive tool calls in this session."
-        }
-      ]
+      "recent_failures": []
     },
     "kilocode_supervised_work": {
-      "runs": 6,
-      "successes": 3,
-      "failures": 3,
+      "runs": 4,
+      "successes": 2,
+      "failures": 2,
       "success_rate": 0.5,
-      "timeouts": 2,
-      "average_tool_messages": 6.33,
+      "timeouts": 0,
+      "average_tool_messages": 3.75,
       "outcomes": {
-        "artifact_verified": 3,
-        "artifact_missing": 1,
-        "timed_out": 2
+        "artifact_verified": 2,
+        "artifact_missing": 2
       },
       "recent_failures": [
         {
-          "run_id": "debug-validation-20260408-223339",
+          "run_id": "debug-validation-20260415-162602",
           "outcome": "artifact_missing",
-          "response": "Failure.\n\n- `workflow_supervise_session` timed out after 5 rounds without creating the file.\n- I then started a manual `pty_interact` session with `kilocode`. The TUI rendered and accepted input, but after submitting the prompt and waiting,"
+          "response": "Result: failure.\n\n- `kilocode` launched in its TUI and reached an interactive ready state.\n- The supervised session ran through 6 observation rounds without the target file being created.\n- The file `${REPO_ROOT}/.opencas_live_test_sta"
         },
         {
-          "run_id": "debug-validation-20260408-222443",
-          "outcome": "timed_out",
-          "response": "[Timed out after 180.0s while executing this validation prompt. Inspect telemetry/context for partial progress.]"
-        },
-        {
-          "run_id": "debug-validation-20260408-220155",
-          "outcome": "timed_out",
-          "response": "[Timed out after 120.0s while executing this validation prompt. Inspect telemetry/context for partial progress.]"
+          "run_id": "debug-validation-20260415-162521",
+          "outcome": "artifact_missing",
+          "response": "The supervised session did not produce the file. Kilo's TUI started and was ready for input, but after 5 rounds it timed out without creating `${REPO_ROOT}/.opencas_live_test_state/debug-validation-20260415-162521/workspace_artifacts/n"
         }
       ]
-    },
-    "kilocode_tui_probe": {
-      "runs": 5,
-      "successes": 5,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 1.0,
-      "outcomes": {
-        "completed": 5
-      },
-      "recent_failures": []
-    },
-    "project_management_workflow": {
-      "runs": 1,
-      "successes": 1,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 4.0,
-      "outcomes": {
-        "artifact_verified": 1
-      },
-      "recent_failures": []
-    },
-    "role_priming": {
-      "runs": 16,
-      "successes": 16,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 0.94,
-      "outcomes": {
-        "completed": 16
-      },
-      "recent_failures": []
-    },
-    "self_reflection": {
-      "runs": 15,
-      "successes": 15,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 0.0,
-      "outcomes": {
-        "completed": 15
-      },
-      "recent_failures": []
-    },
-    "vim_tui_edit": {
-      "runs": 2,
-      "successes": 2,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 10.5,
-      "outcomes": {
-        "artifact_verified": 2
-      },
-      "recent_failures": []
-    },
-    "write_project_note": {
-      "runs": 15,
-      "successes": 15,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 2.13,
-      "outcomes": {
-        "artifact_verified": 6,
-        "completed": 9
-      },
-      "recent_failures": []
-    },
-    "writing_revision_workflow": {
-      "runs": 1,
-      "successes": 1,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 5.0,
-      "outcomes": {
-        "artifact_verified": 1
-      },
-      "recent_failures": []
-    },
-    "writing_workflow": {
-      "runs": 2,
-      "successes": 2,
-      "failures": 0,
-      "success_rate": 1.0,
-      "timeouts": 0,
-      "average_tool_messages": 3.0,
-      "outcomes": {
-        "artifact_verified": 2
-      },
-      "recent_failures": []
     }
   }
 }

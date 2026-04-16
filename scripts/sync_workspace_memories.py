@@ -3,13 +3,17 @@
 import asyncio
 from pathlib import Path
 
-from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
+from opencas.bootstrap import BootstrapPipeline
+from opencas.maintenance import build_repo_local_bootstrap_config
 from opencas.memory import ArtifactMemoryBridge
 
 
+REPO_ROOT = Path(__file__).resolve().parent.parent
+
+
 async def main():
-    config = BootstrapConfig(
-        state_dir="(workspace_root)/.opencas",
+    config = build_repo_local_bootstrap_config(
+        REPO_ROOT,
         session_id="workspace-sync",
         clean_boot=False,
     )
@@ -24,8 +28,10 @@ async def main():
         max_bytes=500_000,
     )
 
-    # Sync the Chronicles directory
-    chronicles_dir = Path("(workspace_root)/Chronicles")
+    workspace_root = config.agent_workspace_root()
+
+    # Sync the workspace-local Chronicles directory.
+    chronicles_dir = workspace_root / "Chronicles"
     if chronicles_dir.exists():
         print(f"Syncing {chronicles_dir} ...")
         result = await bridge.sync_directory(chronicles_dir)
@@ -33,8 +39,7 @@ async def main():
     else:
         print(f"Chronicles directory not found: {chronicles_dir}")
 
-    # Also sync top-level markdown files in the workspace by creating a temp dir wrapper
-    workspace_root = Path("(workspace_root)")
+    # Also sync top-level markdown files in the managed workspace.
     md_files = [p for p in workspace_root.glob("*.md") if p.is_file()]
     if md_files:
         print(f"Syncing {len(md_files)} top-level markdown files ...")

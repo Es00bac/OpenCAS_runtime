@@ -8,6 +8,10 @@ from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.autonomy.executive import ExecutiveState
 from opencas.autonomy.intervention import InterventionKind, InterventionPolicy
 from opencas.autonomy.models import WorkObject, WorkStage
+from opencas.relational import MusubiState, MusubiStore, RelationalEngine
+from opencas.somatic import SomaticModulators, SomaticState
+from opencas.tom import ToMEngine
+from opencas.tom.models import BeliefSubject
 from opencas.autonomy.workspace import (
     ExecutiveWorkspace,
     ExecutionMode,
@@ -60,6 +64,87 @@ def test_workspace_rebuild_with_portfolio_boost() -> None:
     # base total without boost would be around 0.4*0.5 + 0.4*0.5 + 0.2*0.2 = 0.44
     # with boost +0.1 => ~0.54
     assert item.total_score > 0.5
+
+
+def test_workspace_rebuild_prioritizes_user_facing_commitment_linked_work() -> None:
+    commitment = Commitment(
+        content="Return to the scheduler resume path",
+        priority=8.0,
+        meta={"source": "assistant_response"},
+    )
+    linked_work = WorkObject(
+        content="scheduler resume task",
+        stage=WorkStage.MICRO_TASK,
+        promotion_score=0.4,
+        commitment_id=str(commitment.commitment_id),
+    )
+    background_work = WorkObject(
+        content="background work",
+        stage=WorkStage.MICRO_TASK,
+        promotion_score=0.6,
+    )
+
+    workspace = ExecutiveWorkspace.rebuild(
+        commitments=[commitment],
+        work_objects=[background_work, linked_work],
+    )
+
+    linked_item = next(item for item in workspace.queue if item.content == "scheduler resume task")
+    background_item = next(item for item in workspace.queue if item.content == "background work")
+    assert linked_item.total_score > background_item.total_score
+    assert linked_item.affinity == WorkspaceAffinity.OPERATOR
+    assert linked_item.meta["user_facing_commitment"] is True
+
+
+@pytest.mark.asyncio
+async def test_workspace_rebuild_keeps_deferred_user_facing_commitment_visible(identity: IdentityManager) -> None:
+    deferred = Commitment(
+        content="Return to the scheduler resume path",
+        status=CommitmentStatus.BLOCKED,
+        priority=8.0,
+        meta={
+            "source": "assistant_response",
+            "blocked_reason": "executive_fatigue",
+            "resume_policy": "auto_on_executive_recovery",
+        },
+    )
+    background_work = WorkObject(
+        content="low-value novelty work",
+        stage=WorkStage.MICRO_TASK,
+        promotion_score=0.3,
+    )
+
+    rel = RelationalEngine(MusubiStore(Path(":memory:")))
+    rel._state = MusubiState(
+        musubi=0.8,
+        dimensions={
+            "trust": 0.7,
+            "resonance": 0.4,
+            "presence": 0.2,
+            "attunement": 0.6,
+        },
+    )
+    tom = ToMEngine(identity=identity)
+    await tom.record_intention(
+        BeliefSubject.SELF,
+        "Return to the scheduler resume path",
+        meta={"source": "self_commitment_capture"},
+    )
+
+    workspace = ExecutiveWorkspace.rebuild(
+        commitments=[deferred],
+        work_objects=[background_work],
+        somatic_modulators=SomaticModulators(SomaticState(fatigue=0.86, tension=0.7, certainty=0.45)),
+        relational=rel,
+        tom=tom,
+    )
+
+    deferred_item = next(item for item in workspace.queue if item.content == "Return to the scheduler resume path")
+    background_item = next(item for item in workspace.queue if item.content == "low-value novelty work")
+    assert deferred_item.total_score > background_item.total_score
+    assert deferred_item.execution_mode == ExecutionMode.RESPOND_INLINE
+    assert deferred_item.meta["deferred_user_facing_commitment"] is True
+    assert deferred_item.meta["needs_acknowledgement"] is True
 
 
 def test_intervention_surface_clarification(executive: ExecutiveState) -> None:

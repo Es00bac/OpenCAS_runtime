@@ -502,6 +502,42 @@ td {
   }
 }
 
+.media-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.media-thumb {
+  margin: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  background: rgba(8, 11, 18, 0.92);
+  border: 1px solid var(--line);
+}
+
+.media-thumb img {
+  width: 100%;
+  height: auto;
+  display: block;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+.media-thumb figcaption {
+  padding: 0.55rem 0.75rem;
+  font-size: 0.8rem;
+  color: var(--text-soft);
+  text-align: center;
+}
+
+@media (max-width: 720px) {
+  .media-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
 /* ── Terminology definition list ────────────────────────────── */
 .term-list {
   display: grid;

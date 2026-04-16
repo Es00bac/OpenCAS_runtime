@@ -7,7 +7,7 @@ This guide documents the repo as it exists today, not a hypothetical packaged fu
 - Python `3.11+`
 - A POSIX shell for the commands below
 - Network access to whichever model providers you plan to use through `open_llm_auth`
-- The sibling `open_llm_auth` workspace available at `(external_volumes)/open_llm_auth/`, because `requirements.txt` installs it as an editable dependency
+- The sibling `open_llm_auth` workspace available at `../open_llm_auth/`, because `requirements.txt` installs it as an editable dependency
 
 Optional:
 
@@ -146,7 +146,7 @@ Then set the Qdrant configuration in your bootstrap configuration before running
 
 ### `ModuleNotFoundError: open_llm_auth`
 
-The current repo depends on the editable sibling checkout in `requirements.txt`. Make sure `(external_volumes)/open_llm_auth/` exists, or change that dependency path before installing.
+The current repo depends on the editable sibling checkout in `requirements.txt`. Make sure `../open_llm_auth/` exists, or change that dependency path before installing.
 
 ### Dashboard Does Not Open
 

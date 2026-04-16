@@ -89,8 +89,32 @@ keep-working.txt
 conversation_deleteme_when_read_claude_please.txt
 2026-*.txt
 relational-changelog*.md
-AUDIT_OPENCAS_VS_LEGACY_AGENT.md
+AUDIT_OPENCAS_VS_BULMA.md
 patch_*.py
 test_landscape*.py
 test_script.sh
 test_memory.py
+
+# Public release boundary
+# Keep the public repo limited to the clean source/docs/test surface.
+.claude/
+.codex/
+.lock
+.opencode/
+.opencas_test/
+.opencas_test_state/
+Chronicles/
+archive/
+autonomic-guardian-evolution/
+browser-image-automation/
+bulma-interface/
+bulma-secure-location/
+bulma-secure-location-apk/
+chat_uploads/
+content_engine/
+daydream-lab/
+memory-architecture-v1/
+my_website/
+research/
+schedules/
+workspace/

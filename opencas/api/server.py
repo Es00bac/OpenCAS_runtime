@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from opencas.telemetry.models import TelemetryEvent
+from .chat_service import perform_chat_turn
 from .websocket_bridge import WebSocketBridge
 
 
@@ -42,8 +43,12 @@ def create_app(runtime: Any) -> FastAPI:
     @app.post("/chat", response_model=ChatResponse)
     async def chat(body: ChatRequest) -> ChatResponse:
         try:
-            response = await runtime.converse(body.message, session_id=body.session_id)
-            return ChatResponse(response=response)
+            result = await perform_chat_turn(
+                runtime,
+                session_id=body.session_id,
+                message=body.message,
+            )
+            return ChatResponse(response=result.response)
         except Exception as exc:
             return ChatResponse(response=f"[Error: {exc}]")
 
@@ -74,7 +79,12 @@ def create_app(runtime: Any) -> FastAPI:
                     payload = msg.get("payload", "")
                     sid = msg.get("session_id")
                     try:
-                        response = await runtime.converse(payload, session_id=sid)
+                        result = await perform_chat_turn(
+                            runtime,
+                            session_id=sid,
+                            message=payload,
+                        )
+                        response = result.response
                     except Exception as exc:
                         response = f"[Error: {exc}]"
                     await websocket.send_text(

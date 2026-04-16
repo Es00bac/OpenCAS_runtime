@@ -41,7 +41,7 @@ _If the player doesn't load, [download the original from the release page](https
 
 ```bash
 git clone https://github.com/Es00bac/OpenCAS_runtime.git
-cd opencas
+cd OpenCAS_runtime
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

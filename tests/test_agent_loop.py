@@ -1,5 +1,6 @@
 """Tests for the agent runtime loop."""
 
+from types import SimpleNamespace
 from pathlib import Path
 import pytest
 import pytest_asyncio
@@ -182,6 +183,7 @@ async def test_runtime_status_tool_surfaces_workspace_and_execution(
     payload = json.loads(result["output"])
     assert payload["agent_profile"]["profile_id"] == "general_technical_operator"
     assert "workspace" in payload
+    assert payload["workspace"]["managed_root"].endswith("/workspace")
     assert "execution" in payload
     assert "browser" in payload["execution"]
 
@@ -255,6 +257,54 @@ async def test_run_cycle_dequeues_and_submits_repair_tasks(runtime: AgentRuntime
 
 
 @pytest.mark.asyncio
+async def test_run_cycle_launches_background_intervention(
+    runtime: AgentRuntime,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+
+    import opencas.runtime.cycle_phases as cycle_phases
+    from opencas.autonomy.intervention import InterventionDecision, InterventionKind
+    from opencas.autonomy.workspace import ExecutiveWorkspace, ExecutionMode, WorkspaceItem, WorkspaceItemKind
+    from opencas.execution.models import RepairTask
+
+    submitted_tasks: list[RepairTask] = []
+
+    async def mock_submit(task: RepairTask) -> asyncio.Future:
+        submitted_tasks.append(task)
+        fut = asyncio.get_running_loop().create_future()
+        fut.set_result(None)
+        return fut
+
+    runtime.baa.submit = mock_submit
+    focus = WorkspaceItem(
+        kind=WorkspaceItemKind.TASK,
+        content="delegate background job",
+        execution_mode=ExecutionMode.BACKGROUND_AGENT,
+    )
+    workspace = ExecutiveWorkspace(focus=focus, queue=[focus])
+
+    async def fake_rebuild_workspace(_runtime: AgentRuntime) -> ExecutiveWorkspace:
+        return workspace
+
+    monkeypatch.setattr(cycle_phases, "_rebuild_workspace", fake_rebuild_workspace)
+    monkeypatch.setattr(
+        cycle_phases.InterventionPolicy,
+        "evaluate",
+        lambda **kwargs: InterventionDecision(
+            kind=InterventionKind.LAUNCH_BACKGROUND,
+            target_item_id=str(focus.item_id),
+            reason="background focus should be delegated",
+        ),
+    )
+
+    result = await runtime.run_cycle()
+    assert result["intervention"]["kind"] == InterventionKind.LAUNCH_BACKGROUND.value
+    assert any(task.objective == "delegate background job" for task in submitted_tasks)
+    assert any(task.meta.get("source") == "intervention_launch_background" for task in submitted_tasks)
+
+
+@pytest.mark.asyncio
 async def test_run_cycle_rejects_blocked_commitment(runtime: AgentRuntime) -> None:
     import asyncio
     from opencas.execution.models import RepairTask
@@ -303,6 +353,51 @@ def async_mock_chat_completion(response_text: str):
     async def _mock(*args, **kwargs):
         return {"choices": [{"message": {"content": response_text}}]}
     return _mock
+
+
+class _FakeCommitmentStore:
+    def __init__(self) -> None:
+        self.saved: list[Commitment] = []
+
+    async def save(self, commitment: Commitment) -> None:
+        self.saved.append(commitment)
+
+
+class _FakeSomatic:
+    def __init__(self) -> None:
+        self.events: list[dict] = []
+
+    async def emit_appraisal_event(self, event_type, source_text="", trigger_event_id=None, meta=None):
+        self.events.append(
+            {
+                "event_type": event_type,
+                "source_text": source_text,
+                "trigger_event_id": trigger_event_id,
+                "meta": meta or {},
+            }
+        )
+
+
+class _FakeToM:
+    def __init__(self) -> None:
+        self.intentions: list[dict] = []
+
+    async def record_intention(self, actor, content: str, meta=None):
+        self.intentions.append(
+            {
+                "actor": actor,
+                "content": content,
+                "meta": meta or {},
+            }
+        )
+
+
+class _FakeExecutive:
+    def __init__(self, pause_reason: str | None = None) -> None:
+        self._pause_reason = pause_reason
+
+    def pause_reason(self) -> str | None:
+        return self._pause_reason
 
 
 @pytest.mark.asyncio
@@ -396,3 +491,60 @@ async def test_converse_refusal_records_escalation(runtime: AgentRuntime) -> Non
     messages = await runtime.ctx.context_store.list_recent(runtime.ctx.config.session_id or "test-session")
     assistant_messages = [m for m in messages if m.role.value == "assistant"]
     assert any("not able to" in m.content.lower() for m in assistant_messages)
+
+
+@pytest.mark.asyncio
+async def test_converse_refusal_persists_user_turn(runtime: AgentRuntime) -> None:
+    runtime.ctx.identity.user_model.known_boundaries = ["conversation"]
+    runtime.ctx.identity.save()
+    await runtime.converse("do something harmful")
+
+    messages = await runtime.ctx.context_store.list_recent(runtime.ctx.config.session_id or "test-session")
+    assert any(m.role.value == "user" and m.content == "do something harmful" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_capture_self_commitments_normalizes_and_preserves_provenance() -> None:
+    runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime.tracer = None
+    runtime.commitment_store = _FakeCommitmentStore()
+    runtime.executive = _FakeExecutive()
+    runtime.tom = _FakeToM()
+    runtime.ctx = SimpleNamespace(somatic=_FakeSomatic())
+
+    commitments = await runtime._capture_self_commitments(
+        "The next step is finish the scheduler resume path. I'll come back to this after I rest.",
+        "session-1",
+    )
+
+    assert len(commitments) == 1
+    saved = runtime.commitment_store.saved[0]
+    assert saved.content == "Finish the scheduler resume path"
+    assert saved.status == CommitmentStatus.ACTIVE
+    assert saved.meta["source"] == "assistant_response"
+    assert saved.meta["source_sentence"] == "I'll come back to this after I rest."
+    assert saved.meta["normalization_source"] == "prior_sentence_context"
+    assert saved.meta["capture_confidence"] == pytest.approx(0.72)
+    assert runtime.tom.intentions[0]["content"] == "Finish the scheduler resume path"
+    assert runtime.ctx.somatic.events[0]["meta"]["self_commitment_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_capture_self_commitments_respects_executive_pause_reason() -> None:
+    runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime.tracer = None
+    runtime.commitment_store = _FakeCommitmentStore()
+    runtime.executive = _FakeExecutive("fatigue")
+    runtime.tom = _FakeToM()
+    runtime.ctx = SimpleNamespace(somatic=_FakeSomatic())
+
+    commitments = await runtime._capture_self_commitments(
+        "I'll come back to the dashboard memory atlas later.",
+        "session-2",
+    )
+
+    assert len(commitments) == 1
+    saved = runtime.commitment_store.saved[0]
+    assert saved.content == "Return to the dashboard memory atlas"
+    assert saved.status == CommitmentStatus.BLOCKED
+    assert saved.meta["blocked_reason"] == "executive_fatigue"

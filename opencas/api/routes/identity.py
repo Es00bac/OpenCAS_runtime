@@ -159,7 +159,7 @@ def build_identity_router(runtime: Any) -> APIRouter:
         musubi: Optional[MusubiStateResponse] = None
         somatic: Optional[SomaticStateResponse] = None
 
-        rel_engine = getattr(runtime.ctx, "relational_engine", None)
+        rel_engine = getattr(runtime.ctx, "relational", None)
         if rel_engine is not None:
             try:
                 ms = rel_engine.state
@@ -217,7 +217,7 @@ def build_identity_router(runtime: Any) -> APIRouter:
 
     @r.get("/musubi", response_model=Optional[MusubiStateResponse])
     async def get_musubi() -> Optional[MusubiStateResponse]:
-        rel_engine = getattr(runtime.ctx, "relational_engine", None)
+        rel_engine = getattr(runtime.ctx, "relational", None)
         if rel_engine is None:
             return None
         ms = rel_engine.state

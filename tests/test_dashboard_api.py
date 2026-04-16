@@ -2,6 +2,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from opencas.api.server import create_app
+from opencas.bootstrap import BootstrapConfig
+from opencas.model_routing import ModelRoutingConfig
 
 
 class FakeStore:
@@ -623,6 +625,13 @@ class FakeRuntime:
                     }
                 ],
             },
+            "consolidation": {
+                "available": True,
+                "timestamp": "2026-04-15T00:00:00+00:00",
+                "commitments_consolidated": 2,
+                "commitments_extracted_from_chat": 1,
+                "commitment_work_objects_created": 1,
+            },
         }
 
 
@@ -833,6 +842,45 @@ class FakeGatewayManager:
                 "auth_source": "profile:anthropic-main",
             },
         )()
+
+
+class FakeMutableGatewayManager:
+    def __init__(self):
+        self._config = None
+        self._config_path = None
+        self._env_path = None
+        self.reload_calls = 0
+
+    def reload(self):
+        from open_llm_auth.config import load_config
+
+        self.reload_calls += 1
+        config_path = self._config_path
+        env_path = self._env_path if self._env_path and self._env_path.exists() else None
+        self._config = load_config(config_path=config_path, env_path=env_path)
+
+    async def list_models(self):
+        return [
+            {"id": "anthropic/claude-sonnet-4-6"},
+            {"id": "google/gemini-2.5-flash"},
+            {"id": "openai/gpt-5.3-codex"},
+        ]
+
+
+class FakeMutableLLM:
+    def __init__(self, default_model="anthropic/claude-sonnet-4-6"):
+        self.default_model = default_model
+        self.manager = FakeMutableGatewayManager()
+        self.model_routing = ModelRoutingConfig()
+        self.last_set = None
+
+    def set_model_routing(self, *, default_model=None, model_routing=None):
+        self.default_model = default_model or self.default_model
+        self.model_routing = model_routing or self.model_routing
+        self.last_set = {
+            "default_model": self.default_model,
+            "model_routing": self.model_routing,
+        }
 
 
 def test_health_endpoint():
@@ -1100,6 +1148,8 @@ def test_chat_context_summary_and_task_routes():
     summary_data = summary.json()
     assert summary_data["executive"]["intention"] == "Improve the dashboard operator experience"
     assert summary_data["current_work"]["title"] == "Redesign chat panel layout"
+    assert summary_data["consolidation"]["available"] is True
+    assert summary_data["consolidation"]["commitments_extracted_from_chat"] == 1
     assert summary_data["tasks"]["counts"]["total"] == 3
 
     tasks = client.get("/api/operations/tasks?limit=10")
@@ -1158,6 +1208,13 @@ def test_config_overview_endpoint_surfaces_models_profiles_and_material(tmp_path
             "credential_env_keys": ["GOOGLE_API_KEY"],
             "default_llm_model": None,
             "embedding_model_id": None,
+            "model_routing": ModelRoutingConfig(
+                mode="tiered",
+                light_model="google/gemini-2.5-flash",
+                standard_model="anthropic/claude-sonnet-4-6",
+                high_model="openai/gpt-5.3-codex",
+                extra_high_model="codex-cli/gpt-5.3-codex",
+            ),
             "model_dump": lambda self, **kw: {"state_dir": str(state_dir)},
         },
     )()
@@ -1172,9 +1229,101 @@ def test_config_overview_endpoint_surfaces_models_profiles_and_material(tmp_path
     assert data["providers"][0]["provider_id"] == "anthropic"
     assert data["current"]["default_llm_model"] == "anthropic/claude-sonnet-4-6"
     assert data["current"]["embedding_model_id"] == "google/gemini-embedding-2-preview"
+    assert data["current"]["model_routing"]["mode"] == "tiered"
+    assert "claude-sonnet-4-6" in data["providers"][0]["effective_model_ids"]
     assert data["credential_copy"]["profile_ids"] == ["anthropic-main"]
     assert data["materialized_bundle"]["config_exists"] is True
     assert data["materialized_bundle"]["env_key_count"] == 2
+    assert any(item["family_id"] == "openai" for item in data["provider_setup_catalog"])
+
+
+def test_model_routing_update_persists_runtime_and_gateway_state(tmp_path):
+    from open_llm_auth.config import load_config
+
+    state_dir = tmp_path / "state"
+    provider_material = state_dir / "provider_material"
+    provider_material.mkdir(parents=True)
+    (provider_material / "config.json").write_text("{}", encoding="utf-8")
+    runtime = FakeRuntime()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=state_dir,
+        session_id="routing-dashboard",
+    ).resolve_paths()
+    runtime.ctx.llm = FakeMutableLLM(default_model=runtime.ctx.config.default_llm_model)
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/config/model-routing",
+        json={
+            "default_llm_model": "openai/gpt-5.3-codex",
+            "model_routing": {
+                "mode": "tiered",
+                "light_model": "google/gemini-2.5-flash",
+                "standard_model": "openai/gpt-5.3-codex",
+                "high_model": "anthropic/claude-sonnet-4-6",
+                "extra_high_model": "codex-cli/gpt-5.3-codex",
+                "auto_escalation": True,
+            },
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["default_llm_model"] == "openai/gpt-5.3-codex"
+    assert runtime.ctx.config.default_llm_model == "openai/gpt-5.3-codex"
+    assert runtime.ctx.config.model_routing.mode.value == "tiered"
+    assert runtime.ctx.llm.last_set["model_routing"].high_model == "anthropic/claude-sonnet-4-6"
+    assert runtime.ctx.llm.manager.reload_calls >= 1
+
+    persisted_path = state_dir / "runtime_model_routing.json"
+    assert persisted_path.exists()
+    saved_cfg = load_config(config_path=provider_material / "config.json")
+    assert saved_cfg.default_model == "openai/gpt-5.3-codex"
+
+
+def test_provider_setup_and_model_delete_routes_manage_active_gateway_material(tmp_path):
+    from open_llm_auth.config import load_config
+
+    state_dir = tmp_path / "state"
+    provider_material = state_dir / "provider_material"
+    provider_material.mkdir(parents=True)
+    (provider_material / "config.json").write_text("{}", encoding="utf-8")
+    runtime = FakeRuntime()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=state_dir,
+        session_id="provider-dashboard",
+    ).resolve_paths()
+    runtime.ctx.llm = FakeMutableLLM(default_model=runtime.ctx.config.default_llm_model)
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    create_resp = client.post(
+        "/api/config/provider-setups",
+        json={
+            "family_id": "zai",
+            "preset_id": "coding_api",
+            "profile_label": "work",
+            "api_key": "glm-secret",
+            "custom_model_ids": ["glm-5.1-custom"],
+        },
+    )
+    assert create_resp.status_code == 200
+    create_data = create_resp.json()
+    assert create_data["provider_id"] == "zai-coding"
+    assert create_data["profile_id"] == "zai-coding:work"
+
+    saved_cfg = load_config(config_path=provider_material / "config.json")
+    assert "zai-coding" in saved_cfg.providers
+    assert saved_cfg.auth_profiles["zai-coding:work"].key == "glm-secret"
+    assert [model.id for model in saved_cfg.providers["zai-coding"].models] == ["glm-5.1-custom"]
+
+    delete_resp = client.delete("/api/config/providers/zai-coding/models/glm-5.1-custom")
+    assert delete_resp.status_code == 200
+
+    saved_after_delete = load_config(config_path=provider_material / "config.json")
+    assert len(saved_after_delete.providers["zai-coding"].models) == 0
+    assert runtime.ctx.llm.manager.reload_calls >= 2
 
 
 def test_memory_node_detail_endpoint_surfaces_neighbors_and_signals():

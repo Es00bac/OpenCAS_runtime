@@ -12,6 +12,12 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from open_llm_auth.auth.manager import ProviderManager, ResolvedProvider
 from open_llm_auth.provider_catalog import BUILTIN_MODELS
 
+from opencas.model_routing import (
+    ComplexityTier,
+    ModelRoutingConfig,
+    next_complexity_tier,
+    normalize_complexity_tier,
+)
 from opencas.telemetry import EventKind, TokenTelemetry, Tracer
 
 
@@ -22,18 +28,59 @@ class LLMClient:
         self,
         provider_manager: ProviderManager,
         default_model: Optional[str] = None,
+        model_routing: Optional[ModelRoutingConfig] = None,
         tracer: Optional[Tracer] = None,
         token_telemetry: Optional[TokenTelemetry] = None,
     ) -> None:
         self.manager = provider_manager
         self.default_model = default_model or "anthropic/claude-sonnet-4-6"
+        self.model_routing = (model_routing or ModelRoutingConfig()).normalized(
+            self.default_model
+        )
         self.tracer = tracer
         self.token_telemetry = token_telemetry
+
+    def set_model_routing(
+        self,
+        *,
+        default_model: Optional[str] = None,
+        model_routing: Optional[ModelRoutingConfig] = None,
+    ) -> None:
+        """Update the active routing policy without rebuilding the client."""
+        if default_model:
+            self.default_model = default_model
+        self.model_routing = (model_routing or self.model_routing).normalized(
+            self.default_model
+        )
+
+    def resolve_model_for_complexity(
+        self,
+        *,
+        model: Optional[str] = None,
+        complexity: ComplexityTier | str | None = None,
+    ) -> str:
+        """Resolve the model reference used for a specific reasoning tier."""
+        if model:
+            return model
+        tier = normalize_complexity_tier(complexity)
+        resolved = self.model_routing.resolve_model(
+            default_model=self.default_model,
+            complexity=tier,
+        )
+        return resolved or self.default_model
+
+    @staticmethod
+    def escalate_complexity(
+        complexity: ComplexityTier | str | None,
+    ) -> ComplexityTier:
+        """Move one step up the reasoning ladder."""
+        return next_complexity_tier(complexity)
 
     async def chat_completion(
         self,
         messages: List[Dict[str, Any]],
         model: Optional[str] = None,
+        complexity: ComplexityTier | str | None = None,
         payload: Optional[Dict[str, Any]] = None,
         source: str = "chat",
         session_id: Optional[str] = None,
@@ -43,12 +90,21 @@ class LLMClient:
         tool_choice: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Send a chat completion request and return the response object."""
-        model_ref = model or self.default_model
+        tier = normalize_complexity_tier(complexity)
+        model_ref = self.resolve_model_for_complexity(
+            model=model,
+            complexity=tier,
+        )
         if self.tracer:
             self.tracer.log(
                 EventKind.TOOL_CALL,
                 f"LLM chat_completion: {model_ref}",
-                {"model": model_ref, "message_count": len(messages)},
+                {
+                    "model": model_ref,
+                    "message_count": len(messages),
+                    "complexity": tier.value,
+                    "routing_mode": self.model_routing.mode.value,
+                },
             )
         resolved = self._resolve(model_ref)
         started = time.perf_counter()
@@ -83,6 +139,7 @@ class LLMClient:
         self,
         messages: List[Dict[str, Any]],
         model: Optional[str] = None,
+        complexity: ComplexityTier | str | None = None,
         payload: Optional[Dict[str, Any]] = None,
         source: str = "chat_stream",
         session_id: Optional[str] = None,
@@ -90,12 +147,21 @@ class LLMClient:
         execution_mode: Optional[str] = None,
     ) -> AsyncGenerator[str, None]:
         """Stream a chat completion as server-sent event strings."""
-        model_ref = model or self.default_model
+        tier = normalize_complexity_tier(complexity)
+        model_ref = self.resolve_model_for_complexity(
+            model=model,
+            complexity=tier,
+        )
         if self.tracer:
             self.tracer.log(
                 EventKind.TOOL_CALL,
                 f"LLM chat_completion_stream: {model_ref}",
-                {"model": model_ref, "message_count": len(messages)},
+                {
+                    "model": model_ref,
+                    "message_count": len(messages),
+                    "complexity": tier.value,
+                    "routing_mode": self.model_routing.mode.value,
+                },
             )
         resolved = self._resolve(model_ref)
         stream = await resolved.provider.chat_completion_stream(

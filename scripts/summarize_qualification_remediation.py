@@ -13,6 +13,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RUNS_DIR = REPO_ROOT / ".opencas_live_test_state"
 DEFAULT_OUTPUT_DIR = REPO_ROOT / "docs" / "qualification"
 DEFAULT_HISTORY_PATH = DEFAULT_RUNS_DIR / "qualification_rerun_history.jsonl"
+RATE_SCOPE = "retained_label_runs"
 
 
 def _agent_check_success(item: Dict[str, Any]) -> bool:
@@ -106,7 +107,7 @@ def _classify_action(completion: Dict[str, Any], stats: Dict[str, Any]) -> str:
     if latest.get("success") and (previous is None or not previous.get("success")):
         return "continue_testing"
     if latest.get("success"):
-        return "continue_testing"
+        return "watch_only"
     return "code_change_justified"
 
 
@@ -134,6 +135,7 @@ def build_rollup(runs_dir: Path, history_path: Path, limit: int = 10) -> Dict[st
     return {
         "history_path": str(history_path),
         "runs_dir": str(runs_dir),
+        "rate_scope": RATE_SCOPE,
         "count": len(rows),
         "items": list(reversed(rows)),
     }
@@ -145,6 +147,8 @@ def render_markdown(payload: Dict[str, Any]) -> str:
         "",
         f"- Reruns summarized: `{payload.get('count', 0)}`",
         f"- History path: `{payload.get('history_path', '')}`",
+        f"- Rate scope id: `{payload.get('rate_scope', RATE_SCOPE)}`",
+        "- Historical note: `before_rate` and `after_rate` are computed from the label runs currently retained under `.opencas_live_test_state`; use the request IDs plus task/readiness docs for longer-history decisions.",
         "",
     ]
     for item in payload.get("items", []):

@@ -2,9 +2,29 @@
 
 Guidance for Claude Code (claude.ai/code) when working with this repository.
 
+## Current Frontier
+
+Do not treat this file as a point-in-time snapshot of the live execution frontier by itself.
+
+Use these first:
+- [TaskList.md](TaskList.md)
+- [documentation-map.md](docs/documentation-map.md)
+- [opencas-cleanup-program-2026-04-15.md](docs/opencas-cleanup-program-2026-04-15.md)
+
+As of 2026-04-15, the active work is still the bounded cleanup program:
+- keep reducing god-object risk in the remaining core runtime and context-construction files
+- preserve the now-thin route, bootstrap, workflow, and tool-registration shells instead of letting responsibilities flow back into them
+- keep live docs aligned with the actual cleanup frontier so future models do not anchor on superseded plans
+
 ## Project Overview
 
 **OpenCAS** (Computational Autonomous System) is a local-first, persistent autonomous AI agent. `OPENCAS_PRODUCT_SPEC.md` defines the five-phase release plan spanning identity/memory, autonomy/ToM, execution/repair, and hardening.
+
+## Public Mirror Note
+
+**This workspace is the sanitized public mirror of OpenCAS.** It should stay free of local agent state, bootstrap-created databases, personal data, API credentials, session history, and one-off operator artifacts.
+
+If work requires the live private instance, do it in the private repo and then port only the GitHub-safe source/docs changes into this mirror.
 
 ## Multi-Model Collaboration
 
@@ -12,19 +32,33 @@ This project is actively developed by multiple AI systems (Claude Code, Gemini C
 
 **Conventions:**
 
-1. **Use the task list.** Check [TaskList.md]((workspace_root)/TaskList.md) at session start. Claim tasks before starting. Mark done immediately.
+1. **Use the task list.** Check [TaskList.md](TaskList.md) at session start. Claim tasks before starting. Mark done immediately.
 2. **Write durable context.** Put discoveries in this file, the spec, or a module README — not just inline comments.
 3. **Prefer clear interfaces.** Other models read your code without session context. Make module boundaries and contracts obvious.
 4. **Leave traces, not mess.** Don't leave the repo broken. If you change an interface, update all call sites.
 5. **Don't duplicate work.** Coordinate through task ownership rather than parallel implementations.
-6. **Cross-project rhythm.** Every few cycles, compare against [LegacyPrototype v4]((legacy_path)/) (embedding, telemetry, runtime patterns) and Claw Code (modular separation, compaction, diagnostics). Alternate between them. Note borrowed patterns here and update the task list.
+6. **Cross-project rhythm.** Every few cycles, compare against [OpenBulma v4](../openbulma-v4/) (embedding, telemetry, runtime patterns) and Claw Code (modular separation, compaction, diagnostics). Alternate between them. Note borrowed patterns here and update the task list.
 7. **Sync Public Documentation.** If you modify the website at `docs/release/website`, remind the user to sync the changes to the public `OpenCAS_Documentation` GitHub repository. Provide them with the `cp -r` script to stage the website in `/tmp` and push it, ensuring the main private codebase is not accidentally exposed.
+8. **Comment for agent handoff.** Prefer short structural comments and helper-module docstrings that explain phase boundaries, invariants, or why a seam exists. Avoid narration comments and avoid leaving complex orchestration uncommented.
+
+## Code Organization Policy
+
+Treat large route/runtime files as a maintenance liability, not as a normal place to keep adding logic.
+
+1. **Prefer extraction over accretion.** When a file already has multiple responsibilities, new behavior should usually land in a focused helper/service module instead of expanding the existing file.
+2. **Do not create new helper god objects.** A shared module should own one coherent concern, not become a dumping ground for unrelated utilities.
+3. **Reuse one implementation path.** If the same behavior exists across multiple entry points, centralize it so fixes land once.
+4. **Keep route files thin.** API route modules should mostly declare request/response shapes and delegate real loading/execution logic.
+5. **Treat god-object growth as a regression.** If a change would make `agent_loop.py`, `operations.py`, the dashboard SPA, or another large file absorb a new subsystem, stop and split it first unless there is a strong reason not to.
+6. **Contain agent-created artifacts.** New project files, notes, and workflow-generated outputs should go under the project-local `workspace/` root, not directly into arbitrary host paths or the repo root. If a tool accepts a path, prefer resolving it relative to that managed workspace and reject escapes.
+7. **Repair live state when path policy changes.** If artifact locations move, update persisted memory/context/workflow references too. Use `scripts/repair_workspace_references.py` so SQLite-backed state stops pointing at dead Chronicle or legacy-workspace paths.
+8. **Normalize repo-local script defaults.** If you add or update maintenance scripts that operate on the live repo-local state, build their BootstrapConfig through `opencas.maintenance.build_repo_local_bootstrap_config()` instead of hard-coding local workspace/state roots in each script.
 
 Canonical status docs:
-- [TaskList.md]((workspace_root)/TaskList.md)
-- [documentation-map.md]((workspace_root)/docs/documentation-map.md)
-- [production-readiness-status-2026-04-09.md]((workspace_root)/docs/production-readiness-status-2026-04-09.md)
-- [first-regular-use-deployment-checklist.md]((workspace_root)/docs/first-regular-use-deployment-checklist.md)
+- [TaskList.md](TaskList.md)
+- [documentation-map.md](docs/documentation-map.md)
+- [production-readiness-status-2026-04-09.md](docs/production-readiness-status-2026-04-09.md)
+- [first-regular-use-deployment-checklist.md](docs/first-regular-use-deployment-checklist.md)
 
 ## Build, Test, and Development
 
@@ -40,14 +74,14 @@ pytest tests/test_memory.py::test_episode_storage -v
 
 ## External Dependencies
 
-- **`open_llm_auth`** ([GitHub](https://github.com/Es00bac/OpenLLMAuth)) — multi-provider LLM gateway. Handles all routing, credentials, and provider abstraction. Install as editable dependency: `pip install -e ./OpenLLMAuth/open_llm_auth/`.
+- **`open_llm_auth`** (`../open_llm_auth/`) — multi-provider LLM gateway. Handles all routing, credentials, and provider abstraction. Installed as editable path in `requirements.txt`.
 
 ### Embedding Model Policy
 
 - Default chat model: `anthropic/claude-sonnet-4-6`
 - Default embedding model: `google/gemini-embedding-2-preview`
 - `EmbeddingService` routes through `LLMClient.embed()`. Falls back to local deterministic hash embedder only when offline.
-- If `open_llm_auth` lacks a needed provider, extend it first (clone from [GitHub](https://github.com/Es00bac/OpenLLMAuth)), then update OpenCAS.
+- If `open_llm_auth` lacks a needed provider, extend it first (editable dep), then update OpenCAS.
 
 ## Architecture
 
@@ -89,6 +123,8 @@ tests/              # pytest suite mirroring opencas/
 
 ### Implementation Status
 
+This section mixes historical milestone completion with current architecture notes. Use it as subsystem context, not as the canonical status board.
+
 **Phase 1: Core Substrate** — complete. `bootstrap/`, `memory/`, `embeddings/`, `identity/`, `somatic/`, `telemetry/`, `diagnostics/`.
 
 **Phase 2: Autonomy Core** — complete. `SelfApprovalLadder`, `CreativeLadder`, `ExecutiveState`, `AgentRuntime`, `DaydreamGenerator`.
@@ -99,9 +135,15 @@ tests/              # pytest suite mirroring opencas/
 
 **Phase 5: Hardening** — complete. BAA RECOVERING retry loop, git checkpoints, HookBus, execution receipt store, approval ledger, plugin/skill registry, somatic modulators, memory edge graph, compaction continuation, consolidation curation, token telemetry analytics, reliability coordinator.
 
-**Post-Phase 5 additions** (all complete): ConversationalRefusalGate, RelationalEngine (musubi), AgenticHarness, Qdrant vector backend, auto-scheduling and daydream timer, deep code audit fixes (3 P0 bugs), PTY screen-state heuristics and adaptive supervision, workflow composite tools, operations API and dashboard, live validation harness, qualification tooling with rerun provenance, durable scheduling system, operator action provenance, and six long-scenario local validations. Full change history: [docs/release/]((workspace_root)/docs/release/).
+**Post-Phase 5 additions**: ConversationalRefusalGate, RelationalEngine (musubi), AgenticHarness, Qdrant vector backend, auto-scheduling and daydream timer, deep code audit fixes (3 P0 bugs), PTY screen-state heuristics and adaptive supervision, workflow composite tools, operations API and dashboard, live validation harness, qualification tooling with rerun provenance, durable scheduling system, operator action provenance, and six long-scenario local validations. Full change history: [docs/release/](docs/release).
 
-**Phase 6: Post-Roundtable Unified Plan** — operational hardening (Phase 1) and ToM/identity (Phase 5) complete. Remaining: memory/retrieval fusion, agency/autonomy layer, inner life/psychology, plugin lifecycle. Full plan in archived docs.
+**Cleanup result (2026-04-15)** — modularity and contract normalization:
+- shared cross-entry behavior should live in focused service modules rather than being reimplemented across route files
+- `operations.py` and `tui.py` have already been reduced to assembly shells; keep them that way instead of letting responsibilities flow back in
+- the main structural rule now is to preserve the extracted seams around `agent_loop.py`, `context/builder.py`, bootstrap assembly, and the control-plane helpers instead of re-aggregating responsibilities
+- bootstrap, workflow, and tool-registration helpers have been normalized into thin entry shells; future changes should preserve those seams rather than re-aggregating them
+- memory and consolidation are no longer primary god objects, but further doc and integration normalization should assume their new helper-module layout
+- stale docs must be corrected whenever the active frontier changes so future sessions start from the right assumptions
 
 ### Embedding Strategy
 
@@ -145,8 +187,7 @@ tests/              # pytest suite mirroring opencas/
 ## References
 
 - `OPENCAS_PRODUCT_SPEC.md` — requirements, scope, acceptance criteria, phase roadmap.
-- `(legacy_path)/` — prior implementation of embedding service, memory store, agent loops, telemetry, OpenLLMAuth. Check before designing new features.
-- `notes/legacy_agent_v4-comparison.md` — gap analysis against LegacyPrototype v4.
+- `../openbulma-v4/` — prior implementation of embedding service, memory store, agent loops, telemetry, OpenLLMAuth. Check before designing new features.
+- `notes/openbulma-v4-comparison.md` — gap analysis against OpenBulma v4.
 - `notes/claw-code-comparison.md` — gap analysis against Claw Code patterns.
 - This file — check at session start; update when conventions change.
-

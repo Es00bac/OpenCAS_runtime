@@ -86,6 +86,7 @@ def test_load_reports_and_aggregate(tmp_path: Path) -> None:
     assert [payload["run_id"] for _, payload in reports] == ["run-b", "run-a"]
 
     summary = aggregate_reports(reports)
+    assert summary["summary_scope"] == "retained_runs_dir_snapshot"
     assert summary["total_runs"] == 2
     assert summary["direct_success_rate"] == 0.667
     assert summary["agent_success_rate"] == 0.75
@@ -118,8 +119,31 @@ def test_render_markdown_includes_summary_fields(tmp_path: Path) -> None:
     summary = aggregate_reports(load_reports(tmp_path))
     rendered = render_markdown(summary)
     assert "OpenCAS Live Validation Qualification Summary" in rendered
+    assert "Scope: `current retained run folders`" in rendered
+    assert "qualification_remediation_rollup.md" in rendered
     assert "project_management_workflow" in rendered
     assert "artifact_verified" in rendered
+
+
+def test_render_markdown_formats_missing_rates_without_none(tmp_path: Path) -> None:
+    _write_report(
+        tmp_path / "run-a",
+        {
+            "run_id": "run-a",
+            "started_at": "2026-04-09T00:00:00+00:00",
+            "finished_at": "2026-04-09T00:01:00+00:00",
+            "model": "kimi-coding/k2p5",
+            "embedding_model": "google/gemini-embedding-2-preview",
+            "direct_checks": {},
+            "agent_checks": [],
+        },
+    )
+    summary = aggregate_reports(load_reports(tmp_path))
+    rendered = render_markdown(summary)
+
+    assert "Direct success rate: `-`" in rendered
+    assert "Agent success rate: `-`" in rendered
+    assert "`None`" not in rendered
 
 
 def test_legacy_agent_checks_are_inferred_correctly(tmp_path: Path) -> None:

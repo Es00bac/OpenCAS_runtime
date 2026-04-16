@@ -1,13 +1,20 @@
 """Tests for ContextBuilder prompt assembly."""
 
+from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 
+from opencas.bootstrap import BootstrapConfig
 from opencas.context import ContextBuilder, MemoryRetriever, MessageRole, SessionContextStore
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.identity import IdentityManager, IdentityStore
 from opencas.autonomy.executive import ExecutiveState
 from opencas.memory import MemoryStore
+from opencas.relational import MusubiState, MusubiStore, RelationalEngine
+from opencas.tom import ToMEngine
+from opencas.tom.models import BeliefSubject
 
 
 @pytest_asyncio.fixture
@@ -81,6 +88,32 @@ async def test_to_message_list_format(builder_deps):
 
 
 @pytest.mark.asyncio
+async def test_to_message_list_includes_user_attachment_content(builder_deps):
+    builder, ctx_store, _mem_store = builder_deps
+    await ctx_store.append(
+        "s1",
+        MessageRole.USER,
+        "What do you think of my resume?",
+        meta={
+            "attachments": [
+                {
+                    "filename": "resume.md",
+                    "media_type": "text/markdown",
+                    "text_content": "# Resume\n- Built Python automation",
+                }
+            ]
+        },
+    )
+    manifest = await builder.build("What do you think of my resume?", session_id="s1")
+    messages = manifest.to_message_list()
+
+    assert messages[-1]["role"] == "user"
+    assert "What do you think of my resume?" in messages[-1]["content"]
+    assert "[Attached file: resume.md (text/markdown)]" in messages[-1]["content"]
+    assert "# Resume" in messages[-1]["content"]
+
+
+@pytest.mark.asyncio
 async def test_build_includes_somatic_style_note(builder_deps):
     from opencas.somatic import SomaticModulators, SomaticState
     builder, ctx_store, _mem_store = builder_deps
@@ -139,6 +172,17 @@ async def test_build_semantic_budgeting_prunes_redundant_results(builder_deps):
 
 
 @pytest.mark.asyncio
+async def test_build_system_entry_reports_managed_workspace_root(builder_deps, tmp_path: Path):
+    builder, _ctx_store, _mem_store = builder_deps
+    builder.config = BootstrapConfig(state_dir=tmp_path, workspace_root=tmp_path)
+
+    system_entry = await builder._build_system_entry()
+
+    assert f"The primary workspace root is {tmp_path.resolve()}" in system_entry.content
+    assert f"managed workspace root {(tmp_path / 'workspace').resolve()}" in system_entry.content
+
+
+@pytest.mark.asyncio
 async def test_build_records_retrieval_usage_on_selected_context(builder_deps):
     builder, _ctx_store, mem_store = builder_deps
 
@@ -180,3 +224,53 @@ async def test_build_memory_recall_system_note_requires_grounded_recall(builder_
 
     assert "do not claim first-person recollection" in manifest.system.content.lower()
     assert "workspace artifacts" in manifest.system.content.lower()
+
+
+@pytest.mark.asyncio
+async def test_build_includes_promise_followthrough_guidance_for_delayed_commitments(tmp_path):
+    from opencas.somatic import SomaticModulators, SomaticState
+
+    identity = IdentityManager(IdentityStore(tmp_path / "identity"))
+    identity.load()
+    executive = ExecutiveState(identity=identity)
+
+    tom = ToMEngine(identity=identity)
+    await tom.record_intention(
+        BeliefSubject.SELF,
+        "Return to the scheduler resume path",
+        meta={"source": "self_commitment_capture"},
+    )
+    rel = RelationalEngine(MusubiStore(Path(":memory:")))
+    rel._state = MusubiState(
+        musubi=-0.2,
+        dimensions={
+            "trust": -0.3,
+            "resonance": -0.2,
+            "presence": 0.0,
+            "attunement": -0.1,
+        },
+    )
+
+    class _FakeRetriever:
+        memory = None
+
+        @staticmethod
+        def detect_personal_recall_intent(_user_input: str) -> bool:
+            return False
+
+    builder = ContextBuilder(
+        store=SimpleNamespace(),
+        retriever=_FakeRetriever(),
+        identity=identity,
+        executive=executive,
+        modulators=SomaticModulators(SomaticState(fatigue=0.84, tension=0.7, certainty=0.42)),
+        relational=rel,
+        tom=tom,
+    )
+
+    system_entry = await builder._build_system_entry(user_input="Can you still finish it?")
+
+    assert "pending user-facing commitments" in system_entry.content.lower()
+    assert "return to the scheduler resume path" in system_entry.content.lower()
+    assert "acknowledge the delay plainly" in system_entry.content.lower()
+    assert "repair confidence explicitly" in system_entry.content.lower()

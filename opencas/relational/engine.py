@@ -205,9 +205,9 @@ class RelationalEngine:
         assert self._state is not None
         musubi = self._state.musubi
         if has_user_collab_tag and musubi > 0.3:
-            return min(0.15, musubi * 0.2)
+            return min(0.35, musubi * 0.4)
         if musubi < -0.3:
-            return max(-0.10, musubi * 0.1)
+            return max(-0.35, musubi * 0.25)
         return 0.0
 
     def to_creative_boost(self, aligns_with_shared_goals: bool = False) -> float:
@@ -215,24 +215,41 @@ class RelationalEngine:
         assert self._state is not None
         musubi = self._state.musubi
         if aligns_with_shared_goals and musubi > 0.2:
-            return min(0.12, musubi * 0.15)
+            return min(0.30, musubi * 0.35)
         if musubi > 0.5:
-            return 0.05
+            return 0.10
         return 0.0
 
     def to_approval_risk_modifier(self) -> float:
         """Return a risk-appetite modifier for self-approval.
 
-        Positive musubi slightly expands the agent's comfort zone;
+        Positive musubi expands the agent's comfort zone;
         very negative musubi increases caution.
         """
         assert self._state is not None
         musubi = self._state.musubi
         if musubi > 0.6:
-            return 0.05
+            return min(0.25, musubi * 0.3)
         if musubi < -0.5:
-            return -0.10
+            return max(-0.25, musubi * 0.3)
         return 0.0
+
+    def to_promise_priority_boost(self, user_facing: bool = False) -> float:
+        """Return a bounded priority nudge for promise-follow-through.
+
+        High trust, attunement, and musubi should slightly increase how strongly
+        explicit user-facing promises compete against otherwise similar work.
+        """
+        assert self._state is not None
+        musubi = self._state.musubi
+        trust = self._state.dimensions.get(ResonanceDimension.TRUST.value, 0.0)
+        attunement = self._state.dimensions.get(ResonanceDimension.ATTUNEMENT.value, 0.0)
+
+        if not user_facing:
+            return round(max(-0.05, min(0.05, musubi * 0.05)), 4)
+
+        boost = (musubi * 0.08) + (trust * 0.08) + (attunement * 0.04)
+        return round(max(-0.12, min(0.18, boost)), 4)
 
     async def _apply_deltas(
         self,

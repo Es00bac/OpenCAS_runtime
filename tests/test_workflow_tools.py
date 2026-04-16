@@ -16,6 +16,7 @@ def _make_mock_runtime(tmp_path: Path):
     runtime = MagicMock()
     runtime.ctx = MagicMock()
     runtime.ctx.config.primary_workspace_root.return_value = tmp_path
+    runtime.ctx.config.agent_workspace_root.return_value = tmp_path / "workspace"
 
     # Commitment store
     commitment_store = MagicMock()
@@ -146,11 +147,13 @@ async def test_create_writing_task(tmp_path: Path) -> None:
     payload = json.loads(result.output)
     assert payload["scaffold_written"] is True
     assert payload["plan_id"].startswith("plan-")
+    assert payload["managed_workspace_root"] == str(tmp_path / "workspace")
     runtime.ctx.plan_store.set_status.assert_awaited_once_with(payload["plan_id"], "active")
 
     # Verify file was written
     output_path = Path(payload["output_path"])
     assert output_path.exists()
+    assert output_path.is_relative_to(tmp_path / "workspace")
     content = output_path.read_text()
     assert "# Architecture Overview" in content
     assert "## Introduction" in content
@@ -161,14 +164,29 @@ async def test_create_writing_task(tmp_path: Path) -> None:
 async def test_create_writing_task_custom_path(tmp_path: Path) -> None:
     runtime = _make_mock_runtime(tmp_path)
     adapter = WorkflowToolAdapter(runtime)
-    custom = str(tmp_path / "docs" / "custom.md")
+    custom = "docs/custom.md"
 
     result = await adapter("workflow_create_writing_task", {
         "title": "Custom Doc",
         "output_path": custom,
     })
     assert result.success is True
-    assert Path(custom).exists()
+    assert Path(json.loads(result.output)["output_path"]) == (tmp_path / "workspace" / custom).resolve()
+
+
+@pytest.mark.asyncio
+async def test_create_writing_task_rejects_path_outside_managed_workspace(tmp_path: Path) -> None:
+    runtime = _make_mock_runtime(tmp_path)
+    adapter = WorkflowToolAdapter(runtime)
+    outside = tmp_path.parent / "outside.md"
+
+    result = await adapter("workflow_create_writing_task", {
+        "title": "Outside Doc",
+        "output_path": str(outside),
+    })
+
+    assert result.success is False
+    assert "managed workspace root" in result.output
 
 
 @pytest.mark.asyncio
@@ -429,6 +447,81 @@ async def test_supervise_session_uses_adaptive_observe_waits(tmp_path: Path) -> 
     payload = json.loads(result.output)
     assert payload["supervision_advisory"]["action"] == "observe_briefly"
     assert payload["rounds_used"] == 4
+
+
+@pytest.mark.asyncio
+async def test_supervise_session_sends_single_enter_follow_up_for_stalled_kilocode(tmp_path: Path) -> None:
+    runtime = _make_mock_runtime(tmp_path)
+    expected = tmp_path / "note.md"
+
+    async def _fake_execute_tool(name: str, args: dict[str, object]) -> dict[str, object]:
+        if name == "pty_interact" and "command" in args:
+            return {
+                "success": True,
+                "output": json.dumps({
+                    "session_id": "sess-kilo-follow-up",
+                    "running": True,
+                    "cleaned_combined_output": "ready",
+                    "screen_state": {"app": "kilocode", "mode": "interactive", "ready_for_input": True},
+                    "idle_reached": True,
+                }),
+                "metadata": {},
+            }
+        if name == "pty_interact" and args.get("input") == "Create the note\r":
+            return {
+                "success": True,
+                "output": json.dumps({
+                    "session_id": "sess-kilo-follow-up",
+                    "running": True,
+                    "cleaned_combined_output": "composer staged",
+                    "screen_state": {"app": "kilocode", "mode": "interactive", "ready_for_input": True},
+                    "idle_reached": True,
+                }),
+                "metadata": {},
+            }
+        if name == "pty_observe":
+            return {
+                "success": True,
+                "output": json.dumps({
+                    "session_id": "sess-kilo-follow-up",
+                    "running": True,
+                    "cleaned_combined_output": "composer staged",
+                    "screen_state": {"app": "kilocode", "mode": "interactive", "ready_for_input": True},
+                    "idle_reached": True,
+                }),
+                "metadata": {},
+            }
+        if name == "pty_interact" and args.get("input") == "\r":
+            expected.write_text("done", encoding="utf-8")
+            return {
+                "success": True,
+                "output": json.dumps({
+                    "session_id": "sess-kilo-follow-up",
+                    "running": True,
+                    "cleaned_combined_output": "submitted",
+                    "screen_state": {"app": "kilocode", "mode": "interactive", "ready_for_input": False},
+                    "idle_reached": True,
+                }),
+                "metadata": {},
+            }
+        raise AssertionError(f"unexpected tool call: {name} {args}")
+
+    runtime.execute_tool = AsyncMock(side_effect=_fake_execute_tool)
+    adapter = WorkflowToolAdapter(runtime)
+
+    result = await adapter("workflow_supervise_session", {
+        "command": "kilocode",
+        "task": "Create the note",
+        "verification_path": str(expected),
+        "max_rounds": 4,
+    })
+
+    assert result.success is True
+    payload = json.loads(result.output)
+    assert payload["verification_exists"] is True
+    assert payload["supervision_advisory"]["reason"] == "verification_satisfied"
+    assert payload["rounds_used"] == 4
+    assert runtime.execute_tool.await_args_list[3].args[1]["input"] == "\r"
 
 
 @pytest.mark.asyncio

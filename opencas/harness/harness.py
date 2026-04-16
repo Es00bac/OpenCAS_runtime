@@ -236,7 +236,11 @@ class AgenticHarness:
                     {"role": "system", "content": "You are a planning assistant for an autonomous agent."},
                     {"role": "user", "content": prompt},
                 ]
-                response = await self.llm.chat_completion(messages)
+                response = await self.llm.chat_completion(
+                    messages,
+                    complexity="standard",
+                    source="harness_planning",
+                )
                 content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
                 plan = content.strip()
                 if plan:

@@ -190,7 +190,11 @@ class RepairExecutor:
                     },
                     {"role": "user", "content": f"Objective: {task.objective}"},
                 ]
-                response = await self.llm.chat_completion(messages)
+                response = await self.llm.chat_completion(
+                    messages,
+                    complexity="high" if task.attempt > 1 else "standard",
+                    source="repair_planning",
+                )
                 content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
                 return content.strip() or "investigate and fix"
             except Exception as exc:

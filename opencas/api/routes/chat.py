@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, File, HTTPException, UploadFile
 from .identity import SomaticStateResponse
 from pydantic import BaseModel, Field
+from pathlib import Path
+
+from opencas.api.chat_service import (
+    chat_upload_dir,
+    perform_chat_turn,
+    store_uploaded_file,
+)
 
 router = APIRouter(tags=["chat"])
 
@@ -29,15 +36,31 @@ class ActivePlanResponse(BaseModel):
     active_plan: Optional[Dict[str, Any]]
 
 
-class ChatSendRequest(BaseModel):
-    session_id: Optional[str] = None
-    message: str
-
-
 class ChatSendResponse(BaseModel):
     session_id: str
     response: str
     somatic: Optional[SomaticStateResponse] = None
+
+
+class UploadResponse(BaseModel):
+    filename: str
+    path: str
+    url: str
+    media_type: str
+    size_bytes: int
+
+
+class ChatAttachmentInput(BaseModel):
+    filename: str
+    url: Optional[str] = None
+    path: Optional[str] = None
+    media_type: Optional[str] = None
+
+
+class ChatSendRequest(BaseModel):
+    session_id: Optional[str] = None
+    message: str = ""
+    attachments: List[ChatAttachmentInput] = Field(default_factory=list)
 
 
 class CreateSessionResponse(BaseModel):
@@ -62,6 +85,7 @@ class ChatContextSummaryResponse(BaseModel):
     executive: Dict[str, Any] = Field(default_factory=dict)
     current_work: Optional[Dict[str, Any]] = None
     tasks: Dict[str, Any] = Field(default_factory=dict)
+    consolidation: Dict[str, Any] = Field(default_factory=dict)
 
 
 def _human_title(text: Optional[str], fallback: str = "Untitled") -> str:
@@ -88,6 +112,13 @@ def _task_ui_status(stage: str, status: str) -> str:
     return status_key.replace("_", " ") if status_key else "unknown"
 
 
+def _normalize_session_status(status: str) -> str:
+    normalized = str(status or "").strip().lower() or "active"
+    if normalized not in {"active", "archived", "all"}:
+        raise HTTPException(status_code=400, detail=f"Unsupported session status: {status}")
+    return normalized
+
+
 def build_chat_router(runtime: Any) -> APIRouter:
     """Build chat routes wired to *runtime*."""
     import uuid
@@ -95,6 +126,7 @@ def build_chat_router(runtime: Any) -> APIRouter:
     from opencas.context.models import MessageRole
 
     r = APIRouter(prefix="/api/chat", tags=["chat"])
+    upload_dir = chat_upload_dir(runtime)
 
     @r.get("/sessions", response_model=SessionListResponse)
     async def list_sessions(
@@ -102,10 +134,18 @@ def build_chat_router(runtime: Any) -> APIRouter:
         status: str = "active",
         q: Optional[str] = None,
     ) -> SessionListResponse:
-        sessions = await runtime.ctx.context_store.list_session_ids(limit=limit)
-        if q:
-            qlower = q.lower()
-            sessions = [s for s in sessions if qlower in str(s.get("session_id", "")).lower()]
+        normalized_status = _normalize_session_status(status)
+        if q and hasattr(runtime.ctx.context_store, "search_sessions"):
+            sessions = await runtime.ctx.context_store.search_sessions(
+                q,
+                status=normalized_status,
+                limit=limit,
+            )
+        else:
+            sessions = await runtime.ctx.context_store.list_session_ids(
+                limit=limit,
+                status=normalized_status,
+            )
         return SessionListResponse(sessions=sessions)
 
     @r.post("/sessions", response_model=CreateSessionResponse)
@@ -120,7 +160,7 @@ def build_chat_router(runtime: Any) -> APIRouter:
         if req.name is not None:
             await runtime.ctx.context_store.update_session_name(session_id, req.name)
         if req.status is not None:
-            await runtime.ctx.context_store.set_session_status(session_id, req.status)
+            await runtime.ctx.context_store.set_session_status(session_id, _normalize_session_status(req.status))
         return UpdateSessionResponse(session_id=session_id)
 
     @r.post("/sessions/{session_id}/archive", response_model=UpdateSessionResponse)
@@ -193,6 +233,7 @@ def build_chat_router(runtime: Any) -> APIRouter:
                 ss = somatic_mgr.state
                 somatic = {
                     "somatic_tag": ss.somatic_tag,
+                    "arousal": ss.arousal,
                     "energy": ss.energy,
                     "focus": ss.focus,
                     "fatigue": ss.fatigue,
@@ -290,33 +331,50 @@ def build_chat_router(runtime: Any) -> APIRouter:
                 "counts": task_counts,
                 "items": task_entries,
             },
+            consolidation=workflow.get("consolidation", {}),
         )
 
     @r.post("/send", response_model=ChatSendResponse)
     async def send_message(req: ChatSendRequest) -> ChatSendResponse:
-        sid = req.session_id or runtime.ctx.config.session_id or "default"
-        response_text = await runtime.converse(req.message, session_id=sid)
+        result = await perform_chat_turn(
+            runtime,
+            session_id=req.session_id,
+            message=req.message,
+            attachments=req.attachments,
+        )
+        return ChatSendResponse(
+            session_id=result.session_id,
+            response=result.response,
+            somatic=result.somatic,
+        )
 
-        somatic = None
-        somatic_mgr = getattr(runtime.ctx, "somatic", None)
-        if somatic_mgr is not None:
-            try:
-                ss = somatic_mgr.state
-                somatic = SomaticStateResponse(
-                    state_id=str(ss.state_id),
-                    updated_at=ss.updated_at.isoformat(),
-                    arousal=ss.arousal,
-                    fatigue=ss.fatigue,
-                    tension=ss.tension,
-                    valence=ss.valence,
-                    focus=ss.focus,
-                    energy=ss.energy,
-                    certainty=ss.certainty,
-                    somatic_tag=ss.somatic_tag,
-                )
-            except Exception:
-                pass
+    @r.post("/upload", response_model=UploadResponse)
+    async def upload_file(file: UploadFile = File(...)) -> UploadResponse:
+        payload = store_uploaded_file(
+            upload_dir,
+            filename=file.filename,
+            content_type=file.content_type,
+            fileobj=file.file,
+        )
+        return UploadResponse(
+            filename=payload["filename"],
+            path=payload["path"],
+            url=payload["url"],
+            media_type=payload["media_type"],
+            size_bytes=payload["size_bytes"],
+        )
 
-        return ChatSendResponse(session_id=sid, response=response_text, somatic=somatic)
+    from starlette.responses import FileResponse
+
+    @r.get("/uploads/{filename}")
+    async def serve_upload(filename: str) -> Any:
+        target = upload_dir / filename
+        try:
+            target.resolve().relative_to(upload_dir.resolve())
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid filename")
+        if not target.exists():
+            raise HTTPException(status_code=404, detail="File not found")
+        return FileResponse(target)
 
     return r

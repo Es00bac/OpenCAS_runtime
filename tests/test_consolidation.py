@@ -1,9 +1,12 @@
 """Tests for NightlyConsolidationEngine."""
 
+from datetime import datetime, timezone, timedelta
+from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock
 
+from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.consolidation import NightlyConsolidationEngine
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.identity import IdentityManager, IdentityStore
@@ -208,8 +211,6 @@ async def test_consolidation_reweights_episode_salience(deps):
     assert updated_ep.salience != old_salience
 
 
-from datetime import datetime, timezone, timedelta
-
 @pytest.mark.asyncio
 async def test_consolidation_recovers_orphans(deps):
     store, embeds, _identity, engine = deps
@@ -242,6 +243,333 @@ async def test_consolidation_recovers_orphans(deps):
     edges1 = await store.get_edges_for(str(ep1.episode_id), min_confidence=0.0, limit=1)
     edges2 = await store.get_edges_for(str(ep2.episode_id), min_confidence=0.0, limit=1)
     assert len(edges1) >= 1 or len(edges2) >= 1
+
+
+class _FakeCommitmentStore:
+    def __init__(self, commitments):
+        self.items = {str(commitment.commitment_id): commitment for commitment in commitments}
+
+    async def list_by_status(self, status: CommitmentStatus):
+        return [commitment for commitment in self.items.values() if commitment.status == status]
+
+    async def update_status(self, commitment_id: str, status: CommitmentStatus) -> None:
+        self.items[commitment_id].status = status
+
+    async def save(self, commitment: Commitment) -> None:
+        self.items[str(commitment.commitment_id)] = commitment
+
+    async def link_work(self, commitment_id: str, work_id: str) -> None:
+        self.items[commitment_id].linked_work_ids.append(work_id)
+
+
+class _FakeWorkStore:
+    def __init__(self) -> None:
+        self.saved = []
+
+    async def save(self, work) -> None:
+        self.saved.append(work)
+
+
+class _FakeEmbeddings:
+    async def embed(self, content: str, task_type: str = "retrieval_query"):
+        return SimpleNamespace(vector=[1.0, 0.0], source_hash=f"hash:{content}")
+
+
+class _FakeMemory:
+    def __init__(self, episodes):
+        self.episodes = episodes
+
+    async def list_non_compacted_episodes(self, limit: int = 200):
+        return self.episodes[:limit]
+
+
+@pytest.mark.asyncio
+async def test_commitment_consolidation_preserves_blocked_status_and_skips_work_creation() -> None:
+    blocked_a = Commitment(content="Return to the scheduler resume path", status=CommitmentStatus.BLOCKED)
+    blocked_b = Commitment(content="Return to the scheduler resume path", status=CommitmentStatus.BLOCKED)
+    commitment_store = _FakeCommitmentStore([blocked_a, blocked_b])
+    work_store = _FakeWorkStore()
+    llm = MagicMock()
+    identity = MagicMock()
+
+    engine = NightlyConsolidationEngine(
+        memory=_FakeMemory([]),
+        embeddings=_FakeEmbeddings(),
+        llm=llm,
+        identity=identity,
+        commitment_store=commitment_store,
+        work_store=work_store,
+    )
+    engine._llm_pick_commitment_survivor = AsyncMock(return_value=0)
+
+    result = await engine._consolidate_commitments(similarity_threshold=0.1)
+
+    assert result["clusters_formed"] == 1
+    assert result["commitments_merged"] == 1
+    assert result["work_objects_created"] == 0
+    survivors = [
+        commitment
+        for commitment in commitment_store.items.values()
+        if commitment.status != CommitmentStatus.ABANDONED
+    ]
+    assert len(survivors) == 1
+    assert survivors[0].status == CommitmentStatus.BLOCKED
+    assert work_store.saved == []
+
+
+@pytest.mark.asyncio
+async def test_extract_commitments_from_chat_logs_recovers_roleless_turns() -> None:
+    now = datetime.now(timezone.utc)
+    episodes = [
+        Episode(
+            kind=EpisodeKind.TURN,
+            content="I'll come back to the scheduler resume path later.",
+            created_at=now - timedelta(hours=1),
+        )
+    ]
+    commitment_store = _FakeCommitmentStore([])
+    llm = MagicMock()
+    llm.chat_completion = AsyncMock(
+        return_value={
+            "choices": [
+                {
+                    "message": {
+                        "content": '[{"candidate_id":"1","content":"Return to the scheduler resume path","inferred_status":"active","reason":"assistant promise"}]'
+                    }
+                }
+            ]
+        }
+    )
+
+    engine = NightlyConsolidationEngine(
+        memory=_FakeMemory(episodes),
+        embeddings=_FakeEmbeddings(),
+        llm=llm,
+        identity=MagicMock(),
+        commitment_store=commitment_store,
+        work_store=_FakeWorkStore(),
+    )
+
+    created = await engine._extract_commitments_from_chat_logs()
+
+    assert created == 1
+    saved = next(iter(commitment_store.items.values()))
+    assert saved.content == "Return to the scheduler resume path"
+    assert saved.meta["source"] == "nightly_consolidation"
+    assert saved.meta["role_source"] == "roleless_fallback"
+
+
+@pytest.mark.asyncio
+async def test_commitment_consolidation_merges_exact_active_duplicates_without_llm() -> None:
+    active_a = Commitment(
+        content="Return to the scheduler resume path",
+        status=CommitmentStatus.ACTIVE,
+        linked_work_ids=["work-a"],
+        linked_task_ids=["task-a"],
+        priority=4.0,
+    )
+    active_b = Commitment(
+        content="Return to the scheduler resume path",
+        status=CommitmentStatus.ACTIVE,
+        linked_work_ids=["work-b"],
+        linked_task_ids=["task-b"],
+        priority=7.0,
+    )
+    commitment_store = _FakeCommitmentStore([active_a, active_b])
+    work_store = _FakeWorkStore()
+    llm = MagicMock()
+    identity = MagicMock()
+
+    engine = NightlyConsolidationEngine(
+        memory=_FakeMemory([]),
+        embeddings=_FakeEmbeddings(),
+        llm=llm,
+        identity=identity,
+        commitment_store=commitment_store,
+        work_store=work_store,
+    )
+    engine._llm_pick_commitment_survivor = AsyncMock(side_effect=AssertionError("LLM should not be called"))
+
+    result = await engine._consolidate_commitments(similarity_threshold=0.1)
+
+    assert result["clusters_formed"] == 1
+    assert result["commitments_merged"] == 1
+    survivors = [
+        commitment
+        for commitment in commitment_store.items.values()
+        if commitment.status != CommitmentStatus.ABANDONED
+    ]
+    assert len(survivors) == 1
+    survivor = survivors[0]
+    assert survivor.status == CommitmentStatus.ACTIVE
+    assert set(survivor.linked_work_ids) == {"work-a", "work-b"}
+    assert set(survivor.linked_task_ids) == {"task-a", "task-b"}
+    assert survivor.meta["consolidation_merge_rationale"] == "heuristic_exact_duplicate"
+    assert result["work_objects_created"] == 0
+
+
+@pytest.mark.asyncio
+async def test_commitment_consolidation_skips_same_shape_but_distinct_commitments() -> None:
+    first = Commitment(content="Return to the scheduler resume path", status=CommitmentStatus.ACTIVE)
+    second = Commitment(content="Return to the dashboard memory atlas", status=CommitmentStatus.ACTIVE)
+    commitment_store = _FakeCommitmentStore([first, second])
+    llm = MagicMock()
+    identity = MagicMock()
+
+    engine = NightlyConsolidationEngine(
+        memory=_FakeMemory([]),
+        embeddings=_FakeEmbeddings(),
+        llm=llm,
+        identity=identity,
+        commitment_store=commitment_store,
+        work_store=_FakeWorkStore(),
+    )
+    engine._llm_pick_commitment_survivor = AsyncMock(side_effect=AssertionError("Distinct commitments should not be merged"))
+
+    result = await engine._consolidate_commitments(similarity_threshold=0.1)
+
+    assert result["clusters_formed"] == 1
+    assert result["commitments_merged"] == 0
+    survivors = [
+        commitment
+        for commitment in commitment_store.items.values()
+        if commitment.status != CommitmentStatus.ABANDONED
+    ]
+    assert len(survivors) == 2
+
+
+@pytest.mark.asyncio
+async def test_extract_commitments_from_chat_logs_uses_session_context_and_dedupes_candidates() -> None:
+    now = datetime.now(timezone.utc)
+    episodes = [
+        Episode(
+            kind=EpisodeKind.TURN,
+            session_id="session-a",
+            content="Please come back to the scheduler resume path after you rest.",
+            created_at=now - timedelta(minutes=3),
+            payload={"role": "user"},
+        ),
+        Episode(
+            kind=EpisodeKind.TURN,
+            session_id="session-a",
+            content="I'll come back to the scheduler resume path later.",
+            created_at=now - timedelta(minutes=2),
+            payload={"role": "assistant"},
+        ),
+        Episode(
+            kind=EpisodeKind.TURN,
+            session_id="session-a",
+            content="I'll come back to the scheduler resume path when I'm ready.",
+            created_at=now - timedelta(minutes=1),
+            payload={"role": "assistant"},
+        ),
+    ]
+    commitment_store = _FakeCommitmentStore([])
+    captured_prompt = {}
+
+    async def _mock_chat(messages, source=None):
+        captured_prompt["text"] = messages[1]["content"]
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '[{"candidate_id":"1","content":"Return to the scheduler resume path","inferred_status":"active","reason":"user-facing follow-up promise"}]'
+                    }
+                }
+            ]
+        }
+
+    llm = MagicMock()
+    llm.chat_completion = _mock_chat
+
+    engine = NightlyConsolidationEngine(
+        memory=_FakeMemory(episodes),
+        embeddings=_FakeEmbeddings(),
+        llm=llm,
+        identity=MagicMock(),
+        commitment_store=commitment_store,
+        work_store=_FakeWorkStore(),
+    )
+
+    created = await engine._extract_commitments_from_chat_logs()
+
+    assert created == 1
+    prompt = captured_prompt["text"]
+    assert "previous_user_turn: Please come back to the scheduler resume path after you rest." in prompt
+    assert prompt.count("normalized_commitment: Return to the scheduler resume path") == 1
+    saved = next(iter(commitment_store.items.values()))
+    assert saved.meta["source_session_id"] == "session-a"
+    assert saved.meta["previous_user_turn"] == "Please come back to the scheduler resume path after you rest."
+    assert saved.meta["role_source"] == "payload"
+
+
+@pytest.mark.asyncio
+async def test_extract_commitments_from_chat_logs_falls_back_to_content_match_when_candidate_id_mismatches() -> None:
+    now = datetime.now(timezone.utc)
+    episodes = [
+        Episode(
+            kind=EpisodeKind.TURN,
+            session_id="session-a",
+            content="Please come back to the memory atlas overhaul after you rest.",
+            created_at=now - timedelta(minutes=5),
+            payload={"role": "user"},
+        ),
+        Episode(
+            kind=EpisodeKind.TURN,
+            session_id="session-a",
+            content="I'll come back to the memory atlas overhaul after I rest.",
+            created_at=now - timedelta(minutes=4),
+            payload={"role": "assistant"},
+        ),
+        Episode(
+            kind=EpisodeKind.TURN,
+            session_id="session-b",
+            content="Please come back to the scheduler resume path after you rest.",
+            created_at=now - timedelta(minutes=2),
+            payload={"role": "user"},
+        ),
+        Episode(
+            kind=EpisodeKind.TURN,
+            session_id="session-b",
+            content="I'll come back to the scheduler resume path when I'm ready.",
+            created_at=now - timedelta(minutes=1),
+            payload={"role": "assistant"},
+        ),
+    ]
+    commitment_store = _FakeCommitmentStore([])
+
+    async def _mock_chat(messages, source=None):
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": '[{"candidate_id":"1","content":"Return to the scheduler resume path","inferred_status":"active","reason":"user-facing follow-up promise"}]'
+                    }
+                }
+            ]
+        }
+
+    llm = MagicMock()
+    llm.chat_completion = _mock_chat
+
+    engine = NightlyConsolidationEngine(
+        memory=_FakeMemory(episodes),
+        embeddings=_FakeEmbeddings(),
+        llm=llm,
+        identity=MagicMock(),
+        commitment_store=commitment_store,
+        work_store=_FakeWorkStore(),
+    )
+
+    created = await engine._extract_commitments_from_chat_logs()
+
+    assert created == 1
+    saved = next(iter(commitment_store.items.values()))
+    assert saved.content == "Return to the scheduler resume path"
+    assert saved.meta["source_session_id"] == "session-b"
+    assert saved.meta["previous_user_turn"] == (
+        "Please come back to the scheduler resume path after you rest."
+    )
 
 
 @pytest.mark.asyncio

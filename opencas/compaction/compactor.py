@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from opencas.api import LLMClient
 from opencas.memory import CompactionRecord, Episode, Memory, MemoryStore
@@ -88,16 +88,69 @@ class ConversationCompactor:
                 },
             )
 
-        await self._inject_continuation_message(session_id, summary)
+        await self._inject_narrative_bridge(session_id, summary)
 
         return record
 
-    async def _inject_continuation_message(
+    async def _inject_narrative_bridge(
         self,
         session_id: str,
         summary: str,
     ) -> None:
-        """Append a synthetic system message so the LLM retains compaction context."""
+        """Generate a first-person narrative bridge from the system's perspective.
+
+        Falls back to the legacy metadata injection if the LLM call fails.
+        """
+        if self.context_store is None:
+            return
+        from opencas.context.models import MessageRole
+
+        bridge_prefix = f"[Context: earlier conversation was compacted. Summary: {summary}]"
+        bridge = await self._generate_narrative_bridge(summary, session_id)
+        content = bridge_prefix if not bridge else f"{bridge_prefix}\n{bridge}"
+
+        await self.context_store.append(
+            session_id,
+            MessageRole.SYSTEM,
+            content,
+            meta={
+                "synthetic": True,
+                "source": "compaction_narrative_bridge",
+                "session_id": session_id,
+            },
+        )
+
+    async def _generate_narrative_bridge(self, summary: str, session_id: str) -> Optional[str]:
+        """Use the LLM to generate a first-person narrative bridge."""
+        prompt = (
+            "Summarize this conversation as a narrative bridge from your perspective as Bulma. "
+            "Include: what mattered, how you felt, and what continuity thread carries forward. "
+            "Write in first person, 2-3 sentences. Be emotionally honest but not melodramatic.\n\n"
+            f"Conversation summary: {summary}"
+        )
+        messages = [
+            {"role": "system", "content": "You are Bulma, writing a continuity bridge for yourself after memory compaction."},
+            {"role": "user", "content": prompt},
+        ]
+        try:
+            response = await self.llm.chat_completion(
+                messages,
+                complexity="standard",
+                source="compaction_bridge",
+            )
+            choices = response.get("choices", [])
+            if choices:
+                return choices[0].get("message", {}).get("content", "").strip()
+        except Exception:
+            pass
+        return None
+
+    async def _inject_continuation_message_legacy(
+        self,
+        session_id: str,
+        summary: str,
+    ) -> None:
+        """Legacy injection: thin metadata tag (pre-Phase 3 behavior)."""
         if self.context_store is None:
             return
         from opencas.context.models import MessageRole
@@ -188,6 +241,7 @@ class ConversationCompactor:
         try:
             response = await self.llm.chat_completion(
                 messages,
+                complexity="light",
                 source="compaction",
             )
             choices = response.get("choices", [])
@@ -219,6 +273,7 @@ class ConversationCompactor:
         try:
             response = await self.llm.chat_completion(
                 llm_messages,
+                complexity="light",
                 source="compaction",
             )
             choices = response.get("choices", [])

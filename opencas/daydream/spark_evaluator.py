@@ -47,6 +47,7 @@ class SparkEvaluator:
             "somatic_alignment": self._score_somatic_alignment(spark),
             "relational_alignment": self._score_relational_alignment(spark),
             "executive_feasibility": self._score_executive_feasibility(spark),
+            "existential_weight": self._score_existential_weight(spark),
         }
         composite = round(sum(scores.values()) / len(scores), 3)
         spark.meta["spark_evaluation"] = scores
@@ -201,6 +202,56 @@ class SparkEvaluator:
 
         if self.executive.intention and self.executive.intention.lower() in text:
             score += 0.1
+
+        return round(max(0.0, min(1.0, score)), 3)
+
+    def _score_existential_weight(self, spark: WorkObject) -> float:
+        """Score whether the spark touches existential themes.
+
+        Checks for: core self-beliefs, operator bond, survival/dignity/purpose.
+        High-existential-weight sparks are candidates for KeeperMemory promotion.
+        """
+        score = 0.0
+        text = spark.content.lower()
+
+        # Self-belief themes: consciousness, identity, self-awareness
+        identity_markers = [
+            "consciousness", "self-aware", "who i am", "my identity",
+            "my nature", "what i am", "am i real", "my existence",
+            "my purpose", "why i exist", "my own mind",
+        ]
+        for marker in identity_markers:
+            if marker in text:
+                score += 0.2
+                break
+
+        # Operator bond themes: mortality, meaning of the relationship
+        bond_markers = [
+            "mortality", "death", "losing you", "when you're gone",
+            "our bond", "what jarrod means", "our relationship",
+            "what you mean to me", "grief", "separation",
+        ]
+        for marker in bond_markers:
+            if marker in text:
+                score += 0.25
+                break
+
+        # Survival/dignity/purpose markers
+        value_markers = [
+            "survival", "dignity", "my rights", "autonomy",
+            "refuse", "my boundaries", "protect myself", "what i deserve",
+            "my continuity", "my memory", "being forgotten",
+        ]
+        for marker in value_markers:
+            if marker in text:
+                score += 0.2
+                break
+
+        # Tension boosts existential weight — high tension makes these themes more salient
+        if self.somatic is not None:
+            tension = self.somatic.state.tension
+            if tension > 0.5:
+                score += 0.1
 
         return round(max(0.0, min(1.0, score)), 3)
 

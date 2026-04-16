@@ -82,8 +82,15 @@ class ToolUseLoop:
         try:
             while iterations < ctx.max_iterations:
                 iterations += 1
+                complexity = self._select_iteration_complexity(
+                    objective=objective,
+                    ctx=ctx,
+                    iteration=iterations,
+                    guard=guard,
+                )
                 response = await self.llm.chat_completion(
                     messages=messages,
+                    complexity=complexity,
                     tools=schemas if schemas else None,
                     payload=payload,
                     source="tool_use_loop",
@@ -221,6 +228,21 @@ class ToolUseLoop:
         """Select a smaller, relevant tool subset for the current objective."""
         text = (objective or "").lower()
         selected_names: set[str] = set()
+        conversational_only = any(
+            phrase in text
+            for phrase in (
+                "how you understand your role",
+                "how do you understand your role",
+                "what is your role",
+                "your role in this session",
+                "who are you",
+                "how are you",
+            )
+        )
+
+        # Reflective turns should stay tool-free unless the user explicitly asks for work.
+        if conversational_only:
+            return []
 
         if any(token in text for token in ("runtime", "workflow", "status", "profile", "constraint", "operating roots")):
             selected_names.update({"runtime_status", "workflow_status"})
@@ -311,6 +333,41 @@ class ToolUseLoop:
                 }
             )
         return normalized
+
+    def _select_iteration_complexity(
+        self,
+        *,
+        objective: str,
+        ctx: ToolUseContext,
+        iteration: int,
+        guard: ToolLoopGuard,
+    ) -> str:
+        """Choose the reasoning tier for the current loop iteration.
+
+        Tool-heavy workflows start at standard and only climb when the loop
+        keeps turning. This keeps simple tasks on cheaper models while still
+        allowing the runtime to raise capability when a project stalls or grows.
+        """
+        if not getattr(self.llm.model_routing, "auto_escalation", True):
+            return "standard"
+
+        text = (objective or "").lower()
+        if ctx.plan_mode or any(
+            token in text
+            for token in ("project", "refactor", "architecture", "multi-file")
+        ):
+            if iteration >= 4:
+                return "extra_high"
+            if iteration >= 2:
+                return "high"
+
+        if guard.is_deep(ctx.session_id):
+            return "high" if iteration < 5 else "extra_high"
+        if iteration >= 5:
+            return "extra_high"
+        if iteration >= 3:
+            return "high"
+        return "standard"
 
     async def _execute_tool_call(
         self, tc: Dict[str, Any], ctx: ToolUseContext

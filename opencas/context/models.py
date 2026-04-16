@@ -84,7 +84,10 @@ class ContextManifest(BaseModel):
                 continue
             if entry.role == MessageRole.SYSTEM:
                 continue
-            msg: Dict[str, Any] = {"role": entry.role.value, "content": entry.content}
+            msg: Dict[str, Any] = {
+                "role": entry.role.value,
+                "content": self._render_entry_content(entry),
+            }
             if entry.role == MessageRole.TOOL:
                 msg["tool_call_id"] = entry.meta.get("tool_call_id", "")
                 msg["name"] = entry.meta.get("name", "")
@@ -92,3 +95,39 @@ class ContextManifest(BaseModel):
                 msg["tool_calls"] = entry.meta["tool_calls"]
             messages.append(msg)
         return messages
+
+    @staticmethod
+    def _render_entry_content(entry: MessageEntry) -> str:
+        if entry.role != MessageRole.USER:
+            return entry.content
+        attachments = entry.meta.get("attachments") or []
+        if not attachments:
+            return entry.content
+
+        parts: List[str] = []
+        if entry.content:
+            parts.append(entry.content)
+        for attachment in attachments:
+            filename = attachment.get("filename") or "attachment"
+            media_type = attachment.get("media_type") or "application/octet-stream"
+            text_content = attachment.get("text_content")
+            truncated = bool(attachment.get("text_truncated"))
+            if text_content:
+                header = f"[Attached file: {filename} ({media_type})"
+                if truncated:
+                    header += " — truncated"
+                header += "]"
+                parts.append(
+                    "\n".join(
+                        [
+                            header,
+                            "--- Begin attachment content ---",
+                            text_content,
+                            "--- End attachment content ---",
+                        ]
+                    )
+                )
+                continue
+            location = attachment.get("url") or attachment.get("path") or filename
+            parts.append(f"[Attached file: {filename} ({media_type}) available at {location}]")
+        return "\n\n".join(part for part in parts if part)

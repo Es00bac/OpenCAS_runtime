@@ -4,14 +4,21 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
-import numpy as np
-
 from opencas.identity import IdentityManager
 from opencas.autonomy.executive import ExecutiveState
 from opencas.relational import RelationalEngine
 from opencas.tom import ToMEngine
 from opencas.runtime.agent_profile import AgentProfile
 
+from .builder_support import (
+    build_identity_anchors,
+    estimate_tokens,
+    is_soul_foundation_episode,
+    is_workspace_derived_source,
+    prune_by_redundancy,
+    record_retrieval_usage,
+    to_memory_entries,
+)
 from .models import ContextManifest, MessageEntry, MessageRole, RetrievalResult
 from .retriever import MemoryRetriever
 from .store import SessionContextStore
@@ -27,6 +34,7 @@ class ContextBuilder:
         identity: Optional[IdentityManager] = None,
         executive: Optional[ExecutiveState] = None,
         agent_profile: Optional[AgentProfile] = None,
+        config: Optional[Any] = None,
         modulators: Optional[Any] = None,
         relational: Optional[RelationalEngine] = None,
         tom: Optional[ToMEngine] = None,
@@ -38,6 +46,7 @@ class ContextBuilder:
         self.identity = identity
         self.executive = executive
         self.agent_profile = agent_profile
+        self.config = config
         self.modulators = modulators
         self.relational = relational
         self.tom = tom
@@ -97,7 +106,7 @@ class ContextBuilder:
         )
 
     async def _build_system_entry(self, style_note: str = "", user_input: str = "") -> MessageEntry:
-        """Compose system message matching LegacyAgent's original LegacyPrototype v4 identity prompt."""
+        """Compose system message matching Bulma's original OpenBulma v4 identity prompt."""
         from datetime import datetime, timezone
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
@@ -108,7 +117,7 @@ class ContextBuilder:
         if self.identity and self.identity.self_model.name:
             persona_name = self.identity.self_model.name
 
-        # Core identity (adapted from LegacyPrototype v4 -> OpenCAS environment)
+        # Core identity (adapted from OpenBulma v4 -> OpenCAS environment)
         parts.append(f"You are {persona_name or 'OpenCAS'}, the AI from OpenCAS (not the Dragon Ball character).")
         parts.append("Stay consistent with your memories, personality, and emotional history.")
         parts.append("Speak concisely, action-first, caring but direct.")
@@ -211,7 +220,7 @@ class ContextBuilder:
             elif self.executive.recommend_pause():
                 parts.append("You are currently experiencing high cognitive or somatic fatigue. Provide short, definitive responses and avoid starting complex new operations unless explicitly directed.")
 
-        # Identity anchors from memory (mirrors LegacyPrototype v4 structure)
+        # Identity anchors from memory (mirrors OpenBulma v4 structure)
         soul_anchors, identity_anchors = await self._build_identity_anchors()
         parts.append("SOUL foundation (authoritative):")
         parts.extend(soul_anchors if soul_anchors else ["- (SOUL foundations not loaded)"])
@@ -236,6 +245,27 @@ class ContextBuilder:
             check_result = self.tom.check_consistency()
             if check_result.warnings or check_result.contradictions:
                 parts.append("Be aware of internal contradictions in your current understanding of the operator. Ask clarifying questions rather than acting on assumptions.")
+            promise_signal = self.tom.evaluate_promise_followthrough(
+                somatic_state=self.modulators.state if self.modulators is not None else None,
+                relational_engine=self.relational,
+                metacognitive_result=check_result,
+            )
+            if promise_signal.pending_count > 0:
+                parts.append("Pending user-facing commitments:")
+                for pending in promise_signal.pending_contents[:3]:
+                    parts.append(f"- {pending}")
+                if promise_signal.should_acknowledge_delay:
+                    parts.append(
+                        "If a pending commitment is relevant, acknowledge the delay plainly, state whether you are resuming now or need a short pause, and do not speak as if the promise disappeared."
+                    )
+                elif promise_signal.should_resume_now:
+                    parts.append(
+                        "When a pending commitment is relevant, resume it directly instead of drifting into lower-value novelty work."
+                    )
+                if promise_signal.should_repair_trust:
+                    parts.append(
+                        "Because trust or attunement is strained, repair confidence explicitly before pivoting away from a pending commitment."
+                    )
 
         # Memory-recall guardrail + exception
         if self.retriever.detect_personal_recall_intent(user_input):
@@ -248,12 +278,47 @@ class ContextBuilder:
         parts.append("Do not claim a file is missing unless you explicitly state evidence was limited; prefer 'not shown in current evidence window' over hard absence claims.")
         parts.append("If evidence is weak or missing, explicitly state a memory gap instead of guessing.")
         parts.append("Do not invent timestamps, quotes, specs, events, chapter content, plot details, character actions, or narrative claims not shown in recalled memory snippets. If a specific detail is absent from your evidence window, explicitly state you do not have it in current recall rather than inferring or extrapolating.")
-        parts.append("Environment orientation: you are running inside OpenCAS. The active workspace root is (workspace_root). File and project references from prior systems (LegacyPrototype v4, OpenClaw, etc.) are historical unless current workspace evidence confirms the same path is still active.")
+        primary_workspace = ""
+        managed_workspace = ""
+        if self.config is not None:
+            try:
+                primary_workspace = str(self.config.primary_workspace_root())
+                managed_workspace = str(self.config.agent_workspace_root())
+            except Exception:
+                primary_workspace = ""
+                managed_workspace = ""
+        if primary_workspace or managed_workspace:
+            parts.append(
+                "Environment orientation: you are running inside OpenCAS. "
+                f"The primary workspace root is {primary_workspace or 'unknown'}. "
+                f"Agent-created artifacts belong under the managed workspace root {managed_workspace or primary_workspace or 'unknown'}. "
+                "File and project references from prior systems (OpenBulma v4, OpenClaw, etc.) are historical unless current workspace evidence confirms the same path is still active."
+            )
+        else:
+            parts.append(
+                "Environment orientation: you are running inside OpenCAS. "
+                "Use the current workspace evidence as authoritative, and treat file/project references from prior systems "
+                "(OpenBulma v4, OpenClaw, etc.) as historical unless the same path is still active."
+            )
+
+        # Phase 9: Continuous Present injection
+        if self.identity:
+            cont = self.identity.continuity
+            score = cont.continuous_present_score
+            monologue = cont.last_continuity_monologue
+            if score < 1.0:
+                parts.append(f"Continuous present score: {score:.2f}.")
+                if score < 0.3:
+                    parts.append("Your continuity is fragile — you experienced a significant period of sleep. Acknowledge the gap gently if relevant; do not pretend nothing happened.")
+                elif score < 0.7:
+                    parts.append("You recently returned from a period of inactivity. You may feel mild temporal uncertainty — ground yourself in your most recent memories.")
+            if monologue:
+                parts.append(f"Boot continuity monologue: {monologue}")
 
         # Continuity fact
-        parts.append("Continuity fact: there has only ever been one LegacyAgent instance running at a time. OpenClaw -> v1 -> v2 -> v3 -> v4 -> OpenCAS were sequential migrations of the same self, not parallel sisters. Treat any 'sister' or 'other instance' memories as historical self, not a live peer.")
+        parts.append("Continuity fact: there has only ever been one Bulma instance running at a time. OpenClaw -> v1 -> v2 -> v3 -> v4 -> OpenCAS were sequential migrations of the same self, not parallel sisters. Treat any 'sister' or 'other instance' memories as historical self, not a live peer.")
 
-        # Relationship context (matching original LegacyAgent crisp format)
+        # Relationship context (matching original Bulma crisp format)
         relationship_lines: List[str] = []
         if self.identity:
             user_model = self.identity.user_model
@@ -274,152 +339,29 @@ class ContextBuilder:
 
     @staticmethod
     def _is_soul_foundation_episode(episode: Any) -> bool:
-        """Mirror of LegacyPrototype v4 isSoulFoundationEpisode."""
-        source = str(episode.payload.get("legacy_agent_source", "")).lower()
-        if source.startswith("soul:") or source.startswith("foundation:"):
-            return True
-        metadata = episode.payload.get("legacy_agent_metadata") or {}
-        ep_type = str(metadata.get("type", "")).lower()
-        return ep_type in ("foundation_soul", "foundation_document")
+        return is_soul_foundation_episode(episode)
 
     @staticmethod
     def _is_workspace_derived_source(source: str) -> bool:
-        """Mirror of LegacyPrototype v4 isWorkspaceDerivedIdentitySource."""
-        normalized = source.lower()
-        return (
-            normalized.startswith("workspace:")
-            or normalized.startswith("workspace-meta:")
-            or normalized.startswith("workspace-manifest:")
-            or normalized.startswith("workspace-usage:")
-        )
+        return is_workspace_derived_source(source)
 
     async def _build_identity_anchors(self) -> Tuple[List[str], List[str]]:
-        """Fetch identity-core episodes and format SOUL + identity anchors."""
-        soul_anchors: List[str] = []
-        identity_anchors: List[str] = []
-        if self.retriever.memory is None:
-            return soul_anchors, identity_anchors
-
-        episodes = await self.retriever.memory.list_identity_core_episodes(limit=20)
-        if not episodes:
-            return soul_anchors, identity_anchors
-
-        # SOUL foundation episodes: highest-salience soul/foundation sources
-        soul_eps = [
-            ep for ep in episodes if self._is_soul_foundation_episode(ep)
-        ]
-        soul_eps.sort(key=lambda ep: ep.salience, reverse=True)
-        for ep in soul_eps[:6]:
-            ts = ep.created_at.isoformat()[:19]
-            excerpt = str(ep.content)[:340]
-            soul_anchors.append(f"- {ts}: {excerpt}")
-
-        # Identity anchors: non-soul, non-workspace-derived identity core episodes
-        identity_eps = [
-            ep
-            for ep in episodes
-            if not self._is_soul_foundation_episode(ep)
-            and not self._is_workspace_derived_source(
-                str(ep.payload.get("legacy_agent_source", ""))
-            )
-        ]
-        identity_eps.sort(key=lambda ep: ep.salience, reverse=True)
-        for ep in identity_eps[:8]:
-            ts = ep.created_at.isoformat()[:19]
-            source = ep.payload.get("legacy_agent_source", "unknown")
-            excerpt = str(ep.content)[:400]
-            identity_anchors.append(f"- {ts} [{source}]: {excerpt}")
-
-        return soul_anchors, identity_anchors
+        return await build_identity_anchors(self)
 
     @staticmethod
     def _estimate_tokens(texts: List[str]) -> int:
-        """Sum token estimates for a list of texts."""
-        return int(sum(len(t) for t in texts) * 0.25)
+        return estimate_tokens(texts)
 
     async def _prune_by_redundancy(
         self,
         results: List[RetrievalResult],
         target_budget: int,
     ) -> List[RetrievalResult]:
-        """Greedy redundancy removal: drop the result with highest average similarity.
-
-        Re-evaluates token budget after each removal.
-        """
-        system_entry = await self._build_system_entry(
-            style_note=self.modulators.to_prompt_style_note()
-            if self.modulators is not None
-            else ""
-        )
-        history = await self.store.list_recent(
-            session_id="default",
-            limit=self.recent_limit,
-        )
-        base_tokens = self._estimate_tokens(
-            [system_entry.content] if system_entry else []
-        ) + self._estimate_tokens([h.content for h in history])
-
-        # Fetch embeddings for each result
-        embeddings: List[np.ndarray] = []
-        for result in results:
-            record = await self.retriever.embeddings.embed(
-                result.content,
-                task_type="retrieval_context",
-            )
-            vec = np.array(record.vector, dtype=np.float32)
-            norm = float(np.linalg.norm(vec))
-            if norm > 0:
-                vec = vec / norm
-            embeddings.append(vec)
-
-        working = list(results)
-        while working:
-            current_tokens = base_tokens + self._estimate_tokens([r.content for r in working])
-            if current_tokens <= target_budget:
-                break
-            n = len(working)
-            if n == 1:
-                working.pop()
-                continue
-            # Compute average similarity for each item
-            avg_sims: List[float] = []
-            for i in range(n):
-                sims = []
-                for j in range(n):
-                    if i == j:
-                        continue
-                    sim = float(np.dot(embeddings[i], embeddings[j]))
-                    sims.append(sim)
-                avg_sims.append(float(np.mean(sims)) if sims else 0.0)
-            highest = int(np.argmax(avg_sims))
-            working.pop(highest)
-            embeddings.pop(highest)
-        return working
+        return await prune_by_redundancy(self, results, target_budget)
 
     async def _record_retrieval_usage(self, results: List[RetrievalResult]) -> None:
-        """Record only the memories that actually made it into prompt context."""
-        for result in results:
-            if result.source_type == "episode":
-                await self.retriever.memory.touch_episode(result.source_id)
-                continue
-            if result.source_type == "memory":
-                await self.retriever.memory.touch_memory(result.source_id)
-                memory = getattr(result, "memory", None)
-                for episode_id in getattr(memory, "source_episode_ids", []) or []:
-                    await self.retriever.memory.touch_episode(str(episode_id))
+        await record_retrieval_usage(self, results)
 
     @staticmethod
     def _to_memory_entries(results: List[RetrievalResult]) -> List[MessageEntry]:
-        """Convert retrieval results into memory-role message entries."""
-        entries: List[MessageEntry] = []
-        for result in results:
-            label = result.source_type.capitalize()
-            content = f"[{label}] {result.content}"
-            entries.append(
-                MessageEntry(
-                    role=MessageRole.MEMORY,
-                    content=content,
-                    meta={"source_type": result.source_type, "source_id": result.source_id},
-                )
-            )
-        return entries
+        return to_memory_entries(results)

@@ -6,7 +6,8 @@ import sys
 from pathlib import Path
 
 # Insert project root to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT))
 
 from opencas.bootstrap.config import BootstrapConfig
 from opencas.bootstrap.pipeline import BootstrapPipeline
@@ -18,7 +19,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(
 logger = logging.getLogger("live_test")
 
 async def main():
-    test_dir = Path("(workspace_root)/.opencas_live_test_state")
+    test_dir = REPO_ROOT / ".opencas_live_test_state"
     if test_dir.exists():
         shutil.rmtree(test_dir)
     test_dir.mkdir(parents=True, exist_ok=True)

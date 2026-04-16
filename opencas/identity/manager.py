@@ -140,6 +140,93 @@ class IdentityManager:
         self._continuity.last_session_id = session_id
         self.save()
 
+    def decay_continuous_present(self, sleep_hours: float) -> float:
+        """Decay the continuous_present_score based on hours of inactivity.
+
+        Each hour multiplies the score by ``continuity_decay_rate`` (default 0.95).
+        Returns the new score.
+        """
+        if sleep_hours <= 0:
+            return self._continuity.continuous_present_score
+        rate = self._continuity.continuity_decay_rate
+        import math
+        decay_factor = math.pow(rate, sleep_hours)
+        self._continuity.continuous_present_score = max(
+            0.0,
+            min(1.0, self._continuity.continuous_present_score * decay_factor),
+        )
+        self.save()
+        return self._continuity.continuous_present_score
+
+    def recover_continuous_present(self) -> float:
+        """Recover the continuous_present_score by one turn increment.
+
+        Returns the new score.
+        """
+        recovery = self._continuity.continuity_recovery_rate
+        self._continuity.continuous_present_score = min(
+            1.0,
+            self._continuity.continuous_present_score + recovery,
+        )
+        self.save()
+        return self._continuity.continuous_present_score
+
+    def set_continuity_monologue(self, monologue: str) -> None:
+        """Store the latest boot-time continuity monologue."""
+        self._continuity.last_continuity_monologue = monologue
+        self.save()
+
+    def record_compaction(self, session_id: Optional[str] = None) -> None:
+        """Track a compaction event in the continuity state."""
+        self._continuity.compaction_count += 1
+        self._continuity.last_session_id = session_id
+        self._self.recent_activity.append(
+            {
+                "type": "compaction",
+                "session_id": session_id,
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+        )
+        self._self.recent_activity = self._self.recent_activity[-50:]
+        self.save()
+
+    def apply_memory_mutation(
+        self,
+        content: str,
+        source_type: str = "memory",
+        confidence: float = 0.7,
+    ) -> None:
+        """Apply an identity mutation triggered by a mutagenic memory/episode.
+
+        Records a new self-belief and updates the identity core narrative.
+        Throttled to max 1 mutation per call — callers should enforce
+        per-turn limits externally.
+        """
+        # Extract a short predicate from the content
+        predicate = content.strip().lower()[:80]
+        self.record_self_knowledge(
+            domain="identity_mutation",
+            key=f"mutagen_{hash(predicate) % 10000:04d}",
+            value={
+                "predicate": predicate,
+                "source_type": source_type,
+                "confidence": confidence,
+                "mutated_at": datetime.now(timezone.utc).isoformat(),
+            },
+            confidence=confidence,
+        )
+        if self.tracer:
+            self.tracer.log(
+                EventKind.BOOTSTRAP_STAGE,
+                "Identity mutation applied from memory",
+                {
+                    "predicate": predicate[:60],
+                    "source_type": source_type,
+                    "confidence": confidence,
+                },
+            )
+        self.save()
+
     @property
     def self_model(self) -> SelfModel:
         return self._self
@@ -218,7 +305,7 @@ class IdentityManager:
     ) -> None:
         """Atomically import an external identity profile into the self-model and user-model."""
         if auto_activate:
-            self._self.name = "LegacyAgent" if source_system == "legacy_agent_v4" else self._self.name
+            self._self.name = "Bulma" if source_system == "openbulma-v4" else self._self.name
             self._self.narrative = narrative
             self._self.values = list(values)
             self._self.current_goals = list(ongoing_goals)

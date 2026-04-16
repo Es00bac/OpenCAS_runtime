@@ -52,6 +52,7 @@ class Episode(BaseModel):
     last_accessed: Optional[datetime] = None
     used_successfully: int = Field(default=0, ge=0)
     used_unsuccessfully: int = Field(default=0, ge=0)
+    identity_mutagen: bool = False
     payload: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -68,6 +69,7 @@ class Memory(BaseModel):
     salience: float = Field(default=1.0, ge=0.0, le=10.0)
     access_count: int = 0
     last_accessed: Optional[datetime] = None
+    identity_mutagen: bool = False
 
 
 class EpisodeEdge(BaseModel):

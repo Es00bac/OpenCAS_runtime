@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
 from opencas.__main__ import _build_bootstrap_config
+from opencas.model_routing import PersistedModelRoutingState, ModelRoutingConfig, save_persisted_model_routing_state
 
 
 @pytest.mark.asyncio
@@ -37,6 +38,22 @@ async def test_bootstrap_pipeline(tmp_path: Path) -> None:
     # Clean up
     await ctx.memory.close()
     await ctx.embeddings.cache.close()
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_context_close_cancels_background_tasks(tmp_path: Path) -> None:
+    config = BootstrapConfig(
+        state_dir=tmp_path,
+        session_id="background-task-close",
+    )
+    ctx = await BootstrapPipeline(config).run()
+
+    assert ctx.background_tasks
+
+    await ctx.close()
+
+    assert all(task.done() for task in ctx.background_tasks)
+    assert ctx.workspace_index._scan_task is None
 
 
 @pytest.mark.asyncio
@@ -205,6 +222,76 @@ def test_bootstrap_config_dedupes_workspace_roots(tmp_path: Path) -> None:
     roots = config.all_workspace_roots()
     assert roots == [primary.resolve(), secondary.resolve()]
     assert config.primary_workspace_root() == primary.resolve()
+    assert config.agent_workspace_root() == (primary.resolve() / "workspace").resolve()
+
+
+def test_bootstrap_config_supports_explicit_managed_workspace_root(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    primary = tmp_path / "primary"
+    managed = tmp_path / "managed"
+    config = BootstrapConfig(
+        state_dir=state_dir,
+        workspace_root=primary,
+        managed_workspace_root=managed,
+    ).resolve_paths()
+
+    assert config.agent_workspace_root() == managed.resolve()
+    assert config.all_workspace_roots() == [primary.resolve(), managed.resolve()]
+
+
+def test_build_bootstrap_config_loads_persisted_model_routing(tmp_path: Path) -> None:
+    state_dir = tmp_path / "state"
+    save_persisted_model_routing_state(
+        state_dir,
+        PersistedModelRoutingState(
+            default_llm_model="openai/gpt-5.3-codex",
+            model_routing=ModelRoutingConfig(
+                mode="tiered",
+                light_model="google/gemini-2.5-flash",
+                standard_model="openai/gpt-5.3-codex",
+                high_model="anthropic/claude-sonnet-4-6",
+                extra_high_model="codex-cli/gpt-5.3-codex",
+                auto_escalation=True,
+            ),
+        ),
+    )
+    args = SimpleNamespace(
+        state_dir=str(state_dir),
+        session_id="routing-test",
+        agent_profile_id="general_technical_operator",
+        workspace_root=str(tmp_path),
+        workspace_extra_root=[],
+        credential_profile_id=[],
+        credential_env_key=[],
+        telegram_enabled=None,
+        telegram_bot_token=None,
+        telegram_dm_policy=None,
+        telegram_allow_from=[],
+        telegram_poll_interval=None,
+        telegram_pairing_ttl=None,
+        default_llm_model=None,
+        embedding_model_id=None,
+        provider_config_path=None,
+        provider_env_path=None,
+        credential_source_config_path=None,
+        credential_source_env_path=None,
+    )
+    persisted_telegram = SimpleNamespace(
+        enabled=False,
+        bot_token=None,
+        dm_policy="pairing",
+        allow_from=[],
+        poll_interval_seconds=1.0,
+        pairing_ttl_seconds=3600,
+        api_base_url="https://api.telegram.org",
+    )
+
+    config = _build_bootstrap_config(args, persisted_telegram)
+
+    assert config.default_llm_model == "openai/gpt-5.3-codex"
+    assert config.model_routing.mode.value == "tiered"
+    assert config.model_routing.light_model == "google/gemini-2.5-flash"
+    assert config.model_routing.extra_high_model == "codex-cli/gpt-5.3-codex"
 
 
 @pytest.mark.asyncio

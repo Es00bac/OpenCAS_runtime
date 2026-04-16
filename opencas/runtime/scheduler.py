@@ -49,6 +49,10 @@ class AgentScheduler:
                 CommandLane.CRON: LaneConfig(max_concurrent=1),
             }
         )
+        # Track executive pause separately from readiness/focus gating so deferred work
+        # resumes when the executive actually recovers, not only when the broader
+        # scheduler gate flips back to runnable.
+        self._last_executive_pause: Optional[bool] = None
 
     async def start(self) -> None:
         """Spawn background loops."""
@@ -56,6 +60,7 @@ class AgentScheduler:
             return
         self._running = True
         self._trace("scheduler_start", {})
+        self._last_executive_pause = self._executive_pause_active()
 
         # Ensure BAA worker is running
         try:
@@ -153,19 +158,28 @@ class AgentScheduler:
             if hasattr(self.runtime, "executive") and self.runtime.executive.recommend_pause():
                 sleep_time = self.cycle_interval * 2  # Pacing: back off when fatigued or overloaded
                 self._trace("cycle_backoff", {"reason": "executive_recommended_pause", "sleep_time": sleep_time})
-            
+
             await asyncio.sleep(sleep_time)
-            
+
             if not self._running:
                 break
-            if not self._should_run_cycle():
+            executive_paused = self._executive_pause_active()
+            if self._last_executive_pause is None:
+                self._last_executive_pause = executive_paused
+            elif self._last_executive_pause and not executive_paused:
+                await self._on_cycle_resume()
+                self._last_executive_pause = executive_paused
+            else:
+                self._last_executive_pause = executive_paused
+            can_run = self._should_run_cycle()
+            if not can_run:
                 continue
-            
+
             # If still severely fatigued after sleep, skip the cycle entirely
-            if hasattr(self.runtime, "executive") and self.runtime.executive.recommend_pause() and getattr(self.runtime.executive.somatic, "state", None) and self.runtime.executive.somatic.state.fatigue > 0.8:
+            if executive_paused and getattr(getattr(self.runtime.executive, "somatic", None), "state", None) and self.runtime.executive.somatic.state.fatigue > 0.8:
                 self._trace("cycle_skipped", {"reason": "severe_fatigue"})
                 continue
-                
+
             try:
                 result = await self.runtime.run_cycle()
                 self._trace("cycle_complete", result)
@@ -173,6 +187,25 @@ class AgentScheduler:
                 self._trace("cycle_error", {"error": str(exc)})
                 if self.readiness:
                     self.readiness.degraded(f"run_cycle failed: {exc}")
+
+    async def _on_cycle_resume(self) -> None:
+        """Trigger deferred work restoration when the agent recovers from pause."""
+        self._trace("cycle_resumed", {})
+        if hasattr(self.runtime, "executive") and self.runtime.executive:
+            try:
+                result = await self.runtime.executive.resume_deferred_work()
+                self._trace("deferred_work_resumed", result)
+            except Exception as exc:
+                self._trace("deferred_work_resume_error", {"error": str(exc)})
+
+    def _executive_pause_active(self) -> bool:
+        executive = getattr(self.runtime, "executive", None)
+        if executive is None:
+            return False
+        try:
+            return bool(executive.recommend_pause())
+        except Exception:
+            return False
 
     async def _consolidation_loop(self) -> None:
         while self._running:
@@ -194,6 +227,13 @@ class AgentScheduler:
             await asyncio.sleep(self.baa_heartbeat_interval)
             if not self._running:
                 break
+            # Natural somatic decay/recovery every heartbeat tick
+            somatic = getattr(self.runtime.ctx, "somatic", None)
+            if somatic is not None:
+                try:
+                    somatic.decay()
+                except Exception:
+                    pass
             try:
                 queue_size = self.runtime.baa.queue_size
                 held_size = self.runtime.baa.held_size

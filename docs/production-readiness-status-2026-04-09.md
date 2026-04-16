@@ -1,6 +1,6 @@
 # OpenCAS Production Readiness Status
 
-Date: 2026-04-09
+Date: 2026-04-15
 
 Purpose:
 - record the current realistic readiness state
@@ -8,13 +8,13 @@ Purpose:
 - drive the next tasks through evidence instead of broad feature churn
 
 Related:
-- [TaskList.md]((workspace_root)/TaskList.md)
-- [opencas-deep-system-audit-2026-04-09.md]((workspace_root)/docs/opencas-deep-system-audit-2026-04-09.md)
-- [opencas-production-program-plan-2026-04-08.md]((workspace_root)/docs/opencas-production-program-plan-2026-04-08.md)
-- [first-regular-use-deployment-checklist.md]((workspace_root)/docs/first-regular-use-deployment-checklist.md)
-- [testing-execution-plan-2026-04-09.md]((workspace_root)/docs/qualification/testing-execution-plan-2026-04-09.md)
-- [live_validation_summary.md]((workspace_root)/docs/qualification/live_validation_summary.md)
-- [qualification_remediation_rollup.md]((workspace_root)/docs/qualification/qualification_remediation_rollup.md)
+- [TaskList.md](../TaskList.md)
+- [opencas-deep-system-audit-2026-04-09.md](opencas-deep-system-audit-2026-04-09.md)
+- [opencas-production-program-plan-2026-04-08.md](opencas-production-program-plan-2026-04-08.md)
+- [first-regular-use-deployment-checklist.md](first-regular-use-deployment-checklist.md)
+- [testing-execution-plan-2026-04-09.md](qualification/testing-execution-plan-2026-04-09.md)
+- [live_validation_summary.md](qualification/live_validation_summary.md)
+- [qualification_remediation_rollup.md](qualification/qualification_remediation_rollup.md)
 
 ## Executive Status
 
@@ -47,7 +47,7 @@ OpenCAS can already:
 - run bounded qualification reruns and surface remediation guidance
 
 Architecturally, OpenCAS already combines:
-- LegacyAgent-style inner-state subsystems:
+- Bulma-style inner-state subsystems:
   - somatic state
   - musubi / relational state
   - theory of mind
@@ -68,6 +68,9 @@ Live-validated paths include:
 - `writing_revision_workflow`
 - `project_management_workflow`
 - `integrated_operator_workflow`
+- focused rerun recovery after a reproduced `kilocode_supervised_work` supervision defect
+  - failure reproduced via request `0249235e74ae4b8382c83c76e30f8e91`
+  - supervision path repaired and confirmed via request `b404b54a8f414e36a6f96d531708b6bf`
 - Scenario 1 from the long-scenario matrix:
   - technical research to report
   - validated via `integrated_operator_workflow` run `debug-validation-20260409-164343`
@@ -93,7 +96,6 @@ OpenCAS still needs stronger evidence for:
 - repeated weak-label stability
 - longer integrated daily-use scenarios
 - recovery from friction and interruption
-- memory-value in repeated work
 - operator override and auditability depth
 - usage and cost envelope sanity
 - stronger behavioral expression of inner state, especially:
@@ -104,16 +106,21 @@ OpenCAS still needs stronger evidence for:
 
 ## Current Qualification Signals
 
-Recent weak labels:
+Current watch labels:
 - `kilocode_supervised_work`
-  - improved from `0.4` to `0.5`
+  - reproduced as a real supervision-path defect, then returned to `2/2 artifact_verified` after the `workflow_supervise_session` fix
+  - latest request: `b404b54a8f414e36a6f96d531708b6bf`
+  - current remediation state: `watch_only`
 - `integrated_operator_workflow`
-  - improved from `0.5` to `0.75`
+  - latest bounded rerun returned `2/2 artifact_verified`
+  - latest request: `7ddf2492ba1946328ca6398e7b541fed`
+  - current remediation state: `watch_only`
 
 What this means:
 - the qualification loop is producing useful signal
-- the current bottlenecks are not uniform platform failure
-- focused reruns are uncovering real local issues and improving confidence without broad expensive runs
+- the retained weak-label set no longer contains an active rerun defect; the remaining labels are monitoring points, not blockers
+- focused reruns are uncovering real local issues and closing them without broad expensive runs
+- the current weak labels are watch items, not active unresolved defects
 
 ## Deep Audit Conclusion
 
@@ -123,7 +130,7 @@ The main remaining gap is not absence of operator power. It is incomplete fusion
 
 OpenCAS already has:
 - more inner-state architecture than OpenClaw
-- more operator architecture than LegacyPrototype
+- more operator architecture than OpenBulma
 
 What it still needs is:
 - stronger coupling
@@ -133,11 +140,11 @@ What it still needs is:
 ## Known Current Gaps
 
 1. Longer-horizon daily-use proof is materially better, but still incomplete.
-2. Memory and self-knowledge benefit have not yet been measured directly against outcomes.
+2. Memory and self-knowledge now have one bounded repeated-task proof, but broader repeated-work measurement is still relatively sparse.
 3. Somatic, relational, and ToM state are architecturally present but behaviorally under-coupled.
-4. The remediation layer is now present, but still young; it needs more rerun history to become trustworthy.
-5. Day-to-day deployment criteria are not yet enforced through a single explicit checklist with enough passed items.
-6. Scenario coverage is now materially better, but still needs auth-friction or interrupted-run cleanup plus explicit memory-value evaluation.
+4. The remediation layer is now present and useful, but still young; it needs more rerun history before its recommendations should be treated as automatic.
+5. Day-to-day deployment criteria are now enforced through an explicit checklist, but that checklist still needs disciplined truth-maintenance as new evidence lands.
+6. Scenario coverage is materially broad, but longer unsupervised day-to-day use still deserves incremental expansion when a concrete deployment question appears.
 
 ## Current Recommendation
 
@@ -153,17 +160,16 @@ The project should continue with a qualification-first loop, but now with one ad
 
 ## Immediate Next Tasks
 
-- continue `PR-001` from [TaskList.md]((workspace_root)/TaskList.md)
-- continue `PR-004` with auth-friction or interrupted-run cleanup after Scenario 6 success
-- start `PR-009` inner-life operationalization from audited evidence
-- convert `PR-008` from drafted checklist to evidence-backed pass/fail status
+- keep `PR-001` in watch mode and only rerun the current labels when the remediation view still justifies another bounded evidence point
+- add another longer composite scenario only if a new deployment question appears that is not already covered by the executed matrix
+- keep the readiness board in sync whenever new reruns or scenarios materially change the evidence picture
 
 ## Readiness Gate For First Regular-Use Deployment Testing
 
 OpenCAS is **READY** to start first regular-use deployment testing.
 
-- The weakest current labels stop failing for unknown reasons (resolved via PR-004 and PR-001).
-- At least one longer daily-use scenario completes repeatably (Scenarios 1, 2, 3, 4, 5, 6, 7, 8).
+- The weakest current labels stop failing for unknown reasons (current watch labels are not active unresolved defects).
+- At least one longer daily-use scenario completes repeatably (Scenarios 1, 2, 3, 4, 5, 6, 7, 8, 9, and 10 are all now on record).
 - Stale-process hygiene remains clean under repeated runs.
 - Remediation guidance and qualification summaries stay current.
 - Inner-state systems visibly and usefully affect ordinary behavior (resolved via PR-009).

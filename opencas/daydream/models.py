@@ -23,6 +23,7 @@ class DaydreamReflection(BaseModel):
     tension_hints: List[str] = Field(default_factory=list)
     alignment_score: float = Field(default=0.0, ge=0.0, le=1.0)
     novelty_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    fascination_thread: Optional[str] = None
     keeper: bool = False
 
 

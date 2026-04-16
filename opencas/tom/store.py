@@ -19,10 +19,13 @@ CREATE TABLE IF NOT EXISTS beliefs (
     confidence REAL NOT NULL,
     evidence_ids TEXT NOT NULL DEFAULT '[]',
     belief_revision_score REAL NOT NULL DEFAULT 0.0,
+    reinforcement_count INTEGER NOT NULL DEFAULT 0,
+    last_reinforced TEXT,
     meta TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_beliefs_subject ON beliefs(subject);
+CREATE INDEX IF NOT EXISTS idx_beliefs_subject_predicate ON beliefs(subject, predicate);
 CREATE INDEX IF NOT EXISTS idx_beliefs_predicate ON beliefs(predicate);
 CREATE INDEX IF NOT EXISTS idx_beliefs_timestamp ON beliefs(timestamp);
 
@@ -64,12 +67,21 @@ class TomStore:
         assert self._db is not None
         migrations = [
             "ALTER TABLE beliefs ADD COLUMN belief_revision_score REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE beliefs ADD COLUMN reinforcement_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE beliefs ADD COLUMN last_reinforced TEXT",
         ]
         for sql in migrations:
             try:
                 await self._db.execute(sql)
             except Exception:
                 pass  # column likely already exists
+        # Create composite index if not present (safe with IF NOT EXISTS)
+        try:
+            await self._db.execute(
+                "CREATE INDEX IF NOT EXISTS idx_beliefs_subject_predicate ON beliefs(subject, predicate)"
+            )
+        except Exception:
+            pass
         await self._db.commit()
 
     async def close(self) -> None:
@@ -83,8 +95,9 @@ class TomStore:
             """
             INSERT INTO beliefs (
                 belief_id, timestamp, subject, predicate, confidence,
-                evidence_ids, belief_revision_score, meta
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                evidence_ids, belief_revision_score, reinforcement_count,
+                last_reinforced, meta
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(belief_id) DO UPDATE SET
                 timestamp = excluded.timestamp,
                 subject = excluded.subject,
@@ -92,6 +105,8 @@ class TomStore:
                 confidence = excluded.confidence,
                 evidence_ids = excluded.evidence_ids,
                 belief_revision_score = excluded.belief_revision_score,
+                reinforcement_count = excluded.reinforcement_count,
+                last_reinforced = excluded.last_reinforced,
                 meta = excluded.meta
             """,
             (
@@ -102,6 +117,8 @@ class TomStore:
                 belief.confidence,
                 json.dumps(belief.evidence_ids),
                 belief.belief_revision_score,
+                belief.reinforcement_count,
+                belief.last_reinforced.isoformat() if belief.last_reinforced else None,
                 json.dumps(belief.meta),
             ),
         )
@@ -126,7 +143,11 @@ class TomStore:
         where = "WHERE " + " AND ".join(conditions) if conditions else ""
         cursor = await self._db.execute(
             f"""
-            SELECT * FROM beliefs
+            SELECT
+                belief_id, timestamp, subject, predicate, confidence,
+                evidence_ids, belief_revision_score, reinforcement_count,
+                last_reinforced, meta
+            FROM beliefs
             {where}
             ORDER BY timestamp DESC
             LIMIT ?
@@ -211,6 +232,50 @@ class TomStore:
         )
         await self._db.commit()
 
+    async def get_belief_by_predicate(
+        self,
+        subject: BeliefSubject,
+        predicate: str,
+    ) -> Optional[Belief]:
+        """Find the most recent belief matching subject+predicate exactly."""
+        assert self._db is not None
+        cursor = await self._db.execute(
+            """
+            SELECT
+                belief_id, timestamp, subject, predicate, confidence,
+                evidence_ids, belief_revision_score, reinforcement_count,
+                last_reinforced, meta
+            FROM beliefs
+            WHERE subject = ? AND predicate = ?
+            ORDER BY timestamp DESC
+            LIMIT 1
+            """,
+            (subject.value, predicate.strip().lower()),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return self._row_to_belief(row)
+
+    async def increment_belief_reinforcement(
+        self,
+        belief_id: str,
+        confidence: float,
+        reinforcement_count: int,
+        last_reinforced: datetime,
+    ) -> None:
+        """Update reinforcement metadata for an existing belief."""
+        assert self._db is not None
+        await self._db.execute(
+            """
+            UPDATE beliefs
+            SET confidence = ?, reinforcement_count = ?, last_reinforced = ?
+            WHERE belief_id = ?
+            """,
+            (confidence, reinforcement_count, last_reinforced.isoformat(), belief_id),
+        )
+        await self._db.commit()
+
     async def resolve_intention(
         self,
         intention_id: str,
@@ -239,7 +304,9 @@ class TomStore:
             confidence=row[4],
             evidence_ids=json.loads(row[5]) if row[5] else [],
             belief_revision_score=row[6] if len(row) > 6 and row[6] is not None else 0.0,
-            meta=json.loads(row[7]) if len(row) > 7 and row[7] else {},
+            reinforcement_count=row[7] if len(row) > 7 and row[7] is not None else 0,
+            last_reinforced=datetime.fromisoformat(row[8]) if len(row) > 8 and row[8] else None,
+            meta=json.loads(row[9]) if len(row) > 9 and row[9] else {},
         )
 
     @staticmethod

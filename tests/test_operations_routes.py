@@ -4,6 +4,7 @@ import json
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID
 
@@ -19,6 +20,8 @@ from opencas.api.routes.operations import (
 from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.autonomy.models import WorkObject, WorkStage
 from opencas.planning.models import PlanAction, PlanEntry
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _make_mock_runtime():
@@ -40,7 +43,7 @@ def _make_mock_runtime():
                 "pid": 4242,
                 "scope_key": "qualification",
                 "command": "python scripts/run_qualification_cycle.py --agent-check-label integrated_operator_workflow",
-                "cwd": "(workspace_root)",
+                "cwd": str(REPO_ROOT),
                 "metadata": {
                     "kind": "qualification_rerun",
                     "source_label": "integrated_operator_workflow",
@@ -198,6 +201,14 @@ def _make_mock_runtime():
     plan_store.get_actions = AsyncMock(return_value=[])
     plan_store.update_content = AsyncMock(return_value=True)
     plan_store.set_status = AsyncMock(return_value=True)
+    # Task store
+    task_store = MagicMock()
+    task_store.list_all = AsyncMock(return_value=[])
+    task_store.get = AsyncMock(return_value=None)
+    task_store.get_result = AsyncMock(return_value=None)
+    task_store.list_lifecycle_transitions = AsyncMock(return_value=[])
+    runtime.ctx.tasks = task_store
+
     runtime.ctx.plan_store = plan_store
 
     return runtime
@@ -1411,6 +1422,14 @@ def test_get_commitment_detail() -> None:
         content="Stabilize operations dashboard",
         status=CommitmentStatus.ACTIVE,
         tags=["ops", "ui"],
+        meta={
+            "source": "nightly_consolidation",
+            "source_sentence": "I'll return to the dashboard after I rest.",
+            "source_session_id": "session-7",
+            "source_episode_id": "episode-9",
+            "role_source": "episode_payload",
+            "consolidation_merge_rationale": "heuristic_exact_duplicate",
+        },
     ))
     app = _make_test_app(runtime)
     client = TestClient(app)
@@ -1422,6 +1441,9 @@ def test_get_commitment_detail() -> None:
     assert data["commitment"]["commitment_id"] == str(commitment_id)
     assert data["commitment"]["status"] == "active"
     assert data["commitment"]["tags"] == ["ops", "ui"]
+    assert data["commitment"]["lifecycle"]["source"] == "nightly_consolidation"
+    assert data["commitment"]["lifecycle"]["raw_excerpt"] == "I'll return to the dashboard after I rest."
+    assert data["commitment"]["lifecycle"]["merge_rationale"] == "heuristic_exact_duplicate"
 
 
 def test_update_commitment() -> None:
@@ -1682,6 +1704,60 @@ def test_get_receipt_not_found() -> None:
     assert data["found"] is False
 
 
+def test_list_tasks_empty() -> None:
+    runtime = _make_mock_runtime()
+    app = _make_test_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get("/api/operations/tasks")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["counts"]["total"] == 0
+    assert data["items"] == []
+
+
+def test_get_task_detail() -> None:
+    runtime = _make_mock_runtime()
+    task = SimpleNamespace(
+        task_id="task-001",
+        objective="Stabilize operator dashboard",
+        status="running",
+        stage=SimpleNamespace(value="executing"),
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+        meta={"title": "Dashboard stabilization", "source": "operator"},
+        project_id="proj-1",
+        commitment_id="commit-1",
+        depends_on=["task-000"],
+        attempt=1,
+        max_attempts=3,
+        phases=[SimpleNamespace(model_dump=lambda mode=None: {"name": "exec"})],
+    )
+    runtime.ctx.tasks.get = AsyncMock(return_value=task)
+    runtime.ctx.tasks.get_result = AsyncMock(return_value=SimpleNamespace(model_dump=lambda mode=None: {"ok": True}))
+    runtime.ctx.tasks.list_lifecycle_transitions = AsyncMock(return_value=[{
+        "from_stage": "planning",
+        "to_stage": "executing",
+        "reason": "ready",
+        "timestamp": datetime.now(timezone.utc),
+        "context": {"note": "promoted"},
+    }])
+    runtime.ctx.tasks.list_all = AsyncMock(return_value=[task])
+    app = _make_test_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get("/api/operations/tasks/task-001")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["found"] is True
+    assert data["task"]["task_id"] == "task-001"
+    assert data["task"]["title"] == "Dashboard stabilization"
+    assert data["task"]["status"] == "executing"
+    assert data["task"]["duplicate_objective_count"] == 1
+    assert data["task"]["result"]["ok"] is True
+    assert data["transitions"][0]["to_stage"] == "executing"
+
+
 def test_list_work_empty() -> None:
     runtime = _make_mock_runtime()
     app = _make_test_app(runtime)
@@ -1707,8 +1783,21 @@ def test_list_commitments_empty() -> None:
 
 def test_list_commitments_with_data() -> None:
     runtime = _make_mock_runtime()
-    c = Commitment(content="Ship v1", priority=8.0, tags=["release"])
+    c = Commitment(
+        content="Ship v1",
+        priority=8.0,
+        tags=["release"],
+        meta={"source": "assistant_response", "blocked_reason": "executive_fatigue"},
+    )
     runtime.commitment_store.list_by_status = AsyncMock(return_value=[c])
+    runtime.commitment_store.count_by_status = AsyncMock(side_effect=[1, 2, 3, 4])
+    runtime.consolidation_status = lambda: {
+        "available": True,
+        "timestamp": "2026-04-15T00:00:00+00:00",
+        "commitments_consolidated": 2,
+        "commitments_extracted_from_chat": 1,
+        "commitment_work_objects_created": 1,
+    }
     app = _make_test_app(runtime)
     client = TestClient(app)
 
@@ -1718,6 +1807,11 @@ def test_list_commitments_with_data() -> None:
     assert data["count"] == 1
     assert data["items"][0]["content"] == "Ship v1"
     assert data["items"][0]["priority"] == 8.0
+    assert data["items"][0]["lifecycle"]["source"] == "assistant_response"
+    assert data["items"][0]["lifecycle"]["blocked_reason"] == "executive_fatigue"
+    assert data["summary"]["status_counts"]["active"] == 1
+    assert data["summary"]["status_counts"]["blocked"] == 2
+    assert data["summary"]["last_consolidation"]["commitments_extracted_from_chat"] == 1
 
 
 def test_list_plans_empty() -> None:

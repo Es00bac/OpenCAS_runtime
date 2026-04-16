@@ -121,8 +121,8 @@ class ExecutiveState:
         """Pop the highest-priority work item."""
         if not self._task_queue:
             return None
-        # Sort by promotion score descending, then by creation time ascending
-        self._task_queue.sort(key=lambda w: (-w.promotion_score, w.created_at))
+        # Sort by promise/user-facing bias first, then creative score.
+        self._task_queue.sort(key=self._dequeue_sort_key)
         work = self._task_queue.pop(0)
         self._trace("dequeue", {"work_id": str(work.work_id)})
         self._auto_save()
@@ -149,6 +149,12 @@ class ExecutiveState:
         restored = 0
         for work in work_items:
             if work.stage in (WorkStage.MICRO_TASK, WorkStage.PROJECT_SEED, WorkStage.PROJECT):
+                if work.commitment_id and self.commitment_store:
+                    commitment = await self.commitment_store.get(work.commitment_id)
+                    if commitment and commitment.status != CommitmentStatus.ACTIVE:
+                        continue
+                    if commitment:
+                        self.apply_commitment_execution_bias(work, commitment)
                 if len(self._task_queue) < self._max_capacity:
                     # Avoid duplicating items already in queue
                     if not any(str(w.work_id) == str(work.work_id) for w in self._task_queue):
@@ -232,6 +238,54 @@ class ExecutiveState:
                     )
         return resolved
 
+    async def resume_deferred_work(self) -> Dict[str, Any]:
+        """Unblock commitments and restore queue when agent recovers from pause."""
+        unblocked_commitments = 0
+        restored_work = 0
+
+        if self.commitment_store:
+            blocked = await self.commitment_store.list_by_status(
+                CommitmentStatus.BLOCKED, limit=100
+            )
+            for commitment in blocked:
+                if not self._is_resume_eligible_commitment(commitment):
+                    continue
+                blocked_reason = str(commitment.meta.get("blocked_reason", "")).strip()
+                commitment.status = CommitmentStatus.ACTIVE
+                commitment.updated_at = datetime.now(timezone.utc)
+                commitment.meta["resume_reason"] = "executive_recovery"
+                commitment.meta["resumed_at"] = commitment.updated_at.isoformat()
+                if blocked_reason:
+                    commitment.meta["previous_blocked_reason"] = blocked_reason
+                commitment.meta.pop("blocked_reason", None)
+                await self.commitment_store.save(commitment)
+                unblocked_commitments += 1
+                if self.work_store and commitment.linked_work_ids:
+                    for work_id in commitment.linked_work_ids:
+                        work = await self.work_store.get(work_id)
+                        if work and work.stage in (
+                            WorkStage.MICRO_TASK,
+                            WorkStage.PROJECT_SEED,
+                            WorkStage.PROJECT,
+                        ):
+                            if self.enqueue(work):
+                                restored_work += 1
+
+        queue_restored = await self.restore_queue(limit=100)
+        self._trace(
+            "deferred_work_resumed",
+            {
+                "unblocked_commitments": unblocked_commitments,
+                "restored_work": restored_work,
+                "queue_restored": queue_restored,
+            },
+        )
+        return {
+            "unblocked_commitments": unblocked_commitments,
+            "restored_work": restored_work,
+            "queue_restored": queue_restored,
+        }
+
     @staticmethod
     def _goal_satisfied_by(goal: str, completed_text: str) -> bool:
         """Simple keyword overlap heuristic. Future: LLM-based."""
@@ -278,13 +332,17 @@ class ExecutiveState:
     def is_overloaded(self) -> bool:
         return len(self._task_queue) >= self._max_capacity
 
+    def pause_reason(self) -> Optional[str]:
+        """Return the executive pause reason, if any."""
+        if self.is_overloaded:
+            return "overload"
+        if self.somatic and self.somatic.state.fatigue > 0.7:
+            return "fatigue"
+        return None
+
     def recommend_pause(self) -> bool:
         """Recommend pausing new work based on somatic fatigue or overload."""
-        if self.is_overloaded:
-            return True
-        if self.somatic and self.somatic.state.fatigue > 0.7:
-            return True
-        return False
+        return self.pause_reason() is not None
 
     def snapshot(self) -> Dict[str, Any]:
         """Return a JSON-serializable snapshot of executive state."""
@@ -302,6 +360,54 @@ class ExecutiveState:
         """Mirror active goals back to the identity self-model."""
         self.identity.self_model.current_goals = list(self._active_goals)
         self.identity.save()
+
+    @staticmethod
+    def _is_resume_eligible_commitment(commitment: Any) -> bool:
+        """Return True when a blocked commitment should auto-resume after recovery."""
+        reason = str(commitment.meta.get("blocked_reason", "")).strip().lower()
+        if reason in {"executive_pause", "executive_fatigue", "executive_overload"}:
+            return True
+        if commitment.meta.get("resume_policy") == "auto_on_executive_recovery":
+            return True
+        # Backward compatibility for the in-flight Claude self-commitment rollout
+        return (
+            not reason
+            and commitment.meta.get("source") == "assistant_response"
+            and "self_commitment" in commitment.tags
+        )
+
+    @staticmethod
+    def apply_commitment_execution_bias(work: WorkObject, commitment: Any) -> None:
+        """Annotate work with lightweight commitment priority hints for queueing and focus."""
+        work.meta = dict(work.meta or {})
+        priority_bias = max(
+            float(work.meta.get("commitment_priority_bias", 0.0)),
+            float(commitment.priority) / 10.0,
+        )
+        user_facing = ExecutiveState._is_user_facing_commitment(commitment)
+        work.meta["commitment_priority_bias"] = round(priority_bias, 4)
+        work.meta["user_facing_commitment"] = user_facing
+        if user_facing:
+            work.meta["commitment_attention_bias"] = max(
+                float(work.meta.get("commitment_attention_bias", 0.0)),
+                0.2,
+            )
+
+    @staticmethod
+    def _is_user_facing_commitment(commitment: Any) -> bool:
+        source = str((getattr(commitment, "meta", {}) or {}).get("source", "")).lower()
+        return source in {"assistant_response", "nightly_consolidation"}
+
+    @staticmethod
+    def _dequeue_sort_key(work: WorkObject) -> tuple:
+        meta = work.meta or {}
+        return (
+            -float(meta.get("commitment_priority_bias", 0.0)),
+            -float(meta.get("commitment_attention_bias", 0.0)),
+            -(1 if meta.get("user_facing_commitment") else 0),
+            -work.promotion_score,
+            work.created_at,
+        )
 
     def _trace(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         if self.tracer:

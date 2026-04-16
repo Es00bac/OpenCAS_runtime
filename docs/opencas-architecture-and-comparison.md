@@ -1,7 +1,7 @@
 # OpenCAS: Architecture, Subsystems, and Comparative Assessment
 
 **Date:** 2026-04-08  
-**Scope:** Complete architectural survey of OpenCAS, comparison against LegacyPrototype-v4, and assessment of design maturity and integration quality.
+**Scope:** Complete architectural survey of OpenCAS, comparison against OpenBulma-v4, and assessment of design maturity and integration quality.
 
 ---
 
@@ -26,22 +26,22 @@ OpenCAS is designed as a *living computational collaborator* rather than a dispo
 
 OpenCAS draws heavily from two prior projects:
 
-### 2.1 LegacyPrototype-v4 (TypeScript/Node.js)
+### 2.1 OpenBulma-v4 (TypeScript/Node.js)
 
-LegacyPrototype-v4 is the most direct ancestor. It was a working autonomous agent with:
+OpenBulma-v4 is the most direct ancestor. It was a working autonomous agent with:
 - WebSocket and HTTP chat interfaces
-- A `LegacyAgentAssistantAgent` (BAA) for background task execution
+- A `BulmaAssistantAgent` (BAA) for background task execution
 - `MemoryFabric` with Qdrant-backed semantic search
 - EventBus-driven reactive coordination
 - Token telemetry and safety policy
 
-Many OpenCAS subsystems are direct Python translations or evolutions of LegacyAgent patterns:
-- `BoundedAssistantAgent` ← `LegacyAgentAssistantAgent`
-- `ToolValidationPipeline` ← LegacyAgent safety/validation validators
-- `EventBus` / `HookBus` ← LegacyAgent's typed event emitter
-- `TokenTelemetry` ← LegacyAgent's JSONL telemetry
-- `NightlyConsolidationEngine` ← LegacyAgent's memory consolidation cycle
-- `GitCheckpointManager` ← LegacyAgent's checkpoint/rollback system
+Many OpenCAS subsystems are direct Python translations or evolutions of Bulma patterns:
+- `BoundedAssistantAgent` ← `BulmaAssistantAgent`
+- `ToolValidationPipeline` ← Bulma safety/validation validators
+- `EventBus` / `HookBus` ← Bulma's typed event emitter
+- `TokenTelemetry` ← Bulma's JSONL telemetry
+- `NightlyConsolidationEngine` ← Bulma's memory consolidation cycle
+- `GitCheckpointManager` ← Bulma's checkpoint/rollback system
 
 ### 2.2 Claw Code (Rust)
 
@@ -54,7 +54,7 @@ Claw Code provided the *architectural philosophy*:
 - **Sandboxing and filesystem boundaries explicit**
 - **Doctor/health-check pattern** for runtime diagnostics
 
-The comparison notes in `notes/claw-code-comparison.md` and `notes/legacy_agent_v4-comparison.md` explicitly map these borrowings.
+The comparison notes in `notes/claw-code-comparison.md` and `notes/openbulma-v4-comparison.md` explicitly map these borrowings.
 
 ---
 
@@ -114,7 +114,7 @@ opencas/
 **Integration:**
 Everything downstream depends on `BootstrapContext`. `AgentRuntime` receives it and coordinates all subsystems through it.
 
-**Design quality:** This is one of OpenCAS's strongest areas. The staged pipeline is testable, explicit, and far cleaner than LegacyPrototype-v4's monolithic `src/index.ts` imperative wiring.
+**Design quality:** This is one of OpenCAS's strongest areas. The staged pipeline is testable, explicit, and far cleaner than OpenBulma-v4's monolithic `src/index.ts` imperative wiring.
 
 ---
 
@@ -142,7 +142,7 @@ Everything downstream depends on `BootstrapContext`. `AgentRuntime` receives it 
 - Subscribes to `BaaCompletedEvent` for goal resolution
 
 **Concerns:**
-`AgentRuntime` coordinates too many concerns. While better than LegacyPrototype-v4's `IntegrationHub` (which was ~4,800 lines of callback injection), the centralization creates a single point of churn.
+`AgentRuntime` coordinates too many concerns. While better than OpenBulma-v4's `IntegrationHub` (which was ~4,800 lines of callback injection), the centralization creates a single point of churn.
 
 ---
 
@@ -202,7 +202,7 @@ Everything downstream depends on `BootstrapContext`. `AgentRuntime` receives it 
 - `execute_tool()` runs self-approval before calling `ToolRegistry.execute_async()`
 - `HookBus` provides `PRE_TOOL_EXECUTE`, `PRE_COMMAND_EXECUTE`, `PRE_FILE_WRITE`, and `PRE_CONVERSATION_RESPONSE` policy hooks
 
-**Comparison note:** OpenCAS has a more mature tool governance model than LegacyPrototype-v4, with explicit risk tiers and validation pipelines. However, LegacyPrototype-v4 had **MCP (Model Context Protocol)** integration, which OpenCAS currently lacks.
+**Comparison note:** OpenCAS has a more mature tool governance model than OpenBulma-v4, with explicit risk tiers and validation pipelines. However, OpenBulma-v4 had **MCP (Model Context Protocol)** integration, which OpenCAS currently lacks.
 
 ---
 
@@ -301,7 +301,7 @@ Promotion considers semantic similarity, goal relevance, daydream alignment, and
 - `AgentRuntime.converse()` records a user belief and triggers consistency checks
 - `AgentRuntime` records relational interactions after conversation and creative collaboration
 
-**Comparison note:** LegacyPrototype-v4 had a more sophisticated affective computing layer (`SomaticStateService`) with emotional resonance directly integrated into memory retrieval. OpenCAS's affect is attached to episodes but does not yet feed retrieval scoring as richly.
+**Comparison note:** OpenBulma-v4 had a more sophisticated affective computing layer (`SomaticStateService`) with emotional resonance directly integrated into memory retrieval. OpenCAS's affect is attached to episodes but does not yet feed retrieval scoring as richly.
 
 ---
 
@@ -357,11 +357,11 @@ Appraisal uses a keyword map with negation windows to infer affect from events.
 
 ---
 
-## 5. OpenCAS vs. LegacyPrototype-v4: Detailed Comparison
+## 5. OpenCAS vs. OpenBulma-v4: Detailed Comparison
 
 ### 5.1 Integration Architecture
 
-| Dimension | LegacyPrototype-v4 | OpenCAS |
+| Dimension | OpenBulma-v4 | OpenCAS |
 |-----------|--------------|---------|
 | **Composition root** | Monolithic `src/index.ts` (~864 lines), imperative wiring | **Staged `BootstrapPipeline` with explicit `BootstrapContext`** |
 | **Runtime coordinator** | `IntegrationHub` (~4,826 lines) with heavy callback injection | `AgentRuntime` (~1,767 lines) with context-based mediation |
@@ -369,13 +369,13 @@ Appraisal uses a keyword map with negation windows to infer affect from events.
 | **Async model** | Node.js `EventEmitter` (sync callbacks) | **True async `EventBus` with `asyncio.gather`** |
 | **Concurrency** | Task-based with event emitters | **Lane-based workers (`CHAT`, `BAA`, `CONSOLIDATION`, `CRON`)** |
 
-**Verdict:** OpenCAS has a dramatically cleaner bootstrap and runtime architecture. LegacyPrototype-v4's `IntegrationHub` was powerful but became a bottleneck where every change rippled across the system.
+**Verdict:** OpenCAS has a dramatically cleaner bootstrap and runtime architecture. OpenBulma-v4's `IntegrationHub` was powerful but became a bottleneck where every change rippled across the system.
 
 ---
 
 ### 5.2 Memory and Embeddings
 
-| Dimension | LegacyPrototype-v4 | OpenCAS |
+| Dimension | OpenBulma-v4 | OpenCAS |
 |-----------|--------------|---------|
 | **Primary store** | Postgres + Qdrant | SQLite + optional Qdrant |
 | **Vector search** | Qdrant HNSW (fast, scalable) | **Brute-force SQLite scan (O(N))** or optional Qdrant |
@@ -383,13 +383,13 @@ Appraisal uses a keyword map with negation windows to infer affect from events.
 | **Emotional memory** | ** Emotional vectors in retrieval** | Affect attached to episodes, limited retrieval impact |
 | **Graph lifecycle** | Implicit via reindexing | **Explicit orphan recovery, edge rebuild, identity core promotion** |
 
-**Verdict:** LegacyPrototype-v4 had a richer, more battle-tested memory system, especially for retrieval. OpenCAS's brute-force vector scan is a genuine scaling liability without Qdrant. However, OpenCAS's explicit graph lifecycle management (orphan recovery, edge rebuild) is more systematic.
+**Verdict:** OpenBulma-v4 had a richer, more battle-tested memory system, especially for retrieval. OpenCAS's brute-force vector scan is a genuine scaling liability without Qdrant. However, OpenCAS's explicit graph lifecycle management (orphan recovery, edge rebuild) is more systematic.
 
 ---
 
 ### 5.3 Tools and Execution
 
-| Dimension | LegacyPrototype-v4 | OpenCAS |
+| Dimension | OpenBulma-v4 | OpenCAS |
 |-----------|--------------|---------|
 | **Tool governance** | Basic | **Risk tiers + validation pipeline + pre-execution hooks** |
 | **MCP support** | **Yes** | No |
@@ -399,26 +399,26 @@ Appraisal uses a keyword map with negation windows to infer affect from events.
 | **Convergence guards** | Yes | Yes |
 | **Task persistence** | **Persistent `TaskStore`** | Persistent `TaskStore` with auto-resume |
 
-**Verdict:** OpenCAS has better tool governance and cleaner concurrency. LegacyPrototype-v4 had a richer BAA repair lifecycle and MCP integration. Both now have task persistence and convergence guards (OpenCAS added these in later phases).
+**Verdict:** OpenCAS has better tool governance and cleaner concurrency. OpenBulma-v4 had a richer BAA repair lifecycle and MCP integration. Both now have task persistence and convergence guards (OpenCAS added these in later phases).
 
 ---
 
 ### 5.4 Presence and Observability
 
-| Dimension | LegacyPrototype-v4 | OpenCAS |
+| Dimension | OpenBulma-v4 | OpenCAS |
 |-----------|--------------|---------|
 | **UI channels** | **Web dashboard, WebSocket chat, Telegram bot, TUI** | CLI-only, optional FastAPI server |
 | **Background loops** | **Actually scheduled and running** (`ExecutiveLoopRunner`, `ConsolidationCoordinator`) | Implemented in code, scheduled in `AgentScheduler`, but mostly test-driven |
 | **Token telemetry** | Buffered JSONL with query APIs | Buffered JSONL with query APIs (borrowed directly) |
 | **Health checks** | Basic | **Systematic `Doctor` + `HealthMonitor`** |
 
-**Verdict:** LegacyPrototype-v4 is far ahead in user-facing presence. It was a running, online agent. OpenCAS is currently a backend/runtime that requires explicit invocation or the FastAPI server to be useful.
+**Verdict:** OpenBulma-v4 is far ahead in user-facing presence. It was a running, online agent. OpenCAS is currently a backend/runtime that requires explicit invocation or the FastAPI server to be useful.
 
 ---
 
 ### 5.5 Autonomy and Psychology
 
-| Dimension | LegacyPrototype-v4 | OpenCAS |
+| Dimension | OpenBulma-v4 | OpenCAS |
 |-----------|--------------|---------|
 | **Self-approval** | Static policy-based | **Dynamic trust/history/somatic/relational scoring** |
 | **Creative ladder** | Present but less structured | **Explicit 7-stage ladder with portfolio clustering** |
@@ -427,7 +427,7 @@ Appraisal uses a keyword map with negation windows to infer affect from events.
 | **Relational field** | `SomaticStateService` with musubi dynamics | **Explicit `RelationalEngine` with 4 dimensions** |
 | **Somatic state** | **More sophisticated, directly impacts retrieval** | Good state tracking, weaker retrieval integration |
 
-**Verdict:** OpenCAS has a more elaborate theoretical model of autonomy and psychology. Whether this translates to better behavior is harder to assess because OpenCAS has not been run end-to-end as extensively as LegacyAgent.
+**Verdict:** OpenCAS has a more elaborate theoretical model of autonomy and psychology. Whether this translates to better behavior is harder to assess because OpenCAS has not been run end-to-end as extensively as Bulma.
 
 ---
 
@@ -444,7 +444,7 @@ Appraisal uses a keyword map with negation windows to infer affect from events.
 8. **Test coverage** — 644 pytest tests covering stores, models, and integration
 
 ### What's On Par
-1. **Token telemetry** — direct translation of LegacyAgent's pattern
+1. **Token telemetry** — direct translation of Bulma's pattern
 2. **Git checkpoints** — both use the same approach
 3. **Task persistence** — both have persistent task stores
 4. **Consolidation concept** — both have nightly deep-memory cycles
@@ -461,15 +461,15 @@ Appraisal uses a keyword map with negation windows to infer affect from events.
 
 ---
 
-## 7. Integration Assessment: Is OpenCAS More Integrated Than LegacyPrototype?
+## 7. Integration Assessment: Is OpenCAS More Integrated Than OpenBulma?
 
 **Yes, architecturally. No, operationally.**
 
 **Architecturally:** OpenCAS subsystems have clearer boundaries, explicit contracts, and a proper composition root. The directory layout (`bootstrap/`, `runtime/`, `memory/`, `autonomy/`, `execution/`, etc.) enforces separation of concerns. The event bus is truly async. The tool registry has explicit risk tiers and validation. Plugins have a manifest-driven lifecycle.
 
-**Operationally:** LegacyPrototype-v4 was a *running system*. Its subsystems were welded together haphazardly in `IntegrationHub`, but they actually ran together 24/7, serving users over WebSocket and Telegram, scheduling background loops, and maintaining a continuous presence. OpenCAS's subsystems are better *designed* but less *proven in composition*. Many of its advanced features (daydream scheduling, consolidation, harness cycles) exist as correct-looking code that has primarily been exercised through unit tests rather than long-running autonomous operation.
+**Operationally:** OpenBulma-v4 was a *running system*. Its subsystems were welded together haphazardly in `IntegrationHub`, but they actually ran together 24/7, serving users over WebSocket and Telegram, scheduling background loops, and maintaining a continuous presence. OpenCAS's subsystems are better *designed* but less *proven in composition*. Many of its advanced features (daydream scheduling, consolidation, harness cycles) exist as correct-looking code that has primarily been exercised through unit tests rather than long-running autonomous operation.
 
-In short: **LegacyPrototype-v4 was a working prototype with architectural debt. OpenCAS is a cleaner foundation that still needs to be driven around the block.**
+In short: **OpenBulma-v4 was a working prototype with architectural debt. OpenCAS is a cleaner foundation that still needs to be driven around the block.**
 
 ---
 
@@ -493,8 +493,8 @@ In short: **LegacyPrototype-v4 was a working prototype with architectural debt. 
 
 ## 9. Conclusion
 
-OpenCAS represents a significant architectural evolution over LegacyPrototype-v4. It takes the *ideas* that worked in LegacyAgent (BAA, token telemetry, checkpoints, consolidation) and reimplements them with cleaner boundaries, better async semantics, and more sophisticated autonomy models. It also adds genuinely new subsystems (Theory of Mind, relational resonance, plugin lifecycle, intervention policy) that LegacyAgent lacked.
+OpenCAS represents a significant architectural evolution over OpenBulma-v4. It takes the *ideas* that worked in Bulma (BAA, token telemetry, checkpoints, consolidation) and reimplements them with cleaner boundaries, better async semantics, and more sophisticated autonomy models. It also adds genuinely new subsystems (Theory of Mind, relational resonance, plugin lifecycle, intervention policy) that Bulma lacked.
 
-However, LegacyPrototype-v4 still wins on **proven runtime behavior** and **user-facing richness**. Its memory retrieval was more sophisticated, its agent was actually online, and its subsystems had been stress-tested in continuous operation. OpenCAS's challenge is to close the gap between elegant design and field-hardened execution—especially in vector search scaling, background loop reliability, and real-world LLM prompt stability.
+However, OpenBulma-v4 still wins on **proven runtime behavior** and **user-facing richness**. Its memory retrieval was more sophisticated, its agent was actually online, and its subsystems had been stress-tested in continuous operation. OpenCAS's challenge is to close the gap between elegant design and field-hardened execution—especially in vector search scaling, background loop reliability, and real-world LLM prompt stability.
 
-If the goal is a *better foundation for the next generation*, OpenCAS is on the right track. If the goal is an agent that can run unsupervised tonight, LegacyAgent remains the safer reference point.
+If the goal is a *better foundation for the next generation*, OpenCAS is on the right track. If the goal is an agent that can run unsupervised tonight, Bulma remains the safer reference point.

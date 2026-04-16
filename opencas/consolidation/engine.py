@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from opencas.api import LLMClient
+from opencas.autonomy.commitment import CommitmentStatus
+from opencas.autonomy.commitment_store import CommitmentStore
+from opencas.autonomy.work_store import WorkStore
 from opencas.embeddings import EmbeddingService
 from opencas.identity import IdentityManager
 from opencas.memory import Memory, MemoryStore
@@ -17,7 +21,30 @@ from opencas.memory.fabric.builder import FabricBuilder
 from opencas.memory.fabric.indexer import MemoryIndexer
 from opencas.memory.fabric.weigher import ContextProfile, EdgeWeigher
 
+from .commitment_cleanup import (
+    CommitmentRecoveryCandidate,
+    are_conservative_duplicate_contents as commitment_duplicate_contents,
+    cluster_has_obvious_duplicate as commitment_cluster_has_obvious_duplicate,
+    collect_commitment_recovery_candidates as collect_recovery_candidates,
+    commitment_key as normalize_commitment_key,
+    consolidate_commitments as consolidate_commitments_impl,
+    extract_commitments_from_chat_logs as extract_commitments_from_chat_logs_impl,
+    heuristic_survivor_index as commitment_heuristic_survivor_index,
+    llm_pick_commitment_survivor as llm_pick_commitment_survivor_impl,
+    merged_commitment_status as merged_commitment_status_impl,
+    pick_commitment_survivor as pick_commitment_survivor_impl,
+    refine_commitment_cluster as refine_commitment_cluster_impl,
+)
 from .models import ConsolidationResult, SalienceUpdate
+from .signal_maintenance import (
+    cluster_hash as cluster_hash_impl,
+    has_obsolete_system_reference as has_obsolete_system_reference_impl,
+    promote_identity_core as promote_identity_core_impl,
+    promote_strong_signals as promote_strong_signals_impl,
+    recover_orphans as recover_orphans_impl,
+    reweight_episode_salience as reweight_episode_salience_impl,
+    reweight_salience as reweight_salience_impl,
+)
 from .signal_ranker import EpisodeSignalRanker, SignalScore
 
 
@@ -35,6 +62,8 @@ class NightlyConsolidationEngine:
         fabric_builder: Optional[FabricBuilder] = None,
         signal_ranker: Optional[EpisodeSignalRanker] = None,
         tom_store: Optional[Any] = None,
+        commitment_store: Optional[CommitmentStore] = None,
+        work_store: Optional[WorkStore] = None,
     ) -> None:
         self.memory = memory
         self.embeddings = embeddings
@@ -43,6 +72,8 @@ class NightlyConsolidationEngine:
         self.tracer = tracer
         self.curation_store = curation_store
         self.tom_store = tom_store
+        self.commitment_store = commitment_store
+        self.work_store = work_store
         if fabric_builder is None:
             indexer = MemoryIndexer(embeddings=self.embeddings, top_k=24)
             weigher = EdgeWeigher(profile=ContextProfile.CONSOLIDATION)
@@ -128,7 +159,18 @@ class NightlyConsolidationEngine:
             )
             result.signals_promoted = len(promoted_ids)
 
-        # 4. Rebuild episode edges, recover orphans, and promote identity core
+        # 4b. Consolidate commitments: deduplicate via embeddings + LLM, extract from chat logs
+        if self.commitment_store:
+            commitment_result = await self._consolidate_commitments(
+                similarity_threshold=similarity_threshold
+            )
+            result.commitments_consolidated = commitment_result.get("commitments_merged", 0)
+            result.commitment_clusters_formed = commitment_result.get("clusters_formed", 0)
+            result.commitment_work_objects_created = commitment_result.get("work_objects_created", 0)
+            chat_extracted = await self._extract_commitments_from_chat_logs()
+            result.commitments_extracted_from_chat = chat_extracted
+
+        # 5. Rebuild episode edges, recover orphans, and promote identity core
         if candidates:
             edges_created = await self.fabric_builder.rebuild(candidates)
             result.edges_created = edges_created
@@ -136,6 +178,11 @@ class NightlyConsolidationEngine:
             result.orphans_recovered = orphans_recovered
             core_promotions = await self._promote_identity_core(candidates, score_map)
             result.identity_core_promotions = core_promotions
+
+            # Mark consumed/promoted episodes as compacted so health checks stay clean
+            consumed_ids = list(cluster_consumed_ids | promoted_ids)
+            if consumed_ids:
+                await self.memory.mark_compacted(consumed_ids)
 
         # 5. Reweight episode salience
         episode_salience_updates = await self._reweight_episode_salience(
@@ -228,6 +275,7 @@ class NightlyConsolidationEngine:
         try:
             response = await self.llm.chat_completion(
                 messages,
+                complexity="standard",
                 source="consolidation",
             )
             choices = response.get("choices", [])
@@ -239,50 +287,14 @@ class NightlyConsolidationEngine:
 
     @staticmethod
     def _has_obsolete_system_reference(obj: Any) -> bool:
-        """Detect references to superseded systems/workspace paths."""
-        text = str(getattr(obj, "content", "")).lower()
-        payload = getattr(obj, "payload", {}) or {}
-        source = str(payload.get("legacy_agent_source", "")).lower()
-        markers = ["legacy_agent-v4", "legacy_agent-v3", "legacy_agent-v2", "openclaw"]
-        combined = f"{text} {source}"
-        return any(marker in combined for marker in markers)
+        return has_obsolete_system_reference_impl(obj)
 
     async def _reweight_salience(self) -> List[SalienceUpdate]:
-        """Boost frequently accessed memories, decay stale ones."""
-        memories = await self.memory.list_memories(limit=1000)
-        now = datetime.now(timezone.utc)
-        updates: List[SalienceUpdate] = []
-        for mem in memories:
-            new_salience = mem.salience
-            # Boost for access
-            if mem.access_count > 5:
-                new_salience += 0.2
-            # Decay if never accessed and old
-            if mem.access_count == 0 and mem.updated_at < now - timedelta(days=7):
-                new_salience -= 0.3
-            # Decay if stale access
-            if mem.last_accessed and mem.last_accessed < now - timedelta(days=14):
-                new_salience -= 0.2
-            # Decay obsolete system/workspace references
-            if not getattr(mem, "identity_core", False) and self._has_obsolete_system_reference(mem):
-                new_salience -= 0.3
-            new_salience = round(max(0.0, min(10.0, new_salience)), 3)
-            if new_salience != mem.salience:
-                await self.memory.update_memory_salience(str(mem.memory_id), new_salience)
-                updates.append(
-                    SalienceUpdate(
-                        memory_id=str(mem.memory_id),
-                        old_salience=mem.salience,
-                        new_salience=new_salience,
-                    )
-                )
-        return updates
+        return await reweight_salience_impl(self)
 
     @staticmethod
     def _cluster_hash(cluster: List[Any]) -> str:
-        ids = sorted({str(e.episode_id) for e in cluster})
-        import hashlib
-        return hashlib.sha256(",".join(ids).encode("utf-8")).hexdigest()[:32]
+        return cluster_hash_impl(cluster)
 
     async def _promote_strong_signals(
         self,
@@ -291,52 +303,13 @@ class NightlyConsolidationEngine:
         cluster_consumed_ids: set[str],
         threshold: float,
     ) -> set[str]:
-        """Promote high-scoring individual episodes to Memory."""
-        promoted: set[str] = set()
-        for ep in candidates:
-            ep_id = str(ep.episode_id)
-            if ep_id in cluster_consumed_ids:
-                continue
-            score = score_map.get(ep_id)
-            if not score or score.signal_score < threshold:
-                continue
-
-            # Resolve or compute embedding
-            embed_record = None
-            if ep.embedding_id:
-                embed_record = await self.embeddings.cache.get(ep.embedding_id)
-            if embed_record is None:
-                try:
-                    embed_record = await self.embeddings.embed(
-                        ep.content,
-                        task_type="memory_episode",
-                    )
-                except Exception:
-                    pass
-
-            # Deduplicate against existing memories via embedding similarity
-            if embed_record is not None:
-                try:
-                    similar = await self.embeddings.cache.search_similar(
-                        embed_record.vector, limit=5
-                    )
-                    if similar:
-                        top_hit, top_sim = similar[0]
-                        if top_sim > 0.92 and top_hit.source_hash != embed_record.source_hash:
-                            continue
-                except Exception:
-                    pass
-
-            memory = Memory(
-                content=ep.content,
-                source_episode_ids=[ep_id],
-                tags=["consolidation", "strong_signal"],
-                embedding_id=embed_record.source_hash if embed_record else None,
-                salience=round(ep.salience, 3),
-            )
-            await self.memory.save_memory(memory)
-            promoted.add(ep_id)
-        return promoted
+        return await promote_strong_signals_impl(
+            self,
+            candidates,
+            score_map,
+            cluster_consumed_ids,
+            threshold,
+        )
 
     async def _reweight_episode_salience(
         self,
@@ -344,116 +317,18 @@ class NightlyConsolidationEngine:
         cluster_consumed_ids: set[str],
         signal_promoted_ids: set[str],
     ) -> List[SalienceUpdate]:
-        """Boost or decay episode salience based on promotion and graph state."""
-        now = datetime.now(timezone.utc)
-        updates: List[SalienceUpdate] = []
-        promoted_all = cluster_consumed_ids | signal_promoted_ids
-        for ep in candidates:
-            ep_id = str(ep.episode_id)
-            new_salience = ep.salience
-
-            # Boost if promoted to memory
-            if ep_id in promoted_all:
-                new_salience += 0.3
-
-            # Boost for graph reinforcement
-            edges = await self.memory.get_edges_for(ep_id, min_confidence=0.0, limit=100)
-            new_salience += (len(edges) // 5) * 0.1
-
-            # Decay if old and never promoted
-            if ep_id not in promoted_all and ep.created_at < now - timedelta(days=7):
-                new_salience -= 0.2
-
-            # Decay obsolete system/workspace references (preserve identity core)
-            if not ep.identity_core and self._has_obsolete_system_reference(ep):
-                new_salience -= 0.3
-
-            new_salience = round(max(0.0, min(10.0, new_salience)), 3)
-            if new_salience != ep.salience:
-                old_salience = ep.salience
-                ep.salience = new_salience
-                await self.memory.save_episode(ep)
-                updates.append(
-                    SalienceUpdate(
-                        memory_id=ep_id,
-                        old_salience=old_salience,
-                        new_salience=new_salience,
-                    )
-                )
-        return updates
+        return await reweight_episode_salience_impl(
+            self,
+            candidates,
+            cluster_consumed_ids,
+            signal_promoted_ids,
+        )
 
     async def _promote_identity_core(self, candidates: List[Any], score_map: Optional[Dict[str, SignalScore]] = None) -> int:
-        """Promote high-degree or high-signal episodes to identity_core."""
-        candidate_ids = [str(ep.episode_id) for ep in candidates]
-        promoted = 0
-        for ep_id in candidate_ids:
-            edges = await self.memory.get_edges_for(ep_id, min_confidence=0.0, limit=100)
-            degree = len(edges)
-            signal_score = 0.0
-            if score_map:
-                s = score_map.get(ep_id)
-                if s:
-                    signal_score = s.signal_score
-            if degree >= 5 or signal_score >= 0.80:
-                ep = await self.memory.get_episode(ep_id)
-                if ep and (ep.affect is None or ep.affect.valence >= 0.0):
-                    if not ep.identity_core:
-                        ep.identity_core = True
-                        await self.memory.save_episode(ep)
-                        promoted += 1
-        return promoted
+        return await promote_identity_core_impl(self, candidates, score_map=score_map)
 
     async def _recover_orphans(self, candidates: List[Any]) -> int:
-        """Find episodes with no edges and bridge them to their nearest neighbor."""
-        if not candidates:
-            return 0
-        episode_map = {str(ep.episode_id): ep for ep in candidates}
-        recovered = 0
-        for ep in candidates:
-            ep_id = str(ep.episode_id)
-            edges = await self.memory.get_edges_for(ep_id, min_confidence=0.0, limit=1)
-            if edges:
-                continue
-            # Find nearest neighbor by embedding cosine similarity
-            best_neighbor: Optional[str] = None
-            best_sim = -1.0
-            if not ep.embedding_id:
-                continue
-            rec = await self.embeddings.cache.get(ep.embedding_id)
-            if rec is None:
-                continue
-            vec = np.array(rec.vector, dtype=np.float32)
-            norm = float(np.linalg.norm(vec))
-            if norm == 0:
-                continue
-            for other in candidates:
-                other_id = str(other.episode_id)
-                if other_id == ep_id:
-                    continue
-                if not other.embedding_id:
-                    continue
-                other_rec = await self.embeddings.cache.get(other.embedding_id)
-                if other_rec is None:
-                    continue
-                other_vec = np.array(other_rec.vector, dtype=np.float32)
-                other_norm = float(np.linalg.norm(other_vec))
-                if other_norm == 0:
-                    continue
-                sim = float(np.dot(vec, other_vec) / (norm * other_norm))
-                if sim > best_sim:
-                    best_sim = sim
-                    best_neighbor = other_id
-            if best_neighbor is not None:
-                from opencas.memory import EpisodeEdge, EdgeKind
-                edge = EpisodeEdge(
-                    source_id=ep_id,
-                    target_id=best_neighbor,
-                    kind=EdgeKind.SEMANTIC,
-                    confidence=0.1,
-                )
-                await self.memory.save_edge(edge)
-                recovered += 1
-        return recovered
+        return await recover_orphans_impl(self, candidates)
 
     async def _sweep_belief_consistency(
         self,
@@ -502,6 +377,70 @@ class NightlyConsolidationEngine:
         except Exception:
             pass
         return decayed
+
+    async def _consolidate_commitments(
+        self,
+        similarity_threshold: float = 0.75,
+    ) -> Dict[str, Any]:
+        return await consolidate_commitments_impl(self, similarity_threshold=similarity_threshold)
+
+
+    async def _llm_pick_commitment_survivor(
+        self, cluster: List[Any]
+    ) -> Optional[int]:
+        return await llm_pick_commitment_survivor_impl(self, cluster)
+
+
+    async def _extract_commitments_from_chat_logs(self) -> int:
+        return await extract_commitments_from_chat_logs_impl(self)
+
+
+    @staticmethod
+    def _merged_commitment_status(cluster: List[Any]) -> CommitmentStatus:
+        return merged_commitment_status_impl(cluster)
+
+
+    def _collect_commitment_recovery_candidates(
+        self,
+        episodes: List[Any],
+        cutoff: datetime,
+    ) -> List[CommitmentRecoveryCandidate]:
+        return collect_recovery_candidates(episodes, cutoff=cutoff)
+
+
+    async def _pick_commitment_survivor(
+        self,
+        cluster: List[Any],
+    ) -> Tuple[int, str]:
+        return await pick_commitment_survivor_impl(self, cluster)
+
+
+    def _refine_commitment_cluster(
+        self,
+        cluster: List[Any],
+    ) -> List[List[Any]]:
+        return refine_commitment_cluster_impl(cluster)
+
+
+    def _cluster_has_obvious_duplicate(self, cluster: List[Any]) -> bool:
+        return commitment_cluster_has_obvious_duplicate(cluster)
+
+
+    def _heuristic_survivor_index(self, cluster: List[Any]) -> int:
+        return commitment_heuristic_survivor_index(cluster)
+
+
+    def _are_conservative_duplicates(self, left: Any, right: Any) -> bool:
+        return commitment_duplicate_contents(left.content, right.content)
+
+
+    def _are_conservative_duplicate_contents(self, left_content: str, right_content: str) -> bool:
+        return commitment_duplicate_contents(left_content, right_content)
+
+
+    @staticmethod
+    def _commitment_key(content: str) -> str:
+        return normalize_commitment_key(content)
 
     async def _update_identity(
         self,

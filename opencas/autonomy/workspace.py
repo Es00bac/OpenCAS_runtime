@@ -79,21 +79,56 @@ class ExecutiveWorkspace(BaseModel):
         commitments: List[Commitment],
         work_objects: List[WorkObject],
         portfolio_boosts: Optional[Dict[str, PortfolioBoost]] = None,
+        somatic_modulators: Optional[Any] = None,
+        relational: Optional[Any] = None,
+        tom: Optional[Any] = None,
         now: Optional[datetime] = None,
     ) -> "ExecutiveWorkspace":
         """Rebuild workspace from current commitments and work objects."""
         if now is None:
             now = datetime.now(timezone.utc)
         portfolio_boosts = portfolio_boosts or {}
+        promise_adjustment = (
+            somatic_modulators.to_promise_followthrough_adjustment(user_facing=True)
+            if somatic_modulators is not None
+            else None
+        )
+        promise_signal = (
+            tom.evaluate_promise_followthrough(
+                somatic_state=getattr(somatic_modulators, "state", None),
+                relational_engine=relational,
+            )
+            if tom is not None
+            else None
+        )
+        active_commitments = {
+            str(commitment.commitment_id): commitment
+            for commitment in commitments
+            if commitment.status == CommitmentStatus.ACTIVE
+        }
         items: List[WorkspaceItem] = []
 
         for commitment in commitments:
-            if commitment.status != CommitmentStatus.ACTIVE:
+            deferred_user_facing = cls._is_deferred_user_facing_commitment(commitment)
+            if commitment.status != CommitmentStatus.ACTIVE and not deferred_user_facing:
                 continue
             urgency = cls._urgency_from_deadline(commitment.deadline, now)
-            importance = commitment.priority / 10.0
-            attention = 0.5
-            total = round(0.4 * urgency + 0.4 * importance + 0.2 * attention, 4)
+            user_facing = cls._is_user_facing_commitment(commitment)
+            relational_boost = (
+                max(0.0, relational.to_promise_priority_boost(user_facing=user_facing))
+                if relational is not None and user_facing
+                else 0.0
+            )
+            importance = min(1.0, (commitment.priority / 10.0) + relational_boost)
+            attention = 0.75 if user_facing else 0.5
+            if promise_adjustment is not None and user_facing:
+                attention = min(1.0, attention + promise_adjustment.salience_boost)
+            if deferred_user_facing:
+                urgency = max(0.2, urgency * 0.5)
+                attention = min(1.0, attention + 0.10)
+                total = round(min(1.0, 0.25 * urgency + 0.35 * importance + 0.40 * attention), 4)
+            else:
+                total = round(0.4 * urgency + 0.4 * importance + 0.2 * attention, 4)
             items.append(
                 WorkspaceItem(
                     item_id=commitment.commitment_id,
@@ -103,24 +138,73 @@ class ExecutiveWorkspace(BaseModel):
                     importance_score=importance,
                     attention_score=attention,
                     total_score=total,
-                    affinity=WorkspaceAffinity.PERSONAL,
-                    execution_mode=ExecutionMode.BACKGROUND_AGENT,
+                    affinity=WorkspaceAffinity.OPERATOR if user_facing else WorkspaceAffinity.PERSONAL,
+                    execution_mode=(
+                        ExecutionMode.RESPOND_INLINE
+                        if deferred_user_facing
+                        else (ExecutionMode.FOREGROUND_TOOLS if user_facing else ExecutionMode.BACKGROUND_AGENT)
+                    ),
                     commitment_id=str(commitment.commitment_id),
+                    meta={
+                        "user_facing_commitment": user_facing,
+                        "deferred_user_facing_commitment": deferred_user_facing,
+                        "blocked_reason": str((commitment.meta or {}).get("blocked_reason", "")),
+                        "needs_acknowledgement": bool(
+                            user_facing
+                            and promise_signal is not None
+                            and promise_signal.should_acknowledge_delay
+                        ),
+                    },
                 )
             )
 
         for work in work_objects:
             if work.stage.value in ("done", "failed"):
                 continue
+            linked_commitment = active_commitments.get(work.commitment_id or "")
             importance = min(1.0, work.promotion_score)
             attention = cls._attention_from_access(work)
             urgency = 0.3 if work.blocked_by else 0.5
+            affinity = WorkspaceAffinity.BACKGROUND
             total = round(0.4 * urgency + 0.4 * importance + 0.2 * attention, 4)
             boost = portfolio_boosts.get(work.portfolio_id or "", PortfolioBoost(portfolio_id="")).boost
             total = round(min(1.0, total + boost), 4)
             mode = ExecutionMode.BACKGROUND_AGENT
             if work.stage.value in ("micro_task", "project"):
                 mode = ExecutionMode.FOREGROUND_TOOLS
+            if linked_commitment is not None:
+                relational_boost = (
+                    max(
+                        0.0,
+                        relational.to_promise_priority_boost(
+                            user_facing=cls._is_user_facing_commitment(linked_commitment)
+                        ),
+                    )
+                    if relational is not None
+                    else 0.0
+                )
+                urgency = max(urgency, cls._urgency_from_deadline(linked_commitment.deadline, now))
+                importance = min(
+                    1.0,
+                    max(importance, linked_commitment.priority / 10.0) + relational_boost,
+                )
+                attention = min(
+                    1.0,
+                    attention
+                    + (0.2 if cls._is_user_facing_commitment(linked_commitment) else 0.1)
+                    + (
+                        promise_adjustment.salience_boost
+                        if promise_adjustment is not None
+                        and cls._is_user_facing_commitment(linked_commitment)
+                        else 0.0
+                    ),
+                )
+                total = round(min(1.0, 0.4 * urgency + 0.4 * importance + 0.2 * attention + boost), 4)
+                affinity = (
+                    WorkspaceAffinity.OPERATOR
+                    if cls._is_user_facing_commitment(linked_commitment)
+                    else WorkspaceAffinity.PERSONAL
+                )
             items.append(
                 WorkspaceItem(
                     item_id=work.work_id,
@@ -130,12 +214,23 @@ class ExecutiveWorkspace(BaseModel):
                     importance_score=importance,
                     attention_score=attention,
                     total_score=total,
-                    affinity=WorkspaceAffinity.BACKGROUND,
+                    affinity=affinity,
                     execution_mode=mode,
                     commitment_id=work.commitment_id,
                     project_id=work.project_id,
                     portfolio_id=work.portfolio_id,
-                    meta={"stage": work.stage.value},
+                    meta={
+                        "stage": work.stage.value,
+                        "user_facing_commitment": bool(
+                            linked_commitment and cls._is_user_facing_commitment(linked_commitment)
+                        ),
+                        "needs_acknowledgement": bool(
+                            linked_commitment
+                            and cls._is_user_facing_commitment(linked_commitment)
+                            and promise_signal is not None
+                            and promise_signal.should_acknowledge_delay
+                        ),
+                    },
                 )
             )
 
@@ -171,3 +266,21 @@ class ExecutiveWorkspace(BaseModel):
         hours_since = max(0.0, (now - work.last_accessed).total_seconds() / 3600.0)
         recency_decay = max(0.0, 1.0 - (hours_since / 168.0))  # decay over 7 days
         return round(base * recency_decay, 4)
+
+    @staticmethod
+    def _is_user_facing_commitment(commitment: Commitment) -> bool:
+        source = str((commitment.meta or {}).get("source", "")).lower()
+        return source in {"assistant_response", "nightly_consolidation"}
+
+    @staticmethod
+    def _is_deferred_user_facing_commitment(commitment: Commitment) -> bool:
+        if commitment.status != CommitmentStatus.BLOCKED:
+            return False
+        if not ExecutiveWorkspace._is_user_facing_commitment(commitment):
+            return False
+        reason = str((commitment.meta or {}).get("blocked_reason", "")).lower()
+        return reason in {
+            "executive_pause",
+            "executive_fatigue",
+            "executive_overload",
+        } or str((commitment.meta or {}).get("resume_policy", "")).lower() == "auto_on_executive_recovery"

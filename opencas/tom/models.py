@@ -23,6 +23,8 @@ class Belief(BaseModel):
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     evidence_ids: List[str] = Field(default_factory=list)
     belief_revision_score: float = Field(default=0.0)
+    reinforcement_count: int = Field(default=0)
+    last_reinforced: Optional[datetime] = None
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -53,3 +55,13 @@ class MetacognitiveResult(BaseModel):
     warnings: List[str] = Field(default_factory=list)
     belief_count: int = 0
     intention_count: int = 0
+
+
+class PromiseFollowthroughSignal(BaseModel):
+    """Interpretation of pending self-commitments for runtime guidance."""
+
+    pending_count: int = 0
+    pending_contents: List[str] = Field(default_factory=list)
+    should_acknowledge_delay: bool = False
+    should_repair_trust: bool = False
+    should_resume_now: bool = False

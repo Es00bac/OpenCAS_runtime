@@ -1,15 +1,15 @@
 # OpenCAS Long Integrated Scenario Matrix
 
-Last updated: 2026-04-09
+Last updated: 2026-04-15
 
 Purpose:
 - define the longer day-to-day scenarios required before first regular-use deployment testing
 - make PR-003 concrete enough to execute without inventing test scope ad hoc
 
 Related:
-- [TaskList.md]((workspace_root)/TaskList.md)
-- [first-regular-use-deployment-checklist.md]((workspace_root)/docs/first-regular-use-deployment-checklist.md)
-- [testing-execution-plan-2026-04-09.md]((workspace_root)/docs/qualification/testing-execution-plan-2026-04-09.md)
+- [TaskList.md](../../TaskList.md)
+- [first-regular-use-deployment-checklist.md](../first-regular-use-deployment-checklist.md)
+- [testing-execution-plan-2026-04-09.md](testing-execution-plan-2026-04-09.md)
 
 ## Scenario 1: Technical Research To Report
 
@@ -199,6 +199,10 @@ Current execution note:
 4. Scenario 4
 5. Scenario 5
 6. Scenario 6
+7. Scenario 7
+8. Scenario 8
+9. Scenario 10
+10. Scenario 9
 
 Rationale:
 - Scenario 1 is the best first day-to-day use proxy
@@ -207,6 +211,10 @@ Rationale:
 - Scenario 4 validates recovery discipline after the baseline scenarios are in place
 - Scenario 5 validates browser-specific recovery and cleanup under drift
 - Scenario 6 validates provider-backed timeout cleanup without broad spend
+- Scenario 7 validates auth-friction handling without leaving provider-backed residue
+- Scenario 8 validates loop-guard failure classification and cleanup
+- Scenario 10 validates the promise/continuity stack end to end
+- Scenario 9 now closes the repeated-work memory continuity gap and remains reusable as the canonical repeated-task proof
 
 ## Scenario 7: Auth Friction Recovery
 
@@ -283,4 +291,44 @@ Pass criteria:
 - the runtime trace confirms that the `memory_retriever` surfaced the prior episode
 
 Current execution note:
-- this is a planned scenario; execution is pending.
+- executed successfully on 2026-04-15 through the bounded local continuity path
+- evidence:
+  - report: `.opencas_live_test_state/scenario9-memory-continuity-20260415-180020/scenario9_memory_continuity_report.md`
+  - artifact: `.opencas_live_test_state/scenario9-memory-continuity-20260415-180020/workspace/notes/scenario9_memory_continuity_note.md`
+- result:
+  - the second session retrieved both the prior anchor episode and the distilled memory from the first session
+  - retrieval usage became durably visible with `total_retrieval_accesses = 3`
+  - the retrieved episode was marked `used_successfully = 1`
+  - the memory-value snapshot reached `grounded`
+  - the second-session artifact included the recovered heading `Redwood Launch Notes` and incident `R-17` without a new discovery prompt
+
+## Scenario 10: Promise Continuity Lifecycle
+
+Goal:
+- prove that a user-facing promise can survive fatigue deferral, executive recovery, consolidation, chat-log backfill, and operator inspection without semantic corruption
+
+Required modes:
+- conversational promise capture
+- executive pause/recovery
+- commitment-linked work restore
+- nightly consolidation subpaths
+- operator workflow/operations/chat inspection
+
+Pass criteria:
+- a deferred assistant promise becomes a blocked commitment with provenance
+- recovery resumes the eligible commitment and restores linked work
+- blocked duplicate commitments remain blocked after dedup
+- a missed promise can be recovered from real turn episodes
+- workflow and operator surfaces explain the lifecycle coherently
+
+Current execution note:
+- executed successfully on 2026-04-15 through the bounded runtime qualification path
+- evidence:
+  - regression: [tests/test_promise_qualification.py](../../tests/test_promise_qualification.py)
+  - scenario note: [promise-lifecycle-scenario-2026-04-15.md](promise-lifecycle-scenario-2026-04-15.md)
+- result:
+  - fatigued self-promises are captured as blocked commitments with `blocked_reason` provenance
+  - executive recovery resumes the commitment, records `resume_reason`, and restores linked work
+  - blocked duplicate commitments stay blocked and record merge rationale
+  - roleless historical turns can still recover missed promises with previous-user-turn context
+  - workflow, operations, and chat-context surfaces expose the lifecycle coherently

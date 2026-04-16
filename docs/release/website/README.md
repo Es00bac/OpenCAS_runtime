@@ -38,4 +38,4 @@ Then navigate to `http://localhost:8000` in your web browser.
 * **UI:** JetBrains Mono / Inter typography with responsive CSS grids.
 
 ---
-*Developed by OpenCAS Contributors*
+*Developed by Jarrod Cary*

@@ -186,3 +186,90 @@ async def test_scheduler_focus_mode_blocks_cycles(runtime: AgentRuntime) -> None
     # Because focus mode was entered and not yet timed out, run_cycle should NOT have been called
     assert runtime.run_cycle.await_count == 0
     assert scheduler.focus_mode is True
+
+
+@pytest.mark.asyncio
+async def test_scheduler_resumes_deferred_work_on_executive_recovery() -> None:
+    class FakeExecutive:
+        def __init__(self) -> None:
+            self.paused = True
+            self.resume_deferred_work = AsyncMock(
+                return_value={"unblocked_commitments": 1, "restored_work": 1, "queue_restored": 1}
+            )
+
+        def recommend_pause(self) -> bool:
+            return self.paused
+
+    class FakeBAA:
+        queue_size = 0
+        held_size = 0
+        start = AsyncMock()
+        stop = AsyncMock()
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.executive = FakeExecutive()
+            self.baa = FakeBAA()
+            self.ctx = type("Ctx", (), {"health_monitor": None, "somatic": None})()
+            self.run_cycle = AsyncMock(return_value={"promoted": 0, "demoted": 0})
+            self.run_consolidation = AsyncMock(return_value={})
+
+    runtime = FakeRuntime()
+    readiness = AgentReadiness()
+    readiness.ready("test ready")
+    scheduler = AgentScheduler(
+        runtime=runtime,
+        cycle_interval=0.05,
+        consolidation_interval=3600,
+        baa_heartbeat_interval=3600,
+        readiness=readiness,
+    )
+    await scheduler.start()
+    await asyncio.sleep(0.08)
+    runtime.executive.paused = False
+    await asyncio.sleep(0.12)
+    await scheduler.stop()
+    runtime.executive.resume_deferred_work.assert_awaited_once()
+    runtime.run_cycle.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_focus_mode_does_not_trigger_resume() -> None:
+    class FakeExecutive:
+        def __init__(self) -> None:
+            self.resume_deferred_work = AsyncMock(return_value={})
+
+        def recommend_pause(self) -> bool:
+            return False
+
+    class FakeBAA:
+        queue_size = 0
+        held_size = 0
+        start = AsyncMock()
+        stop = AsyncMock()
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.executive = FakeExecutive()
+            self.baa = FakeBAA()
+            self.ctx = type("Ctx", (), {"health_monitor": None, "somatic": None})()
+            self.run_cycle = AsyncMock(return_value={"promoted": 0, "demoted": 0})
+            self.run_consolidation = AsyncMock(return_value={})
+
+    runtime = FakeRuntime()
+    readiness = AgentReadiness()
+    readiness.ready("test ready")
+    scheduler = AgentScheduler(
+        runtime=runtime,
+        cycle_interval=0.05,
+        consolidation_interval=3600,
+        baa_heartbeat_interval=3600,
+        readiness=readiness,
+    )
+    await scheduler.start()
+    scheduler.enter_focus_mode()
+    await asyncio.sleep(0.06)
+    scheduler.exit_focus_mode()
+    await asyncio.sleep(0.10)
+    await scheduler.stop()
+    runtime.executive.resume_deferred_work.assert_not_awaited()

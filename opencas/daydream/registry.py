@@ -4,8 +4,8 @@ from typing import List, Optional
 
 from opencas.somatic.models import SomaticSnapshot
 
+from .conflict_store import ConflictStore
 from .models import ConflictRecord
-from .store import ConflictStore
 
 
 class ConflictRegistry:

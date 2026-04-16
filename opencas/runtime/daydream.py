@@ -67,7 +67,11 @@ class DaydreamGenerator:
         ]
 
         try:
-            response = await self.llm.chat_completion(messages)
+            response = await self.llm.chat_completion(
+                messages,
+                complexity="light",
+                source="daydream_generation",
+            )
             content = self._extract_content(response)
             reflections = self._parse_structured(content)
         except Exception as exc:

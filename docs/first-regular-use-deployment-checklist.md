@@ -1,6 +1,6 @@
 # OpenCAS First Regular-Use Deployment Checklist
 
-Last updated: 2026-04-09
+Last updated: 2026-04-15
 
 Purpose:
 - define the concrete gate for first regular-use deployment testing
@@ -8,12 +8,12 @@ Purpose:
 - keep “ready for day-to-day use” tied to evidence, not intuition
 
 Related:
-- [TaskList.md]((workspace_root)/TaskList.md)
-- [production-readiness-status-2026-04-09.md]((workspace_root)/docs/production-readiness-status-2026-04-09.md)
-- [opencas-deep-system-audit-2026-04-09.md]((workspace_root)/docs/opencas-deep-system-audit-2026-04-09.md)
-- [testing-execution-plan-2026-04-09.md]((workspace_root)/docs/qualification/testing-execution-plan-2026-04-09.md)
-- [live_validation_summary.md]((workspace_root)/docs/qualification/live_validation_summary.md)
-- [qualification_remediation_rollup.md]((workspace_root)/docs/qualification/qualification_remediation_rollup.md)
+- [TaskList.md](../TaskList.md)
+- [production-readiness-status-2026-04-09.md](production-readiness-status-2026-04-09.md)
+- [opencas-deep-system-audit-2026-04-09.md](opencas-deep-system-audit-2026-04-09.md)
+- [testing-execution-plan-2026-04-09.md](qualification/testing-execution-plan-2026-04-09.md)
+- [live_validation_summary.md](qualification/live_validation_summary.md)
+- [qualification_remediation_rollup.md](qualification/qualification_remediation_rollup.md)
 
 ## Deployment Decision
 
@@ -62,7 +62,7 @@ Unchecked items mean OpenCAS is still in pre-deployment qualification.
 ## F. Memory / Continuity Confidence
 
 - [x] Memory and retrieval are enabled and functioning in normal runtime use.
-- [x] There is at least one planned or executed scenario to measure whether memory improves repeated work.
+- [x] There is at least one executed scenario showing that memory improves repeated work.
 - [x] No known retrieval/runtime bug is currently corrupting operator trust.
 
 ## G. Inner-Life Behavioral Readiness
@@ -80,7 +80,6 @@ Unchecked items mean OpenCAS is still in pre-deployment qualification.
 ## Current Known Risks
 
 - **Long-horizon day-to-day scenarios are still underqualified:** Mitigated by starting with supervised sessions before moving to full autonomy.
-- **Memory-value has architectural support but not enough measured outcome proof:** Accepted. Scenario 9 is planned to explicitly measure this, but it will not block first deployment.
 - **Remediation guidance is still early and based on limited rerun history:** Accepted. Operators will manually review rerun advice until the dataset is richer.
 - **Inner-state systems are structurally present but still behaviorally under-coupled:** Mitigated. PR-009 successfully coupled somatic and relational states to LLM prompts, executive pacing, and creative evaluation.
 
@@ -97,25 +96,30 @@ If the system exhibits runaway API usage, destructive filesystem modifications, 
 Current call: `READY for first regular-use deployment testing`
 
 Why:
-- The qualification loop is stable, and weak labels are improving.
-- Extensive scenario coverage (Scenarios 1-8) proves clean execution, failure classification, operator intervention, and provider cleanup.
+- The qualification loop is stable, and the current weak labels are watch items rather than active unresolved defects.
+- Extensive scenario coverage (Scenarios 1-10) proves clean execution, failure classification, operator intervention, provider cleanup, promise lifecycle continuity, and repeated-task memory continuity.
 - Inner-life components (Somatic, ToM, Relational) now explicitly shape behavior and pacing (PR-009).
 - Known risks have been bounded and mitigated, and explicit pause/rollback conditions are defined.
 - Cost/usage discipline is enforced through bounded testing loops and reliable process sweeping.
 
 Evidence behind checked items:
-- `kilocode_supervised_work` improved to `0.5`
-- `integrated_operator_workflow` improved to `0.75`
+- `integrated_operator_workflow` returned `2/2 artifact_verified` in bounded rerun request `7ddf2492ba1946328ca6398e7b541fed`
+- `kilocode_supervised_work` was reproduced as a supervision-path defect in request `0249235e74ae4b8382c83c76e30f8e91`, then repaired and confirmed with `2/2 artifact_verified` in request `b404b54a8f414e36a6f96d531708b6bf`
+- Scenario 9 executed successfully via local report `scenario9-memory-continuity-20260415-180020/scenario9_memory_continuity_report.md`
 - stale-process sweep tool exists and has been exercised repeatedly in recent qualification work
 - qualification summary and remediation rollup are both current and wired into the operations surface
 - operators can inspect rerun provenance, weak-label trends, aggregate deltas, and rerun history in the operations surface
-- longer integrated scenarios are defined in [long-scenario-matrix.md]((workspace_root)/docs/qualification/long-scenario-matrix.md)
+- longer integrated scenarios are defined in [long-scenario-matrix.md](qualification/long-scenario-matrix.md)
 - Scenario 1 executed successfully via run `debug-validation-20260409-164343`
 - Scenario 3 executed successfully via local report `scenario3-operator-recovery-20260409-170416`
 - Scenario 2 executed successfully via local report `scenario2-repo-triage-20260409-171519`
 - Scenario 4 executed successfully via local report `scenario4-tool-friction-20260409-172334`
 - Scenario 5 executed successfully via local report `scenario5-browser-drift-20260409-174329`
 - Scenario 6 executed successfully via local report `scenario6-provider-cleanup-20260409-174942`
+- Scenario 7 executed successfully via local report `scenario7-auth-friction-20260409-181259`
+- Scenario 8 executed successfully via local report `scenario8-loop-guard-20260409-181524`
+- Scenario 10 executed successfully via [promise-lifecycle-scenario-2026-04-15.md](qualification/promise-lifecycle-scenario-2026-04-15.md)
+- Scenario 9 showed grounded memory-value evidence with `total_retrieval_accesses = 3`, `used_successfully = 1`, and a second-session artifact that reused the recovered heading and incident details
 - recent operator actions are now recorded durably in the operations control plane for PTY/browser/process intervention paths
 - durable browser screenshot evidence is now retained for the browser drift recovery scenario
 - provider-backed timeout cleanup is now evidenced by a clean harness exit and zero-count post-run process sweep

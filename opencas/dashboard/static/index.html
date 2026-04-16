@@ -12,6 +12,8 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
   <link rel="stylesheet" href="/dashboard/static/css/app.css" />
+  <script src="/dashboard/static/js/http_helpers.js"></script>
+  <script src="/dashboard/static/js/operations_helpers.js"></script>
   <script>
     /* Global Chart.js cyberpunk theme */
     document.addEventListener('DOMContentLoaded', function() {
@@ -233,13 +235,41 @@
                     </template>
                   </div>
                   <div :style="'white-space:pre-wrap;' + (m.role === 'tool' ? 'font-family:monospace; font-size:0.85rem; color:var(--text-muted);' : '')" x-text="m.content"></div>
+                  <template x-if="(m.meta?.attachments || []).length">
+                    <div style="display:flex; flex-wrap:wrap; gap:0.4rem; margin-top:0.6rem;">
+                      <template x-for="attachment in (m.meta.attachments || [])" :key="attachment.url || attachment.path || attachment.filename">
+                        <span class="badge" :title="attachment.media_type || 'attachment'" x-text="formatAttachmentBadge(attachment)"></span>
+                      </template>
+                    </div>
+                  </template>
                 </div>
               </template>
               <p class="muted" x-show="!messages.length && sessionId">No messages yet.</p>
               <p class="muted" x-show="!sessionId">Select a session to load messages.</p>
             </div>
-            <form @submit.prevent="sendMessage()" class="chat-compose">
-              <input type="text" x-model="input" placeholder="Type a message…" class="input" style="flex:1;" :disabled="sending || !sessionId" required />
+            <form @submit.prevent="sendMessage()" class="chat-compose" @dragover.prevent="$event.dataTransfer.dropEffect='copy'" @drop.prevent="handleDrop($event)">
+              <template x-if="pendingAttachments.length">
+                <div style="display:flex; flex-wrap:wrap; gap:0.4rem; margin-bottom:0.5rem;">
+                  <template x-for="(attachment, index) in pendingAttachments" :key="attachment.url || attachment.path || attachment.filename">
+                    <span class="badge" :title="attachment.media_type || 'attachment'">
+                      <span x-text="formatAttachmentBadge(attachment)"></span>
+                      <button type="button" class="btn" style="padding:0 0.35rem; margin-left:0.35rem;" @click="removePendingAttachment(index)">×</button>
+                    </span>
+                  </template>
+                </div>
+              </template>
+              <textarea
+                x-ref="chatInput"
+                x-model="input"
+                @input="autoResize($refs.chatInput)"
+                @keydown.enter.prevent="handleEnter($event)"
+                placeholder="Type a message… (Shift+Enter for new line)"
+                class="input"
+                style="flex:1; resize:none; min-height:2.5rem; max-height:12rem; overflow-y:auto;"
+                :disabled="sending || !sessionId"
+              ></textarea>
+              <input type="file" x-ref="fileInput" @change="handleFileSelect($event)" style="display:none;" multiple />
+              <button type="button" class="btn" :disabled="sending || !sessionId" @click="$refs.fileInput.click()" title="Attach file">+</button>
               <button type="submit" class="btn primary" :disabled="sending || !sessionId" x-text="sending ? 'Sending…' : 'Send'"></button>
             </form>
           </div>
@@ -685,12 +715,14 @@
           </div>
         </div>
 
+        <div class="panel memory-health-panel" x-html="memoryHealthMarkup()"></div>
+
         <div class="memory-layout">
           <div class="panel memory-controls">
             <h4>Atlas Controls</h4>
             <div class="control-grid">
               <label class="field-label">Search / focus query
-                <input class="input" type="text" x-model="query" placeholder="planning drift, auth errors, User, etc." />
+                <input class="input" type="text" x-model="query" placeholder="planning drift, auth errors, Jarrod, etc." />
               </label>
               <label class="field-label">Session filter
                 <input class="input" type="text" x-model="sessionId" placeholder="optional session id" />
@@ -757,6 +789,7 @@
                   <option value="salience">salience</option>
                   <option value="confidence">confidence</option>
                   <option value="connections">connections</option>
+                  <option value="utility">utility</option>
                 </select>
               </label>
               <label class="field-label">Neighborhood hops
@@ -807,13 +840,24 @@
           </div>
         </div>
 
-        <div class="grid-2 mt-4">
-          <div class="panel scroll">
-            <h4>Visible Timeline</h4>
+        <div class="panel memory-workbench mt-4">
+          <div class="memory-workbench-head">
+            <div>
+              <h4>Memory Workbench</h4>
+              <p class="muted">Keep the atlas in view while switching between timeline, retrieval analysis, and memory-value evidence.</p>
+            </div>
+            <div class="tab-strip">
+              <button class="tab-pill" :class="activeLowerPanel === 'timeline' ? 'active' : ''" @click="setLowerPanel('timeline')">Timeline</button>
+              <button class="tab-pill" :class="activeLowerPanel === 'retrieval' ? 'active' : ''" @click="setLowerPanel('retrieval')">Retrieval Inspector</button>
+              <button class="tab-pill" :class="activeLowerPanel === 'value' ? 'active' : ''" @click="setLowerPanel('value')">Memory Value</button>
+            </div>
+          </div>
+
+          <div class="memory-tab-body scroll" x-show="activeLowerPanel === 'timeline'">
             <div x-html="episodeListMarkup()"></div>
           </div>
-          <div class="panel">
-            <h4>Retrieval Inspector</h4>
+
+          <div class="memory-tab-body" x-show="activeLowerPanel === 'retrieval'">
             <p class="muted">Adjust fusion weights and inspect why the retriever surfaced a memory. This is the fastest way to see what the memory system is actually doing.</p>
             <label class="field-label">Retrieval query
               <textarea class="input" rows="3" x-model="retrievalQuery" placeholder="What did we learn about provider failures?"></textarea>
@@ -842,8 +886,16 @@
             <div class="inline-actions mt-4">
               <button class="btn primary" @click="inspectRetrieval()" :disabled="retrievalLoading" x-text="retrievalLoading ? 'Inspecting…' : 'Inspect Retrieval'"></button>
               <button class="btn" @click="resetRetrievalWeights()">Reset Weights</button>
+              <label class="field-label" style="flex-direction:row;align-items:center;gap:6px;">
+                <input type="checkbox" x-model="showRetrievalOnAtlas" @change="renderLandscapeChart()" />
+                Show on Atlas
+              </label>
             </div>
             <div class="panel scroll mt-4 memory-retrieval-results" x-html="retrievalMarkup()"></div>
+          </div>
+
+          <div class="memory-tab-body scroll" x-show="activeLowerPanel === 'value'">
+            <div x-html="memoryValueMarkup()"></div>
           </div>
         </div>
       </section>
@@ -928,12 +980,14 @@
             <p class="muted">Loading runtime state…</p>
           </div>
           <div class="panel panel-span-5"
+          data-panel="config-overview"
           hx-get="/api/config/overview"
           hx-trigger="load"
           hx-swap="innerHTML">
             <p class="muted">Loading configuration overview…</p>
           </div>
           <div class="panel scroll panel-span-6"
+            data-panel="config-raw"
             hx-get="/api/config"
             hx-trigger="load"
             hx-swap="innerHTML">
@@ -1052,14 +1106,7 @@
         }
       });
 
-      function renderMemoryStats(d) {
-        return `<div class="stat-grid">
-          <div><div class="stat-value">${d.episode_count}</div><div class="stat-label">Episodes</div></div>
-          <div><div class="stat-value">${d.memory_count}</div><div class="stat-label">Memories</div></div>
-          <div><div class="stat-value">${d.edge_count}</div><div class="stat-label">Edges</div></div>
-          <div><div class="stat-value">${d.comacted_count || d.compacted_count}</div><div class="stat-label">Compacted</div></div>
-        </div>`;
-      }
+      // Memory dashboard globals live in /dashboard/static/js/memory_app.js.
       function renderBaa(d) {
         return `<div class="stat-grid">
           <div><div class="stat-value">${d.queue_size}</div><div class="stat-label">Queue</div></div>
@@ -1852,6 +1899,7 @@
         return html;
       }
       function chatApp() {
+        const http = window.OpenCASHttp;
         return {
           sessions: [],
           sessionId: '',
@@ -1860,6 +1908,7 @@
           messages: [],
           summary: null,
           input: '',
+          pendingAttachments: [],
           loading: false,
           sending: false,
           creating: false,
@@ -1885,24 +1934,25 @@
           async loadSessions() {
             this.loading = true;
             try {
-              const params = new URLSearchParams({ status: this.sessionTab, limit: '50' });
-              if (this.sessionSearch.trim()) params.set('q', this.sessionSearch.trim());
-              const r = await fetch('/api/chat/sessions?' + params.toString());
-              const d = await r.json();
+              const d = await http.fetchJson(http.buildUrl('/api/chat/sessions', {
+                status: this.sessionTab,
+                limit: '50',
+                q: this.sessionSearch.trim() || undefined,
+              }));
               this.sessions = d.sessions || [];
             } catch (e) { console.error(e); }
             this.loading = false;
           },
           async selectSession(sessionId) {
             this.sessionId = sessionId || '';
+            this.pendingAttachments = [];
             await this.loadHistory();
             await this.loadContextSummary();
           },
           async loadHistory() {
             if (!this.sessionId) { this.messages = []; return; }
             try {
-              const r = await fetch('/api/chat/sessions/' + encodeURIComponent(this.sessionId) + '/history?limit=200');
-              const d = await r.json();
+              const d = await http.fetchJson(`/api/chat/sessions/${encodeURIComponent(this.sessionId)}/history?limit=200`);
               this.messages = (d.messages || []).map(m => ({
                 ...m,
                 somatic: m.meta?.somatic || null
@@ -1912,8 +1962,7 @@
           async createSession() {
             this.creating = true;
             try {
-              const r = await fetch('/api/chat/sessions', { method: 'POST' });
-              const d = await r.json();
+              const d = await http.fetchJson('/api/chat/sessions', { method: 'POST' });
               if (d.session_id) {
                 this.sessionTab = 'active';
                 this.sessionSearch = '';
@@ -1930,7 +1979,7 @@
             const name = window.prompt('Rename session:', current);
             if (name === null) return; // cancelled
             try {
-              await fetch('/api/chat/sessions/' + encodeURIComponent(s.session_id), {
+              await http.fetchJson('/api/chat/sessions/' + encodeURIComponent(s.session_id), {
                 method: 'PATCH',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name }),
@@ -1941,7 +1990,7 @@
           async toggleArchive(s) {
             const action = s.status === 'archived' ? 'unarchive' : 'archive';
             try {
-              await fetch('/api/chat/sessions/' + encodeURIComponent(s.session_id) + '/' + action, { method: 'POST' });
+              await http.fetchJson('/api/chat/sessions/' + encodeURIComponent(s.session_id) + '/' + action, { method: 'POST' });
               // If we archived the active session, deselect it
               if (action === 'archive' && this.sessionId === s.session_id) {
                 this.sessionId = '';
@@ -1952,15 +2001,10 @@
           },
           async loadContextSummary() {
             try {
-              const params = new URLSearchParams();
-              if (this.sessionId) params.set('session_id', this.sessionId);
-              const suffix = params.toString() ? `?${params.toString()}` : '';
-              const r = await fetch('/api/chat/context-summary' + suffix);
-              if (r.ok) {
-                const d = await r.json();
-                this.summary = d;
-                return;
-              }
+              const d = await http.fetchJsonOrNull(http.buildUrl('/api/chat/context-summary', {
+                session_id: this.sessionId || undefined,
+              }));
+              if (d) { this.summary = d; return; }
               this.summary = await this.loadLegacyContextSummary();
             } catch (e) {
               console.error(e);
@@ -1973,21 +2017,12 @@
             }
           },
           async loadLegacyContextSummary() {
-            const [somaticResp, executiveResp, workResp, tasksResp] = await Promise.allSettled([
-              fetch('/api/identity/somatic'),
-              fetch('/api/executive/snapshot'),
-              fetch('/api/operations/work?limit=6'),
-              fetch('/api/operations/tasks?limit=6'),
+            const [somatic, executive, work, tasks] = await http.fetchJsonAllSettled([
+              '/api/identity/somatic',
+              '/api/executive/snapshot',
+              '/api/operations/work?limit=6',
+              '/api/operations/tasks?limit=6',
             ]);
-            const readJson = async (settled) => {
-              if (settled.status !== 'fulfilled') return null;
-              if (!settled.value.ok) return null;
-              return await settled.value.json();
-            };
-            const somatic = await readJson(somaticResp);
-            const executive = await readJson(executiveResp);
-            const work = await readJson(workResp);
-            const tasks = await readJson(tasksResp);
             return {
               session_id: this.sessionId || 'default',
               somatic,
@@ -2012,6 +2047,7 @@
             const currentWork = summary.current_work || null;
             const tasks = summary.tasks || {};
             const taskItems = tasks.items || [];
+            const consolidation = summary.consolidation || {};
             let html = '<h4>Conversation Context</h4>';
             html += this.sessionId
               ? `<p class="muted">Session: <code>${escapeHtml(this.sessionId)}</code> • ${this.messages.length} messages loaded</p>`
@@ -2043,6 +2079,12 @@
             html += `<p class="muted">Intention: ${escapeHtml(executive.intention || 'none')}</p>`;
             html += `<p class="muted">Active goals: ${escapeHtml((executive.active_goals || []).join(' • ') || 'none')}</p>`;
             html += `<p class="muted">Queued work ${executive.queued_work_count ?? 0} • capacity remaining ${executive.capacity_remaining ?? 0}${executive.recommend_pause ? ' • recommend pause' : ''}</p>`;
+            html += '<h4 class="mt-4">Consolidation</h4>';
+            if (consolidation.available) {
+              html += `<p class="muted">Last run ${formatDateTime(consolidation.timestamp)} • merged ${consolidation.commitments_consolidated ?? 0} • chat recovery ${consolidation.commitments_extracted_from_chat ?? 0} • work created ${consolidation.commitment_work_objects_created ?? 0}</p>`;
+            } else {
+              html += '<p class="muted">No consolidation run has been surfaced yet.</p>';
+            }
             html += '<h4 class="mt-4">Background Tasks</h4>';
             html += `<p class="muted">Tracked ${tasks.counts?.total ?? 0} • active ${tasks.counts?.active ?? 0} • waiting ${tasks.counts?.waiting ?? 0} • completed ${tasks.counts?.completed ?? 0} • failed ${tasks.counts?.failed ?? 0}</p>`;
             if (!taskItems.length) {
@@ -2086,21 +2128,43 @@
             };
             return palette[message?.role] || '#64748b';
           },
+          formatAttachmentBadge(attachment) {
+            const filename = attachment?.filename || 'attachment';
+            const mediaType = attachment?.media_type || '';
+            if (!mediaType) return filename;
+            if (mediaType.startsWith('text/')) return `${filename} · text`;
+            return `${filename} · ${mediaType}`;
+          },
           getEmotionColor(tag) {
             return this.emotionColors?.[tag] || this.emotionColors?.neutral || '#B0C4DE';
           },
           async sendMessage() {
-            if (!this.input.trim() || !this.sessionId) return;
+            if ((!this.input.trim() && !this.pendingAttachments.length) || !this.sessionId) return;
             this.sending = true;
             const userMsg = this.input.trim();
-            this.messages.push({ role: 'user', content: userMsg, created_at: new Date().toISOString() });
+            const attachments = this.pendingAttachments.map(attachment => ({
+              filename: attachment.filename,
+              url: attachment.url,
+              path: attachment.path,
+              media_type: attachment.media_type || '',
+            }));
+            const optimisticMeta = attachments.length ? { attachments } : {};
+            this.messages.push({
+              role: 'user',
+              content: userMsg,
+              created_at: new Date().toISOString(),
+              meta: optimisticMeta
+            });
             try {
-              const r = await fetch('/api/chat/send', {
+              const d = await http.fetchJson('/api/chat/send', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ session_id: this.sessionId, message: userMsg })
+                body: JSON.stringify({
+                  session_id: this.sessionId,
+                  message: userMsg,
+                  attachments
+                })
               });
-              const d = await r.json();
               this.messages.push({
                 role: 'assistant',
                 content: d.response,
@@ -2108,6 +2172,7 @@
                 somatic: d.somatic
               });
               this.input = '';
+              this.pendingAttachments = [];
               await this.loadContextSummary();
             } catch (e) {
               console.error(e);
@@ -2124,10 +2189,95 @@
               parts.push(new Date(session.last_at).toLocaleString());
             }
             return parts.join(' • ') || 'recent session';
+          },
+          handleEnter(event) {
+            if (event.shiftKey) {
+              const el = this.$refs.chatInput;
+              const start = el.selectionStart;
+              const end = el.selectionEnd;
+              this.input = this.input.slice(0, start) + '\n' + this.input.slice(end);
+              this.$nextTick(() => {
+                el.selectionStart = el.selectionEnd = start + 1;
+                el.focus();
+                this.autoResize(el);
+              });
+            } else {
+              this.sendMessage();
+            }
+          },
+          autoResize(el) {
+            if (!el) return;
+            el.style.height = 'auto';
+            el.style.height = Math.min(el.scrollHeight, 192) + 'px';
+          },
+          insertAtCursor(text) {
+            const el = this.$refs.chatInput;
+            if (!el) return;
+            const start = el.selectionStart;
+            const end = el.selectionEnd;
+            const before = this.input.slice(0, start);
+            const after = this.input.slice(end);
+            this.input = before + text + after;
+            this.$nextTick(() => {
+              el.selectionStart = el.selectionEnd = start + text.length;
+              el.focus();
+              this.autoResize(el);
+            });
+          },
+          handleDrop(event) {
+            event.preventDefault();
+            event.stopPropagation();
+            const uriList = event.dataTransfer.getData('text/uri-list');
+            if (uriList) {
+              const lines = uriList.split('\n').filter(l => l.trim() && !l.startsWith('#'));
+              for (const uri of lines) {
+                if (uri.startsWith('file://')) {
+                  const path = decodeURIComponent(uri.replace('file://', ''));
+                  this.insertAtCursor(path + '\n');
+                } else {
+                  this.insertAtCursor(uri + '\n');
+                }
+              }
+              return;
+            }
+            const files = Array.from(event.dataTransfer.files || []);
+            if (files.length) this.processFiles(files);
+          },
+          handleFileSelect(event) {
+            const files = Array.from(event.target.files || []);
+            if (files.length) this.processFiles(files);
+            event.target.value = '';
+          },
+          removePendingAttachment(index) {
+            this.pendingAttachments.splice(index, 1);
+          },
+          async uploadPendingFile(file) {
+            const form = new FormData();
+            form.append('file', file);
+            const d = await http.fetchJson('/api/chat/upload', { method: 'POST', body: form });
+            return {
+              filename: d.filename,
+              path: d.path,
+              url: d.url,
+              media_type: d.media_type || file.type || '',
+              size_bytes: d.size_bytes || file.size || 0,
+            };
+          },
+          async processFiles(files) {
+            for (const file of files) {
+              try {
+                const attachment = await this.uploadPendingFile(file);
+                this.pendingAttachments.push(attachment);
+              } catch (e) {
+                console.error(e);
+                this.insertAtCursor(`[file: ${file.name}] `);
+              }
+            }
           }
         };
       }
       function daydreamApp() {
+        const http = window.OpenCASHttp;
         return {
           windowDays: '7',
           keeperFilter: 'all',
@@ -2154,9 +2304,10 @@
           async loadSummary() {
             this.loadingSummary = true;
             try {
-              const params = new URLSearchParams({ window_days: String(this.windowDays), limit: '24' });
-              const response = await fetch('/api/daydream/summary?' + params.toString());
-              this.summary = await response.json();
+              this.summary = await http.fetchJson(http.buildUrl('/api/daydream/summary', {
+                window_days: String(this.windowDays),
+                limit: '24',
+              }));
             } catch (e) {
               console.error(e);
               this.summary = null;
@@ -2166,11 +2317,14 @@
           async loadReflections() {
             this.loadingReflections = true;
             try {
-              const params = new URLSearchParams({ limit: '30' });
-              if (this.keeperFilter === 'keepers') params.set('keeper_only', 'true');
-              if (this.keeperFilter === 'nonkeepers') params.set('keeper_only', 'false');
-              const response = await fetch('/api/daydream/reflections?' + params.toString());
-              const data = await response.json();
+              const data = await http.fetchJson(http.buildUrl('/api/daydream/reflections', {
+                limit: '30',
+                keeper_only: this.keeperFilter === 'keepers'
+                  ? 'true'
+                  : this.keeperFilter === 'nonkeepers'
+                    ? 'false'
+                    : undefined,
+              }));
               this.reflections = data.items || [];
             } catch (e) {
               console.error(e);
@@ -2181,9 +2335,10 @@
           async loadConflicts() {
             this.loadingConflicts = true;
             try {
-              const params = new URLSearchParams({ limit: '24', state: this.conflictState });
-              const response = await fetch('/api/daydream/conflicts?' + params.toString());
-              const data = await response.json();
+              const data = await http.fetchJson(http.buildUrl('/api/daydream/conflicts', {
+                limit: '24',
+                state: this.conflictState,
+              }));
               this.conflicts = data.items || [];
             } catch (e) {
               console.error(e);
@@ -2194,8 +2349,7 @@
           async loadPromotions() {
             this.loadingPromotions = true;
             try {
-              const response = await fetch('/api/daydream/promotions?limit=24');
-              this.promotions = await response.json();
+              this.promotions = await http.fetchJson('/api/daydream/promotions?limit=24');
             } catch (e) {
               console.error(e);
               this.promotions = { work_items: [], keeper_memories: [] };
@@ -2324,609 +2478,7 @@
           },
         };
       }
-      function memoryApp() {
-        return {
-          landscape: { stats: {}, nodes: [], edges: [], projection: { groups: [] } },
-          landscapeLoading: false,
-          landscapeChart: null,
-          query: '',
-          sessionId: '',
-          kind: '',
-          emotion: '',
-          maxAgeDays: '',
-          limit: 140,
-          minEdgeConfidence: 0.18,
-          edgeKind: '',
-          projectionMethod: 'auto',
-          includeMemories: 'true',
-          showEdges: 'true',
-          colorBy: 'emotion',
-          viewMode: 'atlas',
-          sizeBy: 'salience',
-          neighborhoodHops: 1,
-          selectedNodeId: '',
-          nodeDetail: null,
-          nodeDetailLoading: false,
-          retrieval: null,
-          retrievalLoading: false,
-          retrievalQuery: '',
-          retrievalLimit: 12,
-          retrievalMinConfidence: 0.15,
-          retrievalLambda: 0.5,
-          retrievalExpandGraph: 'true',
-          weights: {
-            semantic_score: 0.30,
-            keyword_score: 0.20,
-            recency_score: 0.15,
-            salience_score: 0.10,
-            graph_score: 0.10,
-            emotional_resonance: 0.08,
-            temporal_echo: 0.04,
-            reliability: 0.03,
-          },
-          initMemory() {
-            window.__openCASMemoryApp = this;
-            this.loadLandscape();
-          },
-          async loadLandscape() {
-            this.landscapeLoading = true;
-            try {
-              const params = new URLSearchParams({
-                limit: String(this.limit),
-                min_edge_confidence: String(this.minEdgeConfidence),
-                include_memories: String(String(this.includeMemories) === 'true'),
-                method: this.projectionMethod,
-              });
-              if (this.query.trim()) params.set('query', this.query.trim());
-              if (this.sessionId.trim()) params.set('session_id', this.sessionId.trim());
-              if (this.kind) params.set('kind', this.kind);
-              if (this.emotion) params.set('emotion', this.emotion);
-              if (String(this.maxAgeDays).trim()) params.set('max_age_days', String(this.maxAgeDays).trim());
-              if (this.edgeKind) params.set('edge_kind', this.edgeKind);
-              const r = await fetch('/api/memory/landscape?' + params.toString());
-              const d = await r.json();
-              this.landscape = d || { stats: {}, nodes: [], edges: [], projection: { groups: [] } };
-              const selectedStillVisible = (this.landscape.nodes || []).some(node => node.node_id === this.selectedNodeId);
-              if (!selectedStillVisible) {
-                this.selectedNodeId = this.landscape.nodes?.[0]?.node_id || '';
-              }
-              await this.loadNodeDetail();
-              this.renderLandscapeChart();
-            } catch (e) { console.error(e); }
-            this.landscapeLoading = false;
-          },
-          resetLandscapeFilters() {
-            this.query = '';
-            this.sessionId = '';
-            this.kind = '';
-            this.emotion = '';
-            this.maxAgeDays = '';
-            this.limit = 140;
-            this.minEdgeConfidence = 0.18;
-            this.edgeKind = '';
-            this.projectionMethod = 'auto';
-            this.includeMemories = 'true';
-            this.showEdges = 'true';
-            this.colorBy = 'emotion';
-            this.viewMode = 'atlas';
-            this.sizeBy = 'salience';
-            this.neighborhoodHops = 1;
-            this.nodeDetail = null;
-            this.loadLandscape();
-          },
-          resetRetrievalWeights() {
-            this.weights = {
-              semantic_score: 0.30,
-              keyword_score: 0.20,
-              recency_score: 0.15,
-              salience_score: 0.10,
-              graph_score: 0.10,
-              emotional_resonance: 0.08,
-              temporal_echo: 0.04,
-              reliability: 0.03,
-            };
-            this.retrievalLimit = 12;
-            this.retrievalMinConfidence = 0.15;
-            this.retrievalLambda = 0.5;
-            this.retrievalExpandGraph = 'true';
-          },
-          emotionOptions() {
-            return Object.keys(this.landscape?.stats?.emotion_distribution || {}).sort();
-          },
-          edgeKindOptions() {
-            return Object.keys(this.landscape?.stats?.edge_kind_distribution || {}).sort();
-          },
-          visibleNodes() {
-            return (this.landscape.nodes || []).filter(node => typeof node.x === 'number' && typeof node.y === 'number');
-          },
-          activeNodeSet() {
-            const nodes = this.visibleNodes();
-            if (this.viewMode !== 'selected' || !this.selectedNodeId) {
-              return new Set(nodes.map(node => node.node_id));
-            }
-            const adjacency = new Map();
-            (this.landscape.edges || []).forEach(edge => {
-              if (!adjacency.has(edge.source_node_id)) adjacency.set(edge.source_node_id, new Set());
-              if (!adjacency.has(edge.target_node_id)) adjacency.set(edge.target_node_id, new Set());
-              adjacency.get(edge.source_node_id).add(edge.target_node_id);
-              adjacency.get(edge.target_node_id).add(edge.source_node_id);
-            });
-            const visited = new Set([this.selectedNodeId]);
-            let frontier = new Set([this.selectedNodeId]);
-            for (let step = 0; step < Number(this.neighborhoodHops || 1); step += 1) {
-              const next = new Set();
-              frontier.forEach(nodeId => {
-                (adjacency.get(nodeId) || new Set()).forEach(otherId => {
-                  if (!visited.has(otherId)) {
-                    visited.add(otherId);
-                    next.add(otherId);
-                  }
-                });
-              });
-              frontier = next;
-              if (!frontier.size) break;
-            }
-            return visited;
-          },
-          displayNodes() {
-            const active = this.activeNodeSet();
-            return this.visibleNodes().filter(node => active.has(node.node_id));
-          },
-          displayEdges() {
-            const active = this.activeNodeSet();
-            return (this.landscape.edges || []).filter(edge =>
-              active.has(edge.source_node_id) && active.has(edge.target_node_id)
-            );
-          },
-          async selectNodeById(nodeId) {
-            this.selectedNodeId = nodeId;
-            await this.loadNodeDetail();
-            this.renderLandscapeChart();
-          },
-          findNode(nodeId) {
-            return (this.landscape.nodes || []).find(node => node.node_id === nodeId) || null;
-          },
-          async loadNodeDetail() {
-            if (!this.selectedNodeId) {
-              this.nodeDetail = null;
-              return;
-            }
-            this.nodeDetailLoading = true;
-            try {
-              const params = new URLSearchParams({
-                node_id: this.selectedNodeId,
-                limit: '18',
-                min_confidence: String(this.minEdgeConfidence),
-              });
-              if (this.edgeKind) params.set('edge_kind', this.edgeKind);
-              const response = await fetch('/api/memory/node-detail?' + params.toString());
-              if (!response.ok) throw new Error('node detail unavailable');
-              this.nodeDetail = await response.json();
-            } catch (e) {
-              console.error(e);
-              this.nodeDetail = null;
-            }
-            this.nodeDetailLoading = false;
-          },
-          embeddingPeers() {
-            const node = this.findNode(this.selectedNodeId);
-            if (!node || typeof node.x !== 'number' || typeof node.y !== 'number') return [];
-            return this.visibleNodes()
-              .filter(other =>
-                other.node_id !== node.node_id &&
-                other.projection_group === node.projection_group &&
-                typeof other.x === 'number' &&
-                typeof other.y === 'number'
-              )
-              .map(other => ({
-                ...other,
-                embedding_distance: Math.hypot(other.x - node.x, other.y - node.y),
-              }))
-              .sort((a, b) => a.embedding_distance - b.embedding_distance)
-              .slice(0, 6);
-          },
-          retrievalNodeIdSet() {
-            return new Set((this.retrieval?.results || []).map(item => item.node_id).filter(Boolean));
-          },
-          nodeColor(node) {
-            const emotion = node.affect?.primary_emotion || 'none';
-            const emotionPalette = {
-              joy: '#f59e0b',
-              sadness: '#60a5fa',
-              anger: '#f87171',
-              fear: '#c084fc',
-              surprise: '#fb7185',
-              disgust: '#34d399',
-              curiosity: '#38bdf8',
-              neutral: '#94a3b8',
-              none: '#64748b',
-            };
-            const kindPalette = {
-              turn: '#38bdf8',
-              observation: '#f97316',
-              action: '#22c55e',
-              compaction: '#facc15',
-              consolidation: '#e879f9',
-              memory: '#a78bfa',
-            };
-            if (this.colorBy === 'kind') {
-              return kindPalette[node.kind] || '#94a3b8';
-            }
-            if (this.colorBy === 'embedding_model') {
-              const models = Object.keys(this.landscape?.stats?.embedding_model_distribution || {});
-              const index = Math.max(0, models.indexOf(node.embedding_model_id));
-              return ['#38bdf8', '#34d399', '#f59e0b', '#f87171', '#a78bfa', '#fb7185'][index % 6] || '#94a3b8';
-            }
-            if (this.colorBy === 'salience') {
-              const salience = Number(node.salience || 0);
-              const hue = Math.max(0, 210 - Math.min(salience, 10) * 14);
-              return `hsl(${hue} 85% 60%)`;
-            }
-            return emotionPalette[emotion] || emotionPalette.none;
-          },
-          nodeRadius(node) {
-            if (this.sizeBy === 'confidence') {
-              const confidence = Number(node.confidence_score ?? 0.8);
-              return 5 + confidence * 8;
-            }
-            if (this.sizeBy === 'connections') {
-              return 5 + Math.min(Number(node.connection_count || 0), 12);
-            }
-            return 5 + Math.min(Number(node.salience || 0), 10) * 0.9;
-          },
-          edgeColor(edge) {
-            const palette = {
-              semantic: 'rgba(56, 189, 248, 0.35)',
-              emotional: 'rgba(244, 114, 182, 0.35)',
-              temporal: 'rgba(250, 204, 21, 0.35)',
-              conceptual: 'rgba(168, 85, 247, 0.35)',
-              relational: 'rgba(34, 197, 94, 0.35)',
-              causal: 'rgba(248, 113, 113, 0.35)',
-              distilled_from: 'rgba(148, 163, 184, 0.28)',
-            };
-            return palette[edge.kind] || 'rgba(148, 163, 184, 0.28)';
-          },
-          renderLandscapeChart() {
-            const nodes = this.displayNodes();
-            const canvas = document.getElementById('memoryLandscapeChart');
-            if (!canvas || !nodes.length) return;
-            const ctx = canvas.getContext('2d');
-            if (this.landscapeChart) {
-              this.landscapeChart.destroy();
-            }
-            const nodeIndexById = new Map(nodes.map((node, index) => [node.node_id, index]));
-            const edges = String(this.showEdges) === 'true'
-              ? this.displayEdges().filter(edge =>
-                  nodeIndexById.has(edge.source_node_id) && nodeIndexById.has(edge.target_node_id)
-                )
-              : [];
-            const selectedHighlights = this.retrievalNodeIdSet();
-            const app = this;
-            const edgePlugin = {
-              id: 'memoryEdges',
-              afterDatasetsDraw(chart) {
-                if (!edges.length) return;
-                const meta = chart.getDatasetMeta(0);
-                const chartPoints = meta.data || [];
-                const context = chart.ctx;
-                context.save();
-                edges.forEach(edge => {
-                  const source = chartPoints[nodeIndexById.get(edge.source_node_id)];
-                  const target = chartPoints[nodeIndexById.get(edge.target_node_id)];
-                  if (!source || !target) return;
-                  context.beginPath();
-                  context.strokeStyle = app.edgeColor(edge);
-                  context.lineWidth = 0.6 + Math.max(Number(edge.strength || 0), 0) * 2.2;
-                  context.moveTo(source.x, source.y);
-                  context.lineTo(target.x, target.y);
-                  context.stroke();
-                });
-                context.restore();
-              }
-            };
-            this.landscapeChart = new Chart(ctx, {
-              type: 'scatter',
-              plugins: [edgePlugin],
-              data: {
-                datasets: [{
-                  label: 'Memory atlas',
-                  data: nodes.map(node => ({ x: node.x, y: node.y })),
-                  backgroundColor: nodes.map(node => this.nodeColor(node)),
-                  pointRadius: nodes.map(node => this.nodeRadius(node)),
-                  pointBorderWidth: nodes.map(node => {
-                    if (node.node_id === this.selectedNodeId) return 3;
-                    return selectedHighlights.has(node.node_id) ? 2 : 1;
-                  }),
-                  pointBorderColor: nodes.map(node => {
-                    if (node.node_id === this.selectedNodeId) return '#f8fafc';
-                    return selectedHighlights.has(node.node_id) ? '#facc15' : 'rgba(15, 23, 42, 0.85)';
-                  }),
-                  pointStyle: nodes.map(node => node.node_type === 'memory' ? 'rectRounded' : 'circle'),
-                }]
-              },
-              options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                onClick: (_event, elements) => {
-                  if (!elements.length) return;
-                  const node = nodes[elements[0].index];
-                  if (!node) return;
-                  this.selectNodeById(node.node_id);
-                },
-                plugins: {
-                  legend: { display: false },
-                  zoom: {
-                    zoom: {
-                      wheel: { enabled: true },
-                      pinch: { enabled: true },
-                      drag: { enabled: true },
-                      mode: 'xy',
-                    },
-                    pan: {
-                      enabled: true,
-                      mode: 'xy',
-                    },
-                  },
-                  tooltip: {
-                    callbacks: {
-                      label: (context) => {
-                        const node = nodes[context.dataIndex];
-                        if (!node) return '';
-                        const bits = [
-                          `${node.node_type}:${node.kind || node.node_type}`,
-                          `salience ${Number(node.salience || 0).toFixed(2)}`,
-                          `links ${node.connection_count || 0}`,
-                        ];
-                        if (node.affect?.primary_emotion) bits.push(`emotion ${node.affect.primary_emotion}`);
-                        if (node.embedding_model_id) bits.push(node.embedding_model_id);
-                        return bits;
-                      }
-                    }
-                  }
-                },
-                scales: {
-                  x: { title: { display: true, text: 'Embedding lanes' }, grid: { color: 'rgba(255,255,255,0.05)' } },
-                  y: { title: { display: true, text: 'Local neighborhood' }, grid: { color: 'rgba(255,255,255,0.05)' } }
-                }
-              }
-            });
-          },
-          landscapeSummaryMarkup() {
-            const stats = this.landscape?.stats || {};
-            const projectionGroups = this.landscape?.projection?.groups || [];
-            if (!this.landscape.nodes?.length) {
-              return '<p class="muted">Load the atlas to see memory density, embedding families, and edge coverage.</p>';
-            }
-            let html = `<div class="stat-grid">
-              <div><div class="stat-value">${stats.visible_episode_count || 0}</div><div class="stat-label">Episodes</div></div>
-              <div><div class="stat-value">${stats.visible_memory_count || 0}</div><div class="stat-label">Memories</div></div>
-              <div><div class="stat-value">${stats.visible_edge_count || 0}</div><div class="stat-label">Edges</div></div>
-              <div><div class="stat-value">${Number(stats.time_span_days || 0).toFixed(1)}d</div><div class="stat-label">Time Span</div></div>
-              <div><div class="stat-value">${Number(stats.freshest_visible_age_days || 0).toFixed(1)}d</div><div class="stat-label">Freshest</div></div>
-              <div><div class="stat-value">${Number(stats.average_edge_strength || 0).toFixed(2)}</div><div class="stat-label">Avg Edge Strength</div></div>
-              <div><div class="stat-value">${stats.embeddingless_node_count || 0}</div><div class="stat-label">No Embedding</div></div>
-              <div><div class="stat-value">${this.displayNodes().length}</div><div class="stat-label">Visible Nodes</div></div>
-            </div>`;
-            html += `<div class="pill-row mt-3">`;
-            projectionGroups.forEach(group => {
-              const label = group.dimension ? `${group.dimension}d` : 'no embedding';
-              html += `<span class="badge">${escapeHtml(label)} • ${group.count}</span>`;
-            });
-            html += `</div>`;
-            html += `<div class="helper-text mt-3">Projection: <strong>${escapeHtml(stats.projection_method || '-')}</strong> • Edge floor: ${escapeHtml(String(stats.min_edge_confidence ?? '-'))} • Edge kind: ${escapeHtml(stats.edge_kind || 'all')}</div>`;
-            return html;
-          },
-          atlasLegendMarkup() {
-            const groups = (this.landscape?.projection?.groups || []).map(group => {
-              const label = group.dimension ? `${group.dimension}d` : 'no embedding';
-              return `${label}: ${group.count}`;
-            });
-            const edgeKinds = Object.entries(this.landscape?.stats?.edge_kind_distribution || {})
-              .map(([kind, count]) => `${kind}: ${count}`)
-              .join(' | ');
-            return `Color: <strong>${escapeHtml(this.colorBy)}</strong> • Size: <strong>${escapeHtml(this.sizeBy)}</strong> • View: <strong>${escapeHtml(this.viewMode)}</strong> • Groups: ${escapeHtml(groups.join(' | ') || 'none')}<br>Edge kinds: ${escapeHtml(edgeKinds || 'none visible')}`;
-          },
-          resetZoom() {
-            if (this.landscapeChart && typeof this.landscapeChart.resetZoom === 'function') {
-              this.landscapeChart.resetZoom();
-            }
-          },
-          selectedNodeMarkup() {
-            const node = this.findNode(this.selectedNodeId);
-            if (!node) {
-              return '<p class="muted">Select a node from the atlas to inspect its content, affect, and strongest connections.</p>';
-            }
-            const detail = this.nodeDetail;
-            const detailEdges = detail?.edges || [];
-            const detailStats = detail?.stats || {};
-            const neighbors = detailEdges
-              .map(edge => {
-                const otherId = edge.other_node_id || (edge.source_node_id === node.node_id ? edge.target_node_id : edge.source_node_id);
-                const otherNode = (detail?.neighbors || []).find(item => item.node_id === otherId) || this.findNode(otherId);
-                return { edge, node: otherNode };
-              })
-              .filter(item => item.node)
-              .slice(0, 8);
-            const connectionMix = {};
-            ((this.landscape.edges || []).filter(edge => edge.source_node_id === node.node_id || edge.target_node_id === node.node_id)).forEach(edge => {
-              connectionMix[edge.kind] = (connectionMix[edge.kind] || 0) + 1;
-            });
-            const connectionMixText = Object.entries(connectionMix)
-              .sort((a, b) => b[1] - a[1])
-              .map(([kind, count]) => `${kind} ${count}`)
-              .join(' • ');
-            const peers = this.embeddingPeers();
-            let html = `<div class="stack">
-              <div class="pill-row">
-                <span class="badge">${escapeHtml(node.node_type)}</span>
-                <span class="badge">${escapeHtml(node.kind || '-')}</span>
-                ${node.affect?.primary_emotion ? `<span class="badge">${escapeHtml(node.affect.primary_emotion)}</span>` : ''}
-              </div>
-              <p class="muted">Created: ${formatDateTime(node.created_at)} • Age: ${escapeHtml(String(node.age_days ?? '-'))}d</p>
-              <p class="muted">Embedding: ${escapeHtml(node.embedding_model_id || 'none')} • Group: ${escapeHtml(node.projection_group || '-')}</p>
-              <p class="muted">Salience: ${escapeHtml(String(node.salience ?? '-'))} • Confidence: ${escapeHtml(String(node.confidence_score ?? '-'))} • Connections: ${escapeHtml(String(node.connection_count ?? 0))}</p>
-              <div class="json">${escapeHtml(node.content || '')}</div>`;
-            html += `<p class="muted mt-3">Connection mix: ${escapeHtml(connectionMixText || 'none')}</p>`;
-            if (this.nodeDetailLoading) {
-              html += `<p class="muted">Loading neighborhood detail…</p>`;
-            } else if (detail) {
-              html += `<div class="stat-grid mt-3">
-                <div><div class="stat-value">${detailStats.neighbor_count || 0}</div><div class="stat-label">Neighbors</div></div>
-                <div><div class="stat-value">${detailStats.edge_count || 0}</div><div class="stat-label">Edges</div></div>
-              </div>`;
-            }
-            if (node.affect) {
-              html += `<div class="memory-score-grid mt-3">
-                <div><span class="muted">valence</span><strong>${escapeHtml(String(node.affect.valence ?? '-'))}</strong></div>
-                <div><span class="muted">arousal</span><strong>${escapeHtml(String(node.affect.arousal ?? '-'))}</strong></div>
-                <div><span class="muted">intensity</span><strong>${escapeHtml(String(node.affect.intensity ?? '-'))}</strong></div>
-                <div><span class="muted">certainty</span><strong>${escapeHtml(String(node.affect.certainty ?? '-'))}</strong></div>
-              </div>`;
-            }
-            if (node.node_type === 'memory' && (node.source_episode_ids || []).length) {
-              html += `<h5 class="mt-4">Source Episodes</h5><div class="pill-row">`;
-              (node.source_episode_ids || []).forEach(sourceId => {
-                html += `<button class="btn-link" onclick="window.__openCASMemoryApp.selectNodeById('episode:${escapeHtml(sourceId)}')">${escapeHtml(sourceId)}</button>`;
-              });
-              html += `</div>`;
-            }
-            if (peers.length) {
-              html += '<h5 class="mt-4">Nearest Embedding Peers</h5><table class="data-table"><thead><tr><th>Peer</th><th>Distance</th><th>Kind</th></tr></thead><tbody>';
-              peers.forEach(peer => {
-                html += `<tr>
-                  <td><button class="btn-link" onclick="window.__openCASMemoryApp.selectNodeById('${escapeHtml(peer.node_id)}')">${escapeHtml(peer.label || peer.node_id)}</button></td>
-                  <td>${escapeHtml(Number(peer.embedding_distance || 0).toFixed(3))}</td>
-                  <td>${escapeHtml(peer.kind || peer.node_type || '-')}</td>
-                </tr>`;
-              });
-              html += '</tbody></table>';
-            }
-            if (neighbors.length) {
-              html += '<h5 class="mt-4">Strongest Links</h5><table class="data-table"><thead><tr><th>Neighbor</th><th>Kind</th><th>Strength</th><th>Dominant Signal</th><th>Time Gap</th></tr></thead><tbody>';
-              neighbors.forEach(({ edge, node: other }) => {
-                html += `<tr>
-                  <td><button class="btn-link" onclick="window.__openCASMemoryApp.selectNodeById('${escapeHtml(other?.node_id || '')}')">${escapeHtml(other?.label || other?.node_id || '-')}</button></td>
-                  <td>${escapeHtml(edge.kind || '-')}</td>
-                  <td>${escapeHtml(String(edge.strength ?? '-'))}</td>
-                  <td>${escapeHtml(edge.strongest_signal || '-')} ${edge.strongest_signal_weight != null ? escapeHtml(Number(edge.strongest_signal_weight).toFixed(2)) : ''}</td>
-                  <td>${escapeHtml(String(edge.time_distance_days ?? '-'))}</td>
-                </tr>`;
-              });
-              html += '</tbody></table>';
-            }
-            return html + '</div>';
-          },
-          episodeListMarkup() {
-            const nodes = (this.landscape.nodes || [])
-              .filter(node => node.node_type === 'episode')
-              .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
-            if (!nodes.length) {
-              return '<p class="muted">No episode nodes in the current atlas scope.</p>';
-            }
-            let html = '<div class="episode-list">';
-            nodes.forEach(node => {
-              html += `<div class="episode ${node.node_id === this.selectedNodeId ? 'episode-active' : ''}">
-                <div class="episode-header">
-                  <span class="badge">${escapeHtml(node.kind || 'episode')}</span>
-                  <span class="muted">${formatDateTime(node.created_at)}</span>
-                  <span class="muted">links ${escapeHtml(String(node.connection_count || 0))}</span>
-                </div>
-                <div class="episode-body">${escapeHtml(node.content || '')}</div>
-                <div class="episode-footer muted">
-                  ${escapeHtml(node.affect?.primary_emotion || '-')} • salience ${escapeHtml(String(node.salience ?? '-'))} • ${escapeHtml(node.embedding_model_id || 'no embedding')}
-                </div>
-                <div class="inline-actions mt-2">
-                  <button class="btn-link" onclick="window.__openCASMemoryApp.selectNodeById('${escapeHtml(node.node_id)}')">Focus in atlas</button>
-                </div>
-              </div>`;
-            });
-            return html + '</div>';
-          },
-          async inspectRetrieval() {
-            if (!this.retrievalQuery.trim()) return;
-            this.retrievalLoading = true;
-            try {
-              const params = new URLSearchParams({
-                query: this.retrievalQuery.trim(),
-                limit: String(this.retrievalLimit),
-                min_confidence: String(this.retrievalMinConfidence),
-                lambda_param: String(this.retrievalLambda),
-                expand_graph: String(String(this.retrievalExpandGraph) === 'true'),
-                semantic_weight: String(this.weights.semantic_score),
-                keyword_weight: String(this.weights.keyword_score),
-                recency_weight: String(this.weights.recency_score),
-                salience_weight: String(this.weights.salience_score),
-                graph_weight: String(this.weights.graph_score),
-                emotional_weight: String(this.weights.emotional_resonance),
-                temporal_weight: String(this.weights.temporal_echo),
-                reliability_weight: String(this.weights.reliability),
-              });
-              if (this.sessionId.trim()) params.set('session_id', this.sessionId.trim());
-              const response = await fetch('/api/memory/retrieval-inspect?' + params.toString());
-              this.retrieval = await response.json();
-              const firstNodeId = this.retrieval?.results?.[0]?.node_id;
-              if (firstNodeId) {
-                await this.selectNodeById(firstNodeId);
-              }
-              this.renderLandscapeChart();
-            } catch (e) { console.error(e); }
-            this.retrievalLoading = false;
-          },
-          retrievalMarkup() {
-            if (this.retrievalLoading) {
-              return '<p class="muted">Inspecting retrieval…</p>';
-            }
-            if (!this.retrieval) {
-              return '<p class="muted">Run a retrieval query to inspect score breakdowns and selected memories.</p>';
-            }
-            const results = this.retrieval.results || [];
-            const candidates = (this.retrieval.candidates || []).slice(0, 18);
-            let html = `<div class="stat-grid">
-              <div><div class="stat-value">${results.length}</div><div class="stat-label">Returned</div></div>
-              <div><div class="stat-value">${this.retrieval.meta?.semantic_seed_count || 0}</div><div class="stat-label">Semantic Seeds</div></div>
-              <div><div class="stat-value">${this.retrieval.meta?.keyword_seed_count || 0}</div><div class="stat-label">Keyword Seeds</div></div>
-              <div><div class="stat-value">${candidates.length}</div><div class="stat-label">Top Candidates</div></div>
-            </div>`;
-            if (results.length) {
-              html += '<h5 class="mt-4">Selected Results</h5><table class="data-table"><thead><tr><th>Memory</th><th>Type</th><th>Score</th><th>Action</th></tr></thead><tbody>';
-              results.forEach(item => {
-                html += `<tr>
-                  <td>${escapeHtml(item.content_preview || item.content || '-')}</td>
-                  <td>${escapeHtml(item.source_type || '-')}</td>
-                  <td>${escapeHtml(String(item.score ?? '-'))}</td>
-                  <td><button class="btn-link" onclick="window.__openCASMemoryApp.selectNodeById('${escapeHtml(item.node_id || '')}')">Focus</button></td>
-                </tr>`;
-              });
-              html += '</tbody></table>';
-            }
-            html += '<h5 class="mt-4">Candidate Breakdown</h5><table class="data-table"><thead><tr><th>Candidate</th><th>Signals</th><th>Score Path</th><th>Selected</th></tr></thead><tbody>';
-            candidates.forEach(item => {
-              const signals = [
-                `sem ${Number(item.semantic_score || 0).toFixed(2)}`,
-                `key ${Number(item.keyword_score || 0).toFixed(2)}`,
-                `graph ${Number(item.graph_score || 0).toFixed(2)}`,
-                `emo ${Number(item.emotional_resonance || 0).toFixed(2)}`,
-              ].join(' • ');
-              const scorePath = [
-                `base ${Number(item.base_score || 0).toFixed(2)}`,
-                `somatic ${Number(item.somatic_bonus || 0).toFixed(2)}`,
-                `× rel ${Number(item.reliability_multiplier || 0).toFixed(2)}`,
-                `× musubi ${Number(item.relational_multiplier || 0).toFixed(2)}`,
-                `× conf ${Number(item.confidence_multiplier || 0).toFixed(2)}`,
-                `= ${Number(item.final_score || 0).toFixed(2)}`,
-              ].join(' • ');
-              html += `<tr>
-                <td><button class="btn-link" onclick="window.__openCASMemoryApp.selectNodeById('${escapeHtml(item.source_type + ':' + item.source_id)}')">${escapeHtml(_truncateText(item.content || '-', 88))}</button></td>
-                <td>${escapeHtml(signals)}</td>
-                <td>${escapeHtml(scorePath)}</td>
-                <td>${item.selected ? '<span class="badge ok">yes</span>' : '<span class="badge">no</span>'}</td>
-              </tr>`;
-            });
-            html += '</tbody></table>';
-            return html;
-          }
-        };
-      }
+      // memoryApp() lives in /dashboard/static/js/memory_app.js.
       function renderSessions(d) {
         if (!d.sessions.length) return '<p class="muted">No sessions.</p>';
         let html = '<table class="data-table"><thead><tr><th>Session</th><th>Messages</th><th>Last Active</th></tr></thead><tbody>';
@@ -3527,13 +3079,30 @@
       }
       function renderCommitments(d) {
         const items = d.items || [];
+        const summary = d.summary || {};
+        const statusCounts = summary.status_counts || {};
+        const lastConsolidation = summary.last_consolidation || {};
         let html = `<div class="health-header"><span class="badge">${items.length}</span><span class="muted">active commitments</span></div>`;
+        if (Object.keys(statusCounts).length) {
+          html += `<p class="muted">active ${statusCounts.active ?? 0} • blocked ${statusCounts.blocked ?? 0} • completed ${statusCounts.completed ?? 0} • abandoned ${statusCounts.abandoned ?? 0}</p>`;
+        }
+        if (lastConsolidation.available) {
+          html += `<p class="muted">Last consolidation ${formatDateTime(lastConsolidation.timestamp)} • merged ${lastConsolidation.commitments_consolidated ?? 0} • chat recovery ${lastConsolidation.commitments_extracted_from_chat ?? 0} • work created ${lastConsolidation.commitment_work_objects_created ?? 0}</p>`;
+        }
         if (!items.length) return html + '<p class="muted">No commitments.</p>';
         html += '<table class="data-table"><thead><tr><th>Content</th><th>Status</th><th>Priority</th><th>Tags</th><th>Deadline</th><th>Inspect</th></tr></thead><tbody>';
         for (const item of items) {
           const statusClass = item.status === 'active' ? 'ok' : item.status === 'blocked' ? 'warn' : 'fail';
+          const lifecycle = item.lifecycle || {};
+          const lifecycleBits = [
+            lifecycle.source ? `source ${lifecycle.source}` : null,
+            lifecycle.blocked_reason ? `blocked ${lifecycle.blocked_reason}` : null,
+            lifecycle.resume_reason ? `resumed ${lifecycle.resume_reason}` : null,
+            lifecycle.merge_rationale ? `merge ${lifecycle.merge_rationale}` : null,
+            lifecycle.extracted_from_chat ? 'chat recovery' : null,
+          ].filter(Boolean).join(' • ');
           html += `<tr>
-            <td>${escapeHtml(item.content || '')}</td>
+            <td>${escapeHtml(item.content || '')}${lifecycleBits ? `<div class="muted mt-2">${escapeHtml(lifecycleBits)}</div>` : ''}${lifecycle.raw_excerpt ? `<div class="muted mt-2">${escapeHtml(lifecycle.raw_excerpt)}</div>` : ''}</td>
             <td><span class="badge ${statusClass}">${escapeHtml(item.status || '-')}</span></td>
             <td>${item.priority ?? '-'}</td>
             <td>${escapeHtml((item.tags || []).join(', ') || '-')}</td>
@@ -3547,11 +3116,32 @@
       function renderCommitmentDetail(d) {
         if (!d.found) return '<p class="muted">Commitment not found.</p>';
         const item = d.commitment || {};
+        const lifecycle = item.lifecycle || {};
         const uiId = encodeURIComponent(item.commitment_id || '');
         let html = '<h3>Commitment Detail</h3>';
         html += `<p class="muted">Commitment: <code>${escapeHtml(item.commitment_id || '-')}</code></p>`;
         html += `<p class="muted">Priority: ${item.priority ?? '-'}</p>`;
         html += `<p class="muted">Updated: ${formatDateTime(item.updated_at || item.created_at)}</p>`;
+        html += `<p class="muted">Source: ${escapeHtml(lifecycle.source || '-')}</p>`;
+        if (lifecycle.raw_excerpt) {
+          html += `<p class="muted">Raw excerpt: ${escapeHtml(lifecycle.raw_excerpt)}</p>`;
+        }
+        const lifecycleLines = [
+          lifecycle.blocked_reason ? `Blocked reason: ${lifecycle.blocked_reason}` : null,
+          lifecycle.resume_reason ? `Resume reason: ${lifecycle.resume_reason}` : null,
+          lifecycle.previous_blocked_reason ? `Previous blocked reason: ${lifecycle.previous_blocked_reason}` : null,
+          lifecycle.resume_policy ? `Resume policy: ${lifecycle.resume_policy}` : null,
+          lifecycle.merge_rationale ? `Merge rationale: ${lifecycle.merge_rationale}` : null,
+          lifecycle.normalization_source ? `Normalization: ${lifecycle.normalization_source}` : null,
+          lifecycle.capture_confidence !== undefined && lifecycle.capture_confidence !== null ? `Capture confidence: ${lifecycle.capture_confidence}` : null,
+          lifecycle.source_session_id ? `Source session: ${lifecycle.source_session_id}` : null,
+          lifecycle.source_episode_id ? `Source episode: ${lifecycle.source_episode_id}` : null,
+          lifecycle.role_source ? `Role source: ${lifecycle.role_source}` : null,
+          lifecycle.previous_user_turn ? `Previous user turn: ${lifecycle.previous_user_turn}` : null,
+        ].filter(Boolean);
+        if (lifecycleLines.length) {
+          html += `<div class="muted mt-2">${lifecycleLines.map(line => `<div>${escapeHtml(line)}</div>`).join('')}</div>`;
+        }
         html += `<label class="muted" for="commitment-status-${uiId}">Status</label>
           <select id="commitment-status-${uiId}" class="input mt-2">
             ${['active','blocked','completed','abandoned'].map(status =>
@@ -3561,6 +3151,9 @@
         html += `<label class="muted mt-4" for="commitment-content-${uiId}">Content</label>
           <textarea id="commitment-content-${uiId}" class="input mt-2" rows="6">${escapeHtml(item.content || '')}</textarea>`;
         html += `<p class="muted mt-4">Tags: ${escapeHtml((item.tags || []).join(', ') || '-')}</p>`;
+        if ((item.linked_work_ids || []).length || (item.linked_task_ids || []).length) {
+          html += `<p class="muted mt-2">Linked work: ${escapeHtml((item.linked_work_ids || []).join(', ') || '-')} • linked tasks: ${escapeHtml((item.linked_task_ids || []).join(', ') || '-')}</p>`;
+        }
         html += `<div class="inline-actions mt-4">
           <button class="button-secondary" onclick="saveCommitmentForm('${uiId}')">Save Commitment</button>
         </div>`;
@@ -3740,16 +3333,21 @@
       }
       function renderConfigOverview(d) {
         const overview = d.overview || {};
+        window.__configOverviewCache = overview;
         const current = overview.current || {};
         const paths = overview.paths || {};
         const pathStatus = overview.path_status || {};
         const providers = overview.providers || [];
         const profiles = overview.auth_profiles || [];
+        const providerCatalog = overview.provider_setup_catalog || [];
         const credentialHealth = overview.credential_health || {};
         const credentialCopy = overview.credential_copy || {};
         const materializedBundle = overview.materialized_bundle || {};
         const availableModels = overview.available_models || [];
         const embeddingModels = overview.available_embedding_models || [];
+        const routing = current.model_routing || {};
+        const configuredRouting = routing.configured || {};
+        const effectiveRouting = routing.effective || {};
         const effectiveChatModel = current.default_llm_model || '';
         const effectiveEmbeddingModel = current.embedding_model_id || '';
         const configuredChatModel = current.configured_default_llm_model || '';
@@ -3757,6 +3355,8 @@
         const chatOptions = availableModels.length ? availableModels : (effectiveChatModel ? [effectiveChatModel] : ['']);
         const embeddingOptions = embeddingModels.length ? embeddingModels : (effectiveEmbeddingModel ? [effectiveEmbeddingModel] : ['local-fallback']);
         const configModeClass = overview.config_mode === 'copied-local' ? 'ok' : overview.config_mode === 'custom-linked' ? 'warn' : '';
+        const providerMap = Object.fromEntries(providers.map(provider => [provider.provider_id, provider]));
+        const uiMessage = window.__configUiMessage || null;
         const pathRow = (label, key) => {
           const entry = pathStatus[key] || {};
           const badge = entry.path
@@ -3764,8 +3364,111 @@
             : '<span class="badge">unset</span>';
           return `<tr><td>${escapeHtml(label)}</td><td><code>${escapeHtml(paths[key] || '-')}</code></td><td>${badge}</td></tr>`;
         };
+        const modelInput = (id, label, value, placeholder = 'provider/model') => `
+          <label class="field-label">${escapeHtml(label)}
+            <input id="${id}" class="input" list="config-model-options" value="${escapeHtml(value || '')}" placeholder="${escapeHtml(placeholder)}" />
+          </label>`;
+        const renderRoutingMap = Object.entries(effectiveRouting).map(([tier, modelId]) => `
+          <div class="config-mini-card">
+            <div class="stat-label">${escapeHtml(tier.replace('_', ' '))}</div>
+            <div class="wrap-code">${escapeHtml(modelId || '-')}</div>
+          </div>`).join('');
+        const providerCards = providerCatalog.map(family => {
+          const presets = family.presets || [];
+          if (!presets.length) return '';
+          const configuredPreset = presets.find(preset => providerMap[preset.provider_id]) || null;
+          const selectedPreset = configuredPreset || presets.find(preset => preset.recommended) || presets[0];
+          const existingProvider = configuredPreset ? providerMap[configuredPreset.provider_id] : null;
+          const existingProfileId = existingProvider?.profile_ids?.[0] || '';
+          const defaultProfileLabel = existingProfileId.includes(':')
+            ? existingProfileId.split(':').slice(1).join(':')
+            : 'default';
+          const presetOptions = presets.map(preset => `
+            <option
+              value="${escapeHtml(preset.preset_id)}"
+              data-auth-kind="${escapeHtml(preset.auth_kind || 'api_key')}"
+              data-supports-auth-profile="${preset.supports_auth_profile ? 'true' : 'false'}"
+              data-supports-api-key="${preset.supports_api_key ? 'true' : 'false'}"
+              data-supports-custom-base-url="${preset.supports_custom_base_url ? 'true' : 'false'}"
+              data-supports-custom-models="${preset.supports_custom_models ? 'true' : 'false'}"
+              data-label="${escapeHtml(preset.label || '')}"
+              data-help-text="${escapeHtml(preset.help_text || '')}"
+              ${preset.preset_id === selectedPreset.preset_id ? 'selected' : ''}>
+              ${escapeHtml(preset.label || preset.preset_id)}
+            </option>`).join('');
+          const configuredBadge = configuredPreset
+            ? `<span class="badge ok">configured</span>`
+            : '<span class="badge">not configured</span>';
+          const currentModels = existingProvider?.configured_model_ids?.join('\n') || '';
+          const currentBaseUrl = existingProvider?.base_url || '';
+          return `<div class="config-card provider-setup-card">
+            <div class="health-header">
+              <span class="badge">${escapeHtml(family.display_name || family.family_id)}</span>
+              ${configuredBadge}
+            </div>
+            <p class="muted">${escapeHtml(family.description || '')}</p>
+            <form onsubmit="saveProviderSetup(event, '${family.family_id}')">
+              <label class="field-label">Connection style
+                <select id="provider-preset-${family.family_id}" class="input" onchange="updateProviderSetupCard('${family.family_id}')">
+                  ${presetOptions}
+                </select>
+              </label>
+              <div id="provider-profile-wrap-${family.family_id}" class="mt-3">
+                <label class="field-label">Profile label
+                  <input id="provider-profile-${family.family_id}" class="input" value="${escapeHtml(defaultProfileLabel)}" placeholder="default" />
+                </label>
+              </div>
+              <div id="provider-api-key-wrap-${family.family_id}" class="mt-3">
+                <label class="field-label">API key
+                  <input id="provider-api-key-${family.family_id}" class="input" type="password" placeholder="Paste provider API key" />
+                </label>
+              </div>
+              <div id="provider-access-wrap-${family.family_id}" class="mt-3">
+                <label class="field-label">Access token
+                  <input id="provider-access-${family.family_id}" class="input" type="password" placeholder="Paste current access token" />
+                </label>
+              </div>
+              <div id="provider-refresh-wrap-${family.family_id}" class="mt-3">
+                <label class="field-label">Refresh token
+                  <input id="provider-refresh-${family.family_id}" class="input" type="password" placeholder="Optional refresh token" />
+                </label>
+              </div>
+              <div id="provider-expires-wrap-${family.family_id}" class="mt-3">
+                <label class="field-label">Access token expiry (unix ms)
+                  <input id="provider-expires-${family.family_id}" class="input" type="number" min="0" step="1" placeholder="Optional expiry timestamp" />
+                </label>
+              </div>
+              <div id="provider-base-url-wrap-${family.family_id}" class="mt-3">
+                <label class="field-label">Base URL override
+                  <input id="provider-base-url-${family.family_id}" class="input" value="${escapeHtml(currentBaseUrl)}" placeholder="Leave blank for provider default" />
+                </label>
+              </div>
+              <div id="provider-custom-models-wrap-${family.family_id}" class="mt-3">
+                <label class="field-label">Configured custom model ids
+                  <textarea id="provider-custom-models-${family.family_id}" class="input" rows="4" placeholder="One model id per line">${escapeHtml(currentModels)}</textarea>
+                </label>
+              </div>
+              <div id="provider-headers-wrap-${family.family_id}" class="mt-3">
+                <label class="field-label">Advanced headers (JSON)
+                  <textarea id="provider-headers-${family.family_id}" class="input" rows="3" placeholder='{"x-foo":"bar"}'></textarea>
+                </label>
+              </div>
+              <div class="inline-actions mt-4">
+                <button type="submit">Save Setup</button>
+                ${configuredPreset ? `<button type="button" class="button-secondary" onclick="testProviderConnection('${encodeURIComponent(configuredPreset.provider_id || '')}', '${encodeURIComponent(existingProfileId)}', '')">Verify Current</button>` : ''}
+              </div>
+              <div id="provider-current-summary-${family.family_id}" class="helper-text mt-3"></div>
+              <p class="muted mt-3">Usage note: ${escapeHtml(family.usage_note || 'Model usage stays visible in the Usage tab.')}</p>
+            </form>
+          </div>`;
+        }).join('');
         let html = `<h3>OpenLLMAuth Relationship</h3>
           <p class="muted">This panel shows what OpenCAS is actually wired to use right now, not just what the bootstrap config says in theory.</p>`;
+        if (uiMessage?.text) {
+          const badgeClass = uiMessage.kind === 'error' ? 'fail' : uiMessage.kind === 'ok' ? 'ok' : 'warn';
+          const badgeLabel = uiMessage.kind === 'error' ? 'error' : uiMessage.kind === 'ok' ? 'saved' : 'note';
+          html += `<div class="helper-text mt-3"><span class="badge ${badgeClass}">${badgeLabel}</span> ${escapeHtml(uiMessage.text)}</div>`;
+        }
         html += `<div class="stat-grid">
           <div><div class="stat-value">${providers.length}</div><div class="stat-label">Configured Providers</div></div>
           <div><div class="stat-value">${profiles.length}</div><div class="stat-label">Auth Profiles</div></div>
@@ -3811,6 +3514,46 @@
             </tbody></table>
           </div>
         </div>`;
+        html += `<h4 class="mt-4">Complexity Routing</h4>
+          <p class="muted">Single-model mode pins every task to one model. Tiered mode lets OpenCAS use Light, Standard, High, and Extra High lanes, and automatically climb when the loop grows harder.</p>
+          <datalist id="config-model-options">
+            ${chatOptions.map(modelId => `<option value="${escapeHtml(modelId)}"></option>`).join('')}
+          </datalist>
+          <form class="config-card" onsubmit="saveModelRouting(event)">
+            <div class="control-grid">
+              <label class="field-label">Routing mode
+                <select id="model-routing-mode" class="input" onchange="syncModelRoutingMode()">
+                  <option value="single" ${routing.mode === 'single' ? 'selected' : ''}>Single model for everything</option>
+                  <option value="tiered" ${routing.mode === 'tiered' ? 'selected' : ''}>Tiered by complexity</option>
+                </select>
+              </label>
+              <label class="field-label" style="flex-direction:row; align-items:center; gap:8px; margin-top:1.8rem;">
+                <input id="model-routing-auto-escalation" type="checkbox" ${routing.auto_escalation === false ? '' : 'checked'} />
+                <span>Allow automatic escalation while the agent is working</span>
+              </label>
+            </div>
+            <div id="model-routing-single-fields" class="control-grid mt-3">
+              ${modelInput('model-routing-single-model', 'Model', configuredRouting.single_model || effectiveRouting.standard || effectiveChatModel)}
+            </div>
+            <div id="model-routing-tiered-fields" class="control-grid compact-controls mt-3">
+              ${modelInput('model-routing-light-model', 'Light', configuredRouting.light_model || effectiveRouting.light || effectiveChatModel)}
+              ${modelInput('model-routing-standard-model', 'Standard', configuredRouting.standard_model || effectiveRouting.standard || effectiveChatModel)}
+              ${modelInput('model-routing-high-model', 'High', configuredRouting.high_model || effectiveRouting.high || effectiveChatModel)}
+              ${modelInput('model-routing-extra-high-model', 'Extra High', configuredRouting.extra_high_model || effectiveRouting.extra_high || effectiveChatModel)}
+            </div>
+            <div id="model-routing-mode-note" class="helper-text mt-3"></div>
+            <div class="inline-actions mt-4">
+              <button type="submit">Save Routing</button>
+            </div>
+            <div class="config-mini-grid mt-4">
+              ${renderRoutingMap}
+            </div>
+          </form>`;
+        html += `<h4 class="mt-4">Provider Setup</h4>
+          <p class="muted">Use the preset that matches how you actually access each service. For ChatGPT Pro and Claude Plus without API keys, use the local app / CLI login presets. API-key plans like GLM and Kimi stay on the key-based presets. Live token and cost trends remain on the Usage tab.</p>
+          <div class="config-grid">
+            ${providerCards || '<p class="muted">No provider setup catalog available.</p>'}
+          </div>`;
         html += `<h4 class="mt-4">Launch / Bootstrap Helpers</h4>
           <p class="muted">Use the discovered model set instead of free-typing references. The TUI now follows the same principle with configured-model dropdowns.</p>
           <div class="control-grid compact-controls">
@@ -3835,20 +3578,33 @@
             data-credential-profile-ids="${escapeHtml((credentialCopy.profile_ids || []).join(','))}"
             data-credential-env-keys="${escapeHtml((credentialCopy.env_keys || []).join(','))}"></pre>`;
         if (providers.length) {
-          html += '<h4 class="mt-4">Providers</h4><table class="data-table"><thead><tr><th>Provider</th><th>Auth</th><th>Base URL</th><th>Models</th><th>Profiles</th></tr></thead><tbody>';
+          html += '<h4 class="mt-4">Configured Providers</h4><table class="data-table"><thead><tr><th>Provider</th><th>Transport</th><th>Base URL</th><th>Models</th><th>Profiles</th><th>Actions</th></tr></thead><tbody>';
           providers.forEach(provider => {
+            const configuredModels = provider.configured_model_ids || [];
+            const effectiveModels = provider.effective_model_ids || configuredModels;
+            const modelSummary = effectiveModels.length
+              ? `<div class="wrap-code">${escapeHtml(effectiveModels.join(', '))}</div>`
+              : '<span class="muted">No effective models discovered.</span>';
+            const configuredModelActions = configuredModels.length
+              ? `<div class="inline-actions mt-2">${configuredModels.map(modelId => `<button class="button-secondary" onclick="deleteConfiguredModel('${encodeURIComponent(provider.provider_id || '')}', '${encodeURIComponent(modelId)}')">Remove ${escapeHtml(modelId)}</button>`).join('')}</div>`
+              : '<div class="muted mt-2">No custom model overrides.</div>';
+            const firstProfileId = (provider.profile_ids || [])[0] || '';
             html += `<tr>
               <td><span class="badge">${escapeHtml(provider.provider_id || '-')}</span></td>
               <td>${escapeHtml(provider.auth || provider.api || '-') }</td>
               <td class="wrap-code">${escapeHtml(provider.base_url || '-')}</td>
-              <td>${escapeHtml((provider.configured_model_ids || []).join(', ') || '-')}</td>
+              <td>${modelSummary}${configuredModelActions}</td>
               <td>${escapeHtml((provider.profile_ids || []).join(', ') || '-')}</td>
+              <td class="inline-actions">
+                <button class="button-secondary" onclick="testProviderConnection('${encodeURIComponent(provider.provider_id || '')}', '${encodeURIComponent(firstProfileId)}', '')">Verify</button>
+                <button class="button-secondary" onclick="deleteProviderConfig('${encodeURIComponent(provider.provider_id || '')}')">Delete</button>
+              </td>
             </tr>`;
           });
           html += '</tbody></table>';
         }
         if (profiles.length) {
-          html += '<h4 class="mt-4">Auth Profiles</h4><table class="data-table"><thead><tr><th>Profile</th><th>Provider</th><th>Type</th><th>Status</th><th>Hints</th></tr></thead><tbody>';
+          html += '<h4 class="mt-4">Auth Profiles</h4><table class="data-table"><thead><tr><th>Profile</th><th>Provider</th><th>Type</th><th>Status</th><th>Hints</th><th>Actions</th></tr></thead><tbody>';
           profiles.forEach(profile => {
             const hints = [profile.base_url, profile.gateway_id, profile.account_id].filter(Boolean).join(' • ');
             html += `<tr>
@@ -3857,12 +3613,269 @@
               <td>${escapeHtml(profile.type || '-')}</td>
               <td>${profile.expired ? '<span class="badge warn">expired</span>' : '<span class="badge ok">usable</span>'}</td>
               <td>${escapeHtml(hints || (profile.metadata_keys || []).join(', ') || '-')}</td>
+              <td class="inline-actions">
+                <button class="button-secondary" onclick="testProviderConnection('${encodeURIComponent(profile.provider || '')}', '${encodeURIComponent(profile.profile_id || '')}', '')">Verify</button>
+                <button class="button-secondary" onclick="deleteAuthProfile('${encodeURIComponent(profile.profile_id || '')}')">Delete</button>
+              </td>
             </tr>`;
           });
           html += '</tbody></table>';
         }
-        setTimeout(() => updateConfigLaunchPreview(), 0);
+        setTimeout(() => {
+          updateConfigLaunchPreview();
+          syncModelRoutingMode();
+          initializeProviderSetupCards();
+        }, 0);
         return html;
+      }
+      function getConfigOverviewPanel() {
+        return document.querySelector('[data-panel="config-overview"]');
+      }
+      function getConfigRawPanel() {
+        return document.querySelector('[data-panel="config-raw"]');
+      }
+      function decodeDashboardValue(value) {
+        try {
+          return decodeURIComponent(String(value || ''));
+        } catch (_error) {
+          return String(value || '');
+        }
+      }
+      function setConfigUiMessage(text, kind = 'warn') {
+        window.__configUiMessage = text ? { text, kind } : null;
+      }
+      async function requestConfigJson(url, options = {}) {
+        const response = await fetch(url, {
+          ...options,
+          headers: {
+            'Content-Type': 'application/json',
+            ...(options.headers || {}),
+          },
+        });
+        const data = await OpenCASHttp.safeJson(response, {});
+        if (!response.ok) {
+          const detail = typeof data?.detail === 'string'
+            ? data.detail
+            : `${options.method || 'GET'} ${url} failed (${response.status})`;
+          throw new Error(detail);
+        }
+        return data;
+      }
+      async function refreshConfigPanels(refreshRaw = true) {
+        const overviewPanel = getConfigOverviewPanel();
+        if (overviewPanel) {
+          const overviewData = await requestConfigJson('/api/config/overview');
+          overviewPanel.innerHTML = renderConfigOverview(overviewData);
+        }
+        if (refreshRaw) {
+          const rawPanel = getConfigRawPanel();
+          if (rawPanel) {
+            const rawData = await requestConfigJson('/api/config');
+            rawPanel.innerHTML = renderConfig(rawData);
+          }
+        }
+      }
+      function parseDelimitedValues(raw) {
+        return [...new Set(String(raw || '')
+          .split(/[\n,]/)
+          .map(item => item.trim())
+          .filter(Boolean))];
+      }
+      function syncModelRoutingMode() {
+        const mode = document.getElementById('model-routing-mode')?.value || 'single';
+        const singleFields = document.getElementById('model-routing-single-fields');
+        const tieredFields = document.getElementById('model-routing-tiered-fields');
+        const note = document.getElementById('model-routing-mode-note');
+        if (singleFields) singleFields.style.display = mode === 'single' ? '' : 'none';
+        if (tieredFields) tieredFields.style.display = mode === 'tiered' ? '' : 'none';
+        if (note) {
+          note.textContent = mode === 'single'
+            ? 'Single-model mode copies the chosen model into every complexity tier.'
+            : 'Tiered mode uses Standard as the default lane and lets the runtime climb toward High and Extra High when escalation is enabled.';
+        }
+      }
+      function getProviderSetupFamily(familyId) {
+        const overview = window.__configOverviewCache || {};
+        return (overview.provider_setup_catalog || []).find(item => item.family_id === familyId) || null;
+      }
+      function getProviderSetupSelectedPreset(familyId) {
+        const family = getProviderSetupFamily(familyId);
+        const presetId = document.getElementById(`provider-preset-${familyId}`)?.value || '';
+        return family?.presets?.find(item => item.preset_id === presetId) || family?.presets?.[0] || null;
+      }
+      function updateProviderSetupCard(familyId) {
+        const family = getProviderSetupFamily(familyId);
+        const preset = getProviderSetupSelectedPreset(familyId);
+        if (!family || !preset) return;
+        const toggle = (prefix, visible) => {
+          const node = document.getElementById(`${prefix}-${familyId}`);
+          if (node) node.style.display = visible ? '' : 'none';
+        };
+        toggle('provider-profile-wrap', Boolean(preset.supports_auth_profile));
+        toggle('provider-api-key-wrap', preset.auth_kind === 'api_key');
+        toggle('provider-access-wrap', preset.auth_kind === 'oauth');
+        toggle('provider-refresh-wrap', preset.auth_kind === 'oauth');
+        toggle('provider-expires-wrap', preset.auth_kind === 'oauth');
+        toggle('provider-base-url-wrap', Boolean(preset.supports_custom_base_url));
+        toggle('provider-custom-models-wrap', Boolean(preset.supports_custom_models));
+        toggle('provider-headers-wrap', true);
+        const summary = document.getElementById(`provider-current-summary-${familyId}`);
+        if (summary) {
+          const authSummary = preset.auth_kind === 'cli'
+            ? 'Uses your existing local app / CLI login.'
+            : preset.auth_kind === 'oauth'
+              ? 'Uses token-based login material managed through OpenLLMAuth.'
+              : 'Uses an API key stored in the active OpenLLMAuth material.';
+          summary.textContent = `${preset.label}: ${preset.help_text || ''} ${authSummary}`.trim();
+        }
+      }
+      function initializeProviderSetupCards() {
+        const overview = window.__configOverviewCache || {};
+        (overview.provider_setup_catalog || []).forEach(family => updateProviderSetupCard(family.family_id));
+      }
+      async function saveModelRouting(event) {
+        event.preventDefault();
+        const mode = document.getElementById('model-routing-mode')?.value || 'single';
+        const singleModel = (document.getElementById('model-routing-single-model')?.value || '').trim();
+        const standardModel = mode === 'single'
+          ? singleModel
+          : (document.getElementById('model-routing-standard-model')?.value || '').trim();
+        const payload = {
+          default_llm_model: standardModel || singleModel || null,
+          model_routing: {
+            mode,
+            single_model: singleModel || null,
+            light_model: mode === 'tiered' ? (document.getElementById('model-routing-light-model')?.value || '').trim() || null : null,
+            standard_model: mode === 'tiered' ? standardModel || null : null,
+            high_model: mode === 'tiered' ? (document.getElementById('model-routing-high-model')?.value || '').trim() || null : null,
+            extra_high_model: mode === 'tiered' ? (document.getElementById('model-routing-extra-high-model')?.value || '').trim() || null : null,
+            auto_escalation: Boolean(document.getElementById('model-routing-auto-escalation')?.checked),
+          },
+        };
+        try {
+          await requestConfigJson('/api/config/model-routing', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          });
+          setConfigUiMessage('Model routing was updated and persisted to the OpenCAS state directory.', 'ok');
+          await refreshConfigPanels(true);
+        } catch (error) {
+          setConfigUiMessage(String(error), 'error');
+          await refreshConfigPanels(false);
+        }
+      }
+      async function saveProviderSetup(event, familyId) {
+        event.preventDefault();
+        const family = getProviderSetupFamily(familyId);
+        const preset = getProviderSetupSelectedPreset(familyId);
+        if (!family || !preset) return;
+        let headers = {};
+        const headersRaw = (document.getElementById(`provider-headers-${familyId}`)?.value || '').trim();
+        if (headersRaw) {
+          try {
+            const parsed = JSON.parse(headersRaw);
+            if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+              throw new Error('headers must be a JSON object');
+            }
+            headers = parsed;
+          } catch (error) {
+            setConfigUiMessage(`Could not parse advanced headers for ${family.display_name}: ${error}`, 'error');
+            await refreshConfigPanels(false);
+            return;
+          }
+        }
+        const expiresRaw = (document.getElementById(`provider-expires-${familyId}`)?.value || '').trim();
+        const payload = {
+          family_id: familyId,
+          preset_id: preset.preset_id,
+          profile_label: (document.getElementById(`provider-profile-${familyId}`)?.value || 'default').trim() || 'default',
+          api_key: (document.getElementById(`provider-api-key-${familyId}`)?.value || '').trim() || null,
+          access_token: (document.getElementById(`provider-access-${familyId}`)?.value || '').trim() || null,
+          refresh_token: (document.getElementById(`provider-refresh-${familyId}`)?.value || '').trim() || null,
+          expires_at: expiresRaw ? Number(expiresRaw) : null,
+          base_url: (document.getElementById(`provider-base-url-${familyId}`)?.value || '').trim() || null,
+          custom_model_ids: parseDelimitedValues(document.getElementById(`provider-custom-models-${familyId}`)?.value || ''),
+          headers,
+        };
+        try {
+          const data = await requestConfigJson('/api/config/provider-setups', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          });
+          const profileNote = data.profile_id ? ` Profile ${data.profile_id} is now active.` : '';
+          setConfigUiMessage(`${family.display_name} was updated through the ${preset.label} preset.${profileNote}`, 'ok');
+          await refreshConfigPanels(true);
+        } catch (error) {
+          setConfigUiMessage(String(error), 'error');
+          await refreshConfigPanels(false);
+        }
+      }
+      async function testProviderConnection(providerIdEncoded, profileIdEncoded = '', modelRefEncoded = '') {
+        const providerId = decodeDashboardValue(providerIdEncoded);
+        const profileId = decodeDashboardValue(profileIdEncoded);
+        const modelRef = decodeDashboardValue(modelRefEncoded);
+        try {
+          const data = await requestConfigJson('/api/config/provider-test', {
+            method: 'POST',
+            body: JSON.stringify({
+              provider_id: providerId,
+              profile_id: profileId || null,
+              model_ref: modelRef || null,
+            }),
+          });
+          if (data.status === 'ok') {
+            setConfigUiMessage(`Verified ${data.provider_id} using ${data.profile_id || 'the active credential path'}; ${data.models_found} model definitions were reachable.`, 'ok');
+          } else {
+            setConfigUiMessage(data.detail || `Provider test failed for ${providerId}.`, 'error');
+          }
+          await refreshConfigPanels(false);
+        } catch (error) {
+          setConfigUiMessage(String(error), 'error');
+          await refreshConfigPanels(false);
+        }
+      }
+      async function deleteAuthProfile(profileIdEncoded) {
+        const profileId = decodeDashboardValue(profileIdEncoded);
+        if (!window.confirm(`Delete auth profile ${profileId}?`)) return;
+        try {
+          await requestConfigJson(`/api/config/auth-profiles/${encodeURIComponent(profileId)}`, {
+            method: 'DELETE',
+          });
+          setConfigUiMessage(`Deleted auth profile ${profileId}.`, 'ok');
+          await refreshConfigPanels(true);
+        } catch (error) {
+          setConfigUiMessage(String(error), 'error');
+          await refreshConfigPanels(false);
+        }
+      }
+      async function deleteProviderConfig(providerIdEncoded) {
+        const providerId = decodeDashboardValue(providerIdEncoded);
+        if (!window.confirm(`Delete provider ${providerId} and its auth profiles from the active OpenLLMAuth material?`)) return;
+        try {
+          await requestConfigJson(`/api/config/providers/${encodeURIComponent(providerId)}`, {
+            method: 'DELETE',
+          });
+          setConfigUiMessage(`Deleted provider ${providerId} from the active gateway config.`, 'ok');
+          await refreshConfigPanels(true);
+        } catch (error) {
+          setConfigUiMessage(String(error), 'error');
+          await refreshConfigPanels(false);
+        }
+      }
+      async function deleteConfiguredModel(providerIdEncoded, modelIdEncoded) {
+        const providerId = decodeDashboardValue(providerIdEncoded);
+        const modelId = decodeDashboardValue(modelIdEncoded);
+        if (!window.confirm(`Remove configured model ${modelId} from ${providerId}?`)) return;
+        try {
+          await requestConfigJson(`/api/config/providers/${encodeURIComponent(providerId)}/models/${encodeURIComponent(modelId)}`, {
+            method: 'DELETE',
+          });
+          setConfigUiMessage(`Removed configured model ${modelId} from ${providerId}.`, 'ok');
+          await refreshConfigPanels(true);
+        } catch (error) {
+          setConfigUiMessage(String(error), 'error');
+          await refreshConfigPanels(false);
+        }
       }
       function getTelegramPanel() {
         return document.querySelector('[data-panel="telegram-status"]');
@@ -3921,62 +3934,7 @@
           panel.innerHTML = `<p class="muted">Failed to approve Telegram pairing: ${escapeHtml(String(error))}</p>`;
         }
       }
-      function renderProjection(d) {
-        const points = d.points || [];
-        const method = d.method || 'none';
-        let html = '<h4>Embedding Projection</h4>';
-        if (!points.length) return html + '<p class="muted">No projection data available.</p>';
-        html += '<div style="position:relative;max-height:50vh;"><canvas id="projectionChart"></canvas></div>';
-        html += '<p class="muted mt-2">Method: ' + escapeHtml(method) + ' • Points: ' + points.length + '</p>';
-        // Defer chart rendering so the canvas exists in the DOM
-        setTimeout(() => {
-          const canvas = document.getElementById('projectionChart');
-          if (!canvas) return;
-          const ctx = canvas.getContext('2d');
-          if (window.__projectionChartInstance) {
-            window.__projectionChartInstance.destroy();
-          }
-          const colors = {
-            user: '#60a5fa',
-            assistant: '#34d399',
-            system: '#fbbf24',
-            memory: '#a78bfa',
-            tool: '#f87171',
-            episode: '#94a3b8'
-          };
-          window.__projectionChartInstance = new Chart(ctx, {
-            type: 'scatter',
-            data: {
-              datasets: [{
-                label: 'Episodes',
-                data: points.map(p => ({ x: p.x, y: p.y })),
-                backgroundColor: points.map(p => colors[p.kind] || colors.episode),
-                pointRadius: points.map(p => 3 + (p.salience || 0.5) * 5),
-              }]
-            },
-            options: {
-              responsive: true,
-              maintainAspectRatio: false,
-              plugins: {
-                legend: { display: false },
-                tooltip: {
-                  callbacks: {
-                    label: function(context) {
-                      const p = points[context.dataIndex];
-                      return p.kind + ' | salience ' + (p.salience ?? '-');
-                    }
-                  }
-                }
-              },
-              scales: {
-                x: { title: { display: true, text: 'X' }, grid: { color: 'rgba(255,255,255,0.05)' } },
-                y: { title: { display: true, text: 'Y' }, grid: { color: 'rgba(255,255,255,0.05)' } }
-              }
-            }
-          });
-        }, 0);
-        return html;
-      }
+      // renderProjection() lives in /dashboard/static/js/memory_app.js.
       function renderSelfModel(d) {
         let html = '<h4>Self Model</h4>';
         html += '<p class="muted">Name: <strong>' + escapeHtml(d.name || '-') + '</strong> • Version: ' + escapeHtml(d.version || '-') + '</p>';
@@ -4056,6 +4014,44 @@
         }
         return html;
       }
+      function initSomaticRadarChart(chartId, d) {
+        const canvas = document.getElementById(chartId);
+        if (!canvas) return null;
+        window.__dashboardCharts = window.__dashboardCharts || {};
+        if (window.__dashboardCharts[chartId]) window.__dashboardCharts[chartId].destroy();
+        window.__dashboardCharts[chartId] = new Chart(canvas.getContext('2d'), {
+          type: 'radar',
+          data: {
+            labels: ['Arousal', 'Fatigue', 'Tension', 'Valence', 'Focus', 'Energy', 'Certainty'],
+            datasets: [{
+              label: 'Somatic',
+              data: [d.arousal ?? 0, d.fatigue ?? 0, d.tension ?? 0, d.valence ?? 0, d.focus ?? 0, d.energy ?? 0, d.certainty ?? 0],
+              borderColor: 'rgba(0, 229, 255, 0.7)',
+              backgroundColor: 'rgba(0, 229, 255, 0.08)',
+              pointBackgroundColor: 'rgba(0, 229, 255, 0.9)',
+              pointBorderColor: '#080c14',
+              pointRadius: 4,
+              borderWidth: 2,
+            }],
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { display: false } },
+            scales: {
+              r: {
+                min: 0,
+                max: 1,
+                ticks: { stepSize: 0.25, display: false },
+                grid: { color: 'rgba(0, 229, 255, 0.06)' },
+                angleLines: { color: 'rgba(0, 229, 255, 0.06)' },
+                pointLabels: { font: { family: "'JetBrains Mono'", size: 9 }, color: '#556677' },
+              },
+            },
+          },
+        });
+        return window.__dashboardCharts[chartId];
+      }
       function renderSomaticPanel(d, chartId = 'somaticRadarChart', heading = 'Somatic State') {
         if (!d) return '<p class="muted">Somatic state not available.</p>';
         let html = '<h4>' + escapeHtml(heading) + '</h4>';
@@ -4070,32 +4066,7 @@
         html += '</div>';
         if (d.somatic_tag) html += '<p class="muted mt-4">Tag: <span class="badge">' + escapeHtml(d.somatic_tag) + '</span></p>';
         html += '<div class="chart-wrap-sm mt-4"><canvas id="' + escapeHtml(chartId) + '"></canvas></div>';
-        setTimeout(() => {
-          const canvas = document.getElementById(chartId);
-          if (!canvas) return;
-          window.__dashboardCharts = window.__dashboardCharts || {};
-          if (window.__dashboardCharts[chartId]) window.__dashboardCharts[chartId].destroy();
-          window.__dashboardCharts[chartId] = new Chart(canvas.getContext('2d'), {
-            type: 'radar',
-            data: {
-              labels: ['Arousal', 'Fatigue', 'Tension', 'Valence', 'Focus', 'Energy', 'Certainty'],
-              datasets: [{
-                label: 'Somatic',
-                data: [d.arousal ?? 0, d.fatigue ?? 0, d.tension ?? 0, d.valence ?? 0, d.focus ?? 0, d.energy ?? 0, d.certainty ?? 0],                borderColor: 'rgba(0, 229, 255, 0.7)',
-                backgroundColor: 'rgba(0, 229, 255, 0.08)',
-                pointBackgroundColor: 'rgba(0, 229, 255, 0.9)',
-                pointBorderColor: '#080c14',
-                pointRadius: 4,
-                borderWidth: 2,
-              }],
-            },
-            options: {
-              responsive: true, maintainAspectRatio: true,
-              plugins: { legend: { display: false } },
-              scales: { r: { min: 0, max: 1, ticks: { stepSize: 0.25, display: false }, grid: { color: 'rgba(0, 229, 255, 0.06)' }, angleLines: { color: 'rgba(0, 229, 255, 0.06)' }, pointLabels: { font: { family: "'JetBrains Mono'", size: 10 }, color: '#556677' } } },
-            },
-          });
-        }, 0);
+        setTimeout(() => initSomaticRadarChart(chartId, d), 0);
         return html;
       }
       function renderSomatic(d) {
@@ -4119,7 +4090,9 @@
         if (!Array.isArray(items) || !items.length) return '<p class="muted">No commitments.</p>';
         let html = '<table class="data-table"><thead><tr><th>Content</th><th>Status</th><th>Priority</th><th>Deadline</th></tr></thead><tbody>';
         for (const item of items) {
-          html += '<tr><td>' + escapeHtml(item.content || '-') + '</td><td><span class="badge">' + escapeHtml(item.status || '-') + '</span></td><td>' + (item.priority ?? '-') + '</td><td>' + formatDateTime(item.deadline) + '</td></tr>';
+          const lifecycle = item.lifecycle || {};
+          const note = [lifecycle.source, lifecycle.blocked_reason, lifecycle.resume_reason, lifecycle.merge_rationale].filter(Boolean).join(' • ');
+          html += '<tr><td>' + escapeHtml(item.content || '-') + (note ? `<div class="muted mt-2">${escapeHtml(note)}</div>` : '') + '</td><td><span class="badge">' + escapeHtml(item.status || '-') + '</span></td><td>' + (item.priority ?? '-') + '</td><td>' + formatDateTime(item.deadline) + '</td></tr>';
         }
         html += '</tbody></table>';
         return html;
@@ -4148,512 +4121,6 @@
         const date = new Date(normalized);
         if (Number.isNaN(date.getTime())) return escapeHtml(String(value));
         return date.toLocaleString();
-      }
-      function showOperationDetail(url) {
-        const detail = document.getElementById('operations-detail');
-        detail.setAttribute('hx-get', url);
-        htmx.trigger(detail, 'load');
-      }
-      function getOperationSessionsPanel() {
-        return document.querySelector('[data-panel="operations-sessions"]');
-      }
-      function getQualificationCardPanel() {
-        return document.querySelector('[data-panel="qualification-card"]');
-      }
-      function getOperationsQualificationPanel() {
-        return document.querySelector('[data-panel="operations-qualification"]');
-      }
-      function getOperationScope() {
-        const panel = getOperationSessionsPanel();
-        return panel?.dataset.scopeKey || '';
-      }
-      let qualificationRefreshTimer = null;
-      function clearQualificationRefresh() {
-        if (qualificationRefreshTimer !== null) {
-          window.clearTimeout(qualificationRefreshTimer);
-          qualificationRefreshTimer = null;
-        }
-      }
-      function refreshQualificationPanels() {
-        const card = getQualificationCardPanel();
-        if (card) htmx.trigger(card, 'load');
-        const panel = getOperationsQualificationPanel();
-        if (panel) htmx.trigger(panel, 'load');
-      }
-      function updateQualificationRefresh(active) {
-        clearQualificationRefresh();
-        if (!active) return;
-        qualificationRefreshTimer = window.setTimeout(() => {
-          refreshQualificationPanels();
-          refreshOperationSessions('qualification');
-        }, 5000);
-      }
-      function refreshOperationSessions(scopeKey = null) {
-        const panel = getOperationSessionsPanel();
-        if (!panel) return;
-        const nextScope = scopeKey === null ? getOperationScope() : decodeURIComponent(scopeKey || '');
-        panel.dataset.scopeKey = nextScope;
-        panel.setAttribute('hx-get', nextScope ? `/api/operations/sessions?scope_key=${encodeURIComponent(nextScope)}` : '/api/operations/sessions');
-        htmx.trigger(panel, 'load');
-      }
-      function setOperationScope(scopeKey) {
-        refreshOperationSessions(scopeKey);
-      }
-      function showPtySessionDetail(sessionId, scopeKey, refresh = false) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        showOperationDetail(`/api/operations/sessions/pty/${encodeURIComponent(decodedSession)}?scope_key=${encodeURIComponent(decodedScope)}${refresh ? '&refresh=true' : ''}`);
-      }
-      function showBrowserSessionDetail(sessionId, scopeKey, refresh = false) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        showOperationDetail(`/api/operations/sessions/browser/${encodeURIComponent(decodedSession)}?scope_key=${encodeURIComponent(decodedScope)}${refresh ? '&refresh=true' : ''}`);
-      }
-      function showProcessDetail(processId, scopeKey, refresh = true) {
-        const decodedProcess = decodeURIComponent(processId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        showOperationDetail(`/api/operations/sessions/process/${encodeURIComponent(decodedProcess)}?scope_key=${encodeURIComponent(decodedScope)}${refresh ? '&refresh=true' : ''}`);
-      }
-      function browserControlValue(sessionId, suffix) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const uiId = encodeURIComponent(decodedSession);
-        const input = document.getElementById(`browser-${suffix}-${uiId}`);
-        return input ? input.value : '';
-      }
-      function browserControlChecked(sessionId, suffix) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const uiId = encodeURIComponent(decodedSession);
-        const input = document.getElementById(`browser-${suffix}-${uiId}`);
-        return Boolean(input?.checked);
-      }
-      async function navigateBrowserSession(sessionId, scopeKey) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        const url = browserControlValue(sessionId, 'navigate-url').trim();
-        if (!url) return;
-        const response = await fetch(`/api/operations/sessions/browser/${encodeURIComponent(decodedSession)}/navigate?scope_key=${encodeURIComponent(decodedScope)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, wait_until: 'load', timeout_ms: 30000, refresh: true }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to navigate browser session.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderBrowserSessionDetail(data);
-        refreshOperationSessions();
-      }
-      async function captureBrowserSession(sessionId, scopeKey) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        const fullPage = browserControlChecked(sessionId, 'capture-full');
-        const response = await fetch(`/api/operations/sessions/browser/${encodeURIComponent(decodedSession)}/capture?scope_key=${encodeURIComponent(decodedScope)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ full_page: fullPage }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to capture browser screenshot.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderBrowserSessionDetail(data);
-        refreshOperationSessions();
-      }
-      async function closeBrowserSession(sessionId, scopeKey) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        const response = await fetch(`/api/operations/sessions/browser/${encodeURIComponent(decodedSession)}?scope_key=${encodeURIComponent(decodedScope)}`, { method: 'DELETE' });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to close browser session.</p>';
-          return;
-        }
-        detail.innerHTML = `<p class="muted">Closed browser session <code>${escapeHtml(decodedSession)}</code>.</p>`;
-        refreshOperationSessions();
-      }
-      async function clickBrowserSession(sessionId, scopeKey) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        const selector = browserControlValue(sessionId, 'click-selector').trim();
-        if (!selector) return;
-        const response = await fetch(`/api/operations/sessions/browser/${encodeURIComponent(decodedSession)}/click?scope_key=${encodeURIComponent(decodedScope)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ selector, timeout_ms: 5000, refresh: true }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to click browser session selector.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderBrowserSessionDetail(data);
-        refreshOperationSessions();
-      }
-      async function typeBrowserSession(sessionId, scopeKey) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        const selector = browserControlValue(sessionId, 'type-selector').trim();
-        if (!selector) return;
-        const text = browserControlValue(sessionId, 'type-text');
-        const clear = browserControlChecked(sessionId, 'type-clear');
-        const response = await fetch(`/api/operations/sessions/browser/${encodeURIComponent(decodedSession)}/type?scope_key=${encodeURIComponent(decodedScope)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ selector, text, clear, timeout_ms: 5000, refresh: true }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to type into browser session selector.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderBrowserSessionDetail(data);
-        refreshOperationSessions();
-      }
-      async function pressBrowserSession(sessionId, scopeKey) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        const key = browserControlValue(sessionId, 'press-key').trim();
-        if (!key) return;
-        const response = await fetch(`/api/operations/sessions/browser/${encodeURIComponent(decodedSession)}/press?scope_key=${encodeURIComponent(decodedScope)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ key, refresh: true }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to press browser session key.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderBrowserSessionDetail(data);
-        refreshOperationSessions();
-      }
-      async function waitBrowserSession(sessionId, scopeKey) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        const selector = browserControlValue(sessionId, 'wait-selector').trim();
-        const loadState = browserControlValue(sessionId, 'wait-load-state') || 'load';
-        const timeoutRaw = browserControlValue(sessionId, 'wait-timeout') || '5000';
-        const timeoutMs = Number.parseInt(timeoutRaw || '5000', 10);
-        const response = await fetch(`/api/operations/sessions/browser/${encodeURIComponent(decodedSession)}/wait?scope_key=${encodeURIComponent(decodedScope)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            selector: selector || null,
-            load_state: loadState,
-            timeout_ms: Number.isFinite(timeoutMs) ? timeoutMs : 5000,
-            refresh: true,
-          }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to wait on browser session.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderBrowserSessionDetail(data);
-        refreshOperationSessions();
-      }
-      async function sendPtyInput(sessionId, scopeKey) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        const uiId = encodeURIComponent(decodedSession);
-        const inputEl = document.getElementById(`pty-input-${uiId}`);
-        const input = inputEl ? inputEl.value : window.prompt('Send PTY input');
-        if (input === null || input === '') return;
-        const response = await fetch(`/api/operations/sessions/pty/${encodeURIComponent(decodedSession)}/input?scope_key=${encodeURIComponent(decodedScope)}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ input, observe: true, idle_seconds: 0.25, max_wait_seconds: 1.5 }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to send PTY input.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderPtySessionDetail(data);
-        if (inputEl) inputEl.value = '';
-        refreshOperationSessions();
-      }
-      async function killPtySession(sessionId, scopeKey) {
-        const decodedSession = decodeURIComponent(sessionId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        const response = await fetch(`/api/operations/sessions/pty/${encodeURIComponent(decodedSession)}?scope_key=${encodeURIComponent(decodedScope)}`, { method: 'DELETE' });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to stop PTY session.</p>';
-          return;
-        }
-        detail.innerHTML = `<p class="muted">Stopped PTY session <code>${escapeHtml(decodedSession)}</code>.</p>`;
-        refreshOperationSessions();
-      }
-      async function clearPtySessions(scopeKey = 'default') {
-        const resolvedScope = decodeURIComponent(scopeKey || getOperationScope() || 'default');
-        const response = await fetch(`/api/operations/sessions/pty?scope_key=${encodeURIComponent(resolvedScope)}`, { method: 'DELETE' });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to clear PTY sessions.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = `<p class="muted">Cleared ${escapeHtml(String(data.removed ?? 0))} PTY session(s) for scope <code>${escapeHtml(data.scope_key || resolvedScope)}</code>.</p>`;
-        refreshOperationSessions();
-      }
-      async function clearBrowserSessions(scopeKey = 'default') {
-        const resolvedScope = decodeURIComponent(scopeKey || getOperationScope() || 'default');
-        const response = await fetch(`/api/operations/sessions/browser?scope_key=${encodeURIComponent(resolvedScope)}`, { method: 'DELETE' });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to clear browser sessions.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = `<p class="muted">Cleared ${escapeHtml(String(data.removed ?? 0))} browser session(s) for scope <code>${escapeHtml(data.scope_key || resolvedScope)}</code>.</p>`;
-        refreshOperationSessions();
-      }
-      async function clearProcessSessions(scopeKey = 'default') {
-        const resolvedScope = decodeURIComponent(scopeKey || getOperationScope() || 'default');
-        const response = await fetch(`/api/operations/sessions/process?scope_key=${encodeURIComponent(resolvedScope)}`, { method: 'DELETE' });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to clear background processes.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = `<p class="muted">Cleared ${escapeHtml(String(data.removed ?? 0))} background process(es) for scope <code>${escapeHtml(data.scope_key || resolvedScope)}</code>.</p>`;
-        refreshOperationSessions();
-      }
-      async function killProcessSession(processId, scopeKey) {
-        const decodedProcess = decodeURIComponent(processId);
-        const decodedScope = decodeURIComponent(scopeKey);
-        const response = await fetch(`/api/operations/sessions/process/${encodeURIComponent(decodedProcess)}?scope_key=${encodeURIComponent(decodedScope)}`, { method: 'DELETE' });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to stop background process.</p>';
-          return;
-        }
-        detail.innerHTML = `<p class="muted">Removed background process <code>${escapeHtml(decodedProcess)}</code>.</p>`;
-        refreshOperationSessions();
-      }
-      async function startQualificationRerun(label, note = '') {
-        const decodedLabel = decodeURIComponent(label);
-        const decodedNote = decodeURIComponent(note || '');
-        const response = await fetch('/api/operations/qualification/reruns', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            label: decodedLabel,
-            iterations: 2,
-            include_direct_checks: false,
-            source_label: decodedLabel,
-            source_note: decodedNote,
-          }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to start qualification rerun.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = `<p class="muted">Started qualification rerun for <code>${escapeHtml(decodedLabel)}</code> as process <code>${escapeHtml(data.process_id || '-')}</code>.</p><pre class="json">${escapeHtml(JSON.stringify(data, null, 2))}</pre>`;
-        refreshQualificationPanels();
-        refreshOperationSessions('qualification');
-      }
-      async function updatePlanStatus(planId, status) {
-        const decodedPlan = decodeURIComponent(planId);
-        const response = await fetch(`/api/operations/plans/${encodeURIComponent(decodedPlan)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to update plan status.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderPlanDetail(data);
-        const panel = document.querySelector('[hx-get^="/api/operations/plans"]');
-        if (panel) htmx.trigger(panel, 'load');
-      }
-      async function savePlanForm(planId) {
-        const decodedPlan = decodeURIComponent(planId);
-        const status = document.getElementById(`plan-status-${planId}`)?.value;
-        const content = document.getElementById(`plan-content-${planId}`)?.value;
-        const response = await fetch(`/api/operations/plans/${encodeURIComponent(decodedPlan)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status, content }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to save plan.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderPlanDetail(data);
-        const panel = document.querySelector('[hx-get^="/api/operations/plans"]');
-        if (panel) htmx.trigger(panel, 'load');
-      }
-      async function updatePlanContent(planId, currentContent) {
-        const decodedPlan = decodeURIComponent(planId);
-        const content = window.prompt('Plan content', currentContent || '');
-        if (content === null) return;
-        const response = await fetch(`/api/operations/plans/${encodeURIComponent(decodedPlan)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to update plan content.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderPlanDetail(data);
-        const panel = document.querySelector('[hx-get^="/api/operations/plans"]');
-        if (panel) htmx.trigger(panel, 'load');
-      }
-      async function updateCommitmentStatus(commitmentId, status) {
-        const decodedCommitment = decodeURIComponent(commitmentId);
-        const response = await fetch(`/api/operations/commitments/${encodeURIComponent(decodedCommitment)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to update commitment status.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderCommitmentDetail(data);
-        const panel = document.querySelector('[hx-get^="/api/operations/commitments"]');
-        if (panel) htmx.trigger(panel, 'load');
-      }
-      async function saveCommitmentForm(commitmentId) {
-        const decodedCommitment = decodeURIComponent(commitmentId);
-        const status = document.getElementById(`commitment-status-${commitmentId}`)?.value;
-        const content = document.getElementById(`commitment-content-${commitmentId}`)?.value;
-        const response = await fetch(`/api/operations/commitments/${encodeURIComponent(decodedCommitment)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status, content }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to save commitment.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderCommitmentDetail(data);
-        const panel = document.querySelector('[hx-get^="/api/operations/commitments"]');
-        if (panel) htmx.trigger(panel, 'load');
-      }
-      async function updateCommitmentContent(commitmentId, currentContent) {
-        const decodedCommitment = decodeURIComponent(commitmentId);
-        const content = window.prompt('Commitment content', currentContent || '');
-        if (content === null) return;
-        const response = await fetch(`/api/operations/commitments/${encodeURIComponent(decodedCommitment)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to update commitment content.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderCommitmentDetail(data);
-        const panel = document.querySelector('[hx-get^="/api/operations/commitments"]');
-        if (panel) htmx.trigger(panel, 'load');
-      }
-      async function updateWorkStage(workId) {
-        const decodedWork = decodeURIComponent(workId);
-        const stage = window.prompt('Work stage', 'note');
-        if (stage === null || stage === '') return;
-        const response = await fetch(`/api/operations/work/${encodeURIComponent(decodedWork)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ stage }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to update work stage.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderWorkItemDetail(data);
-        const panel = document.querySelector('[hx-get^="/api/operations/work"]');
-        if (panel) htmx.trigger(panel, 'load');
-      }
-      async function saveWorkItemForm(workId) {
-        const decodedWork = decodeURIComponent(workId);
-        const stage = document.getElementById(`work-stage-${workId}`)?.value;
-        const content = document.getElementById(`work-content-${workId}`)?.value;
-        const blockersRaw = document.getElementById(`work-blockers-${workId}`)?.value || '';
-        const blocked_by = blockersRaw.split(',').map(s => s.trim()).filter(Boolean);
-        const response = await fetch(`/api/operations/work/${encodeURIComponent(decodedWork)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ stage, content, blocked_by }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to save work item.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderWorkItemDetail(data);
-        const panel = document.querySelector('[hx-get^="/api/operations/work"]');
-        if (panel) htmx.trigger(panel, 'load');
-      }
-      async function updateWorkContent(workId, currentContent) {
-        const decodedWork = decodeURIComponent(workId);
-        const content = window.prompt('Work content', currentContent || '');
-        if (content === null) return;
-        const response = await fetch(`/api/operations/work/${encodeURIComponent(decodedWork)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to update work content.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderWorkItemDetail(data);
-        const panel = document.querySelector('[hx-get^="/api/operations/work"]');
-        if (panel) htmx.trigger(panel, 'load');
-      }
-      async function updateWorkBlockers(workId, currentBlockedBy) {
-        const decodedWork = decodeURIComponent(workId);
-        const raw = window.prompt('Blocked-by list, comma separated', (currentBlockedBy || []).join(', '));
-        if (raw === null) return;
-        const blocked_by = raw.split(',').map(s => s.trim()).filter(Boolean);
-        const response = await fetch(`/api/operations/work/${encodeURIComponent(decodedWork)}`, {
-          method: 'PATCH',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ blocked_by }),
-        });
-        const detail = document.getElementById('operations-detail');
-        if (!response.ok) {
-          detail.innerHTML = '<p class="muted">Failed to update work blockers.</p>';
-          return;
-        }
-        const data = await response.json();
-        detail.innerHTML = renderWorkItemDetail(data);
-        const panel = document.querySelector('[hx-get^="/api/operations/work"]');
-        if (panel) htmx.trigger(panel, 'load');
       }
       function updateConfigLaunchPreview() {
         const chat = document.getElementById('config-chat-model')?.value || '';
@@ -5093,42 +4560,7 @@
             const r = await fetch('/api/identity/somatic');
             const d = await r.json();
             if (!d) return;
-            const labels = ['Arousal', 'Fatigue', 'Tension', 'Valence', 'Focus', 'Energy', 'Certainty'];
-            const values = [d.arousal ?? 0, d.fatigue ?? 0, d.tension ?? 0, d.valence ?? 0, d.focus ?? 0, d.energy ?? 0, d.certainty ?? 0];
-            const canvas = document.getElementById('overviewSomaticChart');
-            if (!canvas) return;
-            if (this._somaticChart) this._somaticChart.destroy();
-            this._somaticChart = new Chart(canvas.getContext('2d'), {
-              type: 'radar',
-              data: {
-                labels: labels,
-                datasets: [{
-                  label: 'Somatic',
-                  data: values,
-                  borderColor: 'rgba(0, 229, 255, 0.7)',
-                  backgroundColor: 'rgba(0, 229, 255, 0.08)',
-                  pointBackgroundColor: 'rgba(0, 229, 255, 0.9)',
-                  pointBorderColor: '#080c14',
-                  pointRadius: 4,
-                  pointHoverRadius: 6,
-                  borderWidth: 2,
-                }],
-              },
-              options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: { legend: { display: false } },
-                scales: {
-                  r: {
-                    min: 0, max: 1,
-                    ticks: { stepSize: 0.25, display: false },
-                    grid: { color: 'rgba(0, 229, 255, 0.06)' },
-                    angleLines: { color: 'rgba(0, 229, 255, 0.06)' },
-                    pointLabels: { font: { family: "'JetBrains Mono'", size: 9 }, color: '#556677' },
-                  },
-                },
-              },
-            });
+            this._somaticChart = initSomaticRadarChart('overviewSomaticChart', d);
           } catch (e) { console.error('Somatic chart:', e); }
         },
         async loadMusubiChart() {
@@ -5186,5 +4618,6 @@
       };
     };
   </script>
+  <script src="/dashboard/static/js/memory_app.js"></script>
 </body>
 </html>

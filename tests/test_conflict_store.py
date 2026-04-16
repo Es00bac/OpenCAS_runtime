@@ -7,6 +7,16 @@ import pytest_asyncio
 from opencas.daydream import ConflictRecord, ConflictStore, DaydreamReflection, DaydreamStore
 
 
+def test_store_compat_exports() -> None:
+    from opencas.daydream.conflict_store import ConflictStore as SplitConflictStore
+    from opencas.daydream.daydream_store import DaydreamStore as SplitDaydreamStore
+    from opencas.daydream.store import ConflictStore as CompatConflictStore
+    from opencas.daydream.store import DaydreamStore as CompatDaydreamStore
+
+    assert CompatConflictStore is SplitConflictStore
+    assert CompatDaydreamStore is SplitDaydreamStore
+
+
 @pytest_asyncio.fixture
 async def conflict_store(tmp_path: Path):
     store = ConflictStore(tmp_path / "conflicts.db")
@@ -54,8 +64,7 @@ async def test_resolve_conflict(conflict_store: ConflictStore) -> None:
 async def test_auto_resolve_chronic(conflict_store: ConflictStore) -> None:
     record = ConflictRecord(kind="chronic", description="Old tension")
     saved = await conflict_store.record_conflict(record)
-    # Manually backdate created_at by updating raw DB
-    from datetime import datetime, timezone, timedelta
+    from datetime import datetime, timedelta, timezone
     old = (datetime.now(timezone.utc) - timedelta(days=15)).isoformat()
     await conflict_store._db.execute(
         "UPDATE conflicts SET created_at = ?, occurrence_count = 30 WHERE conflict_id = ?",

@@ -1075,23 +1075,188 @@ textarea:focus,
   gap: 10px;
 }
 
+.badge-gold {
+  background: rgba(250, 204, 21, 0.18);
+  color: #facc15;
+  border: 1px solid rgba(250, 204, 21, 0.35);
+}
+
+.badge-dim {
+  background: rgba(100, 116, 139, 0.15);
+  color: #94a3b8;
+  border: 1px solid rgba(100, 116, 139, 0.25);
+}
+
+.badge-star {
+  color: #facc15;
+  font-size: 0.7em;
+  vertical-align: middle;
+}
+
+.session-chip {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  padding: 1px 6px;
+  background: rgba(56, 189, 248, 0.1);
+  border: 1px solid rgba(56, 189, 248, 0.25);
+  border-radius: 4px;
+  color: #38bdf8;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.session-chip:hover {
+  background: rgba(56, 189, 248, 0.2);
+}
+
+.helper-line {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: center;
+  font-size: 0.78rem;
+  color: var(--text-dim);
+  margin-bottom: 6px;
+}
+
+.utility-bar-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
+.utility-bar {
+  flex: 1;
+  height: 6px;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.utility-bar-fill {
+  height: 100%;
+  background: linear-gradient(90deg, #22c55e, #38bdf8);
+  border-radius: 3px;
+}
+
 
 /* ============================================================
    Memory Atlas
    ============================================================ */
 
+.memory-health-panel {
+  overflow: hidden;
+}
+
+.memory-health-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+  gap: 18px;
+}
+
+.memory-health-meters,
+.memory-health-stack {
+  display: grid;
+  gap: 12px;
+}
+
+.memory-health-bar {
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.12);
+  overflow: hidden;
+}
+
+.memory-health-bar span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #38bdf8, #22c55e);
+}
+
+.memory-health-bar.accent-gold span {
+  background: linear-gradient(90deg, #facc15, #f59e0b);
+}
+
 .memory-atlas-wrap {
   position: relative;
-  min-height: 560px;
+  min-height: clamp(420px, calc(100vh - 360px), 760px);
 }
 
 .memory-atlas-wrap canvas {
   width: 100% !important;
-  height: 560px !important;
+  height: clamp(420px, calc(100vh - 360px), 760px) !important;
 }
 
 .memory-retrieval-results {
   max-height: 44vh;
+}
+
+.memory-controls,
+.memory-detail-panel {
+  resize: horizontal;
+  overflow: auto;
+}
+
+.memory-workbench-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.tab-strip,
+.legend-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.tab-pill,
+.legend-chip {
+  border: 1px solid var(--border);
+  background: rgba(15, 23, 42, 0.55);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 8px 12px;
+  font: inherit;
+  cursor: pointer;
+  transition: border-color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+
+.tab-pill.active,
+.legend-chip:hover,
+.legend-chip:not(.off) {
+  border-color: rgba(56, 189, 248, 0.35);
+}
+
+.tab-pill.active {
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.legend-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.legend-chip strong {
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  color: var(--text-dim);
+}
+
+.legend-chip.off {
+  opacity: 0.48;
+  background: rgba(15, 23, 42, 0.3);
+}
+
+.memory-tab-body {
+  margin-top: 18px;
 }
 
 
@@ -1103,6 +1268,24 @@ textarea:focus,
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
   gap: 14px;
+}
+
+.config-card,
+.config-mini-card {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.config-mini-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 10px;
+}
+
+.provider-setup-card {
+  min-height: 100%;
 }
 
 .config-command {
@@ -1335,6 +1518,10 @@ code {
   .memory-layout {
     grid-template-columns: 1fr;
   }
+
+  .memory-health-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 @media (max-width: 980px) {
@@ -1446,5 +1633,10 @@ code {
 
   .grid-span-2 {
     grid-column: span 1;
+  }
+
+  .memory-controls,
+  .memory-detail-panel {
+    resize: none;
   }
 }

@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
 from pydantic import BaseModel
+from opencas.autonomy.commitment import commitment_operator_snapshot
 
 router = APIRouter(tags=["executive"])
 
@@ -31,6 +32,7 @@ class CommitmentResponse(BaseModel):
     linked_task_ids: List[str]
     created_at: str
     updated_at: str
+    lifecycle: Dict[str, Any]
 
 
 class PlanResponse(BaseModel):
@@ -50,18 +52,7 @@ class ExecutiveSummaryResponse(BaseModel):
 
 
 def _commitment_to_dict(c: Any) -> Dict[str, Any]:
-    return {
-        "commitment_id": str(c.commitment_id),
-        "content": c.content,
-        "status": c.status.value if hasattr(c.status, "value") else str(c.status),
-        "priority": c.priority,
-        "deadline": c.deadline.isoformat() if c.deadline else None,
-        "tags": c.tags,
-        "linked_work_ids": c.linked_work_ids,
-        "linked_task_ids": c.linked_task_ids,
-        "created_at": c.created_at.isoformat(),
-        "updated_at": c.updated_at.isoformat(),
-    }
+    return commitment_operator_snapshot(c)
 
 
 def _plan_to_dict(p: Any) -> Dict[str, Any]:
@@ -155,5 +146,27 @@ def build_executive_router(runtime: Any) -> APIRouter:
         except Exception:
             return []
         return [PlanResponse(**_plan_to_dict(p)) for p in items]
+
+    @r.get("/events/summary")
+    async def get_bulma_event_summary() -> Dict[str, Any]:
+        from opencas.legacy.executive_event_index import load_executive_event_summary
+
+        return load_executive_event_summary(runtime.ctx.config.state_dir)
+
+    @r.get("/events/search")
+    async def search_bulma_events(
+        event_type: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        from opencas.legacy.executive_event_index import search_executive_events
+
+        items = search_executive_events(
+            runtime.ctx.config.state_dir,
+            event_type=event_type,
+            query=query,
+            limit=limit,
+        )
+        return {"count": len(items), "items": items}
 
     return r

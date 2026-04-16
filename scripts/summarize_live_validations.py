@@ -11,7 +11,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Tuple
 
 
-DEFAULT_RUNS_DIR = Path("(workspace_root)/.opencas_live_test_state")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_RUNS_DIR = REPO_ROOT / ".opencas_live_test_state"
+SUMMARY_SCOPE = "retained_runs_dir_snapshot"
 
 
 @dataclass
@@ -164,6 +166,7 @@ def aggregate_reports(reports: List[Tuple[Path, Dict[str, Any]]]) -> Dict[str, A
     total_agent_successes = sum(item.agent_successes for item in summaries)
     durations = [item.duration_seconds for item in summaries if item.duration_seconds > 0]
     return {
+        "summary_scope": SUMMARY_SCOPE,
         "total_runs": total_runs,
         "total_direct_checks": total_direct,
         "total_direct_successes": total_direct_successes,
@@ -192,16 +195,25 @@ def aggregate_reports(reports: List[Tuple[Path, Dict[str, Any]]]) -> Dict[str, A
     }
 
 
+def _format_scalar(value: Any) -> str:
+    if value is None:
+        return "-"
+    return str(value)
+
+
 def render_markdown(summary: Dict[str, Any]) -> str:
     lines = [
         "# OpenCAS Live Validation Qualification Summary",
         "",
+        f"- Scope: `current retained run folders`",
         f"- Runs analyzed: `{summary['total_runs']}`",
-        f"- Direct success rate: `{summary['direct_success_rate']}`",
-        f"- Agent success rate: `{summary['agent_success_rate']}`",
-        f"- Average run duration (s): `{summary['average_run_duration_seconds']}`",
+        f"- Summary scope id: `{summary.get('summary_scope', SUMMARY_SCOPE)}`",
+        f"- Direct success rate: `{_format_scalar(summary['direct_success_rate'])}`",
+        f"- Agent success rate: `{_format_scalar(summary['agent_success_rate'])}`",
+        f"- Average run duration (s): `{_format_scalar(summary['average_run_duration_seconds'])}`",
         f"- Models: `{', '.join(summary['models']) or '-'}`",
         f"- Embedding models: `{', '.join(summary['embedding_models']) or '-'}`",
+        "- Historical note: this file reflects only the run folders currently retained under `.opencas_live_test_state`; use `qualification_remediation_rollup.md` and readiness/task docs for rerun-history decisions.",
         "",
         "## Recent Runs",
         "",

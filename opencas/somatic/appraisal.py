@@ -14,6 +14,7 @@ class AppraisalEventType(str, Enum):
     """Typed appraisal events that can trigger somatic state updates."""
 
     USER_INPUT_RECEIVED = "user_input_received"
+    SELF_RESPONSE_GENERATED = "self_response_generated"
     TOOL_EXECUTED = "tool_executed"
     TOOL_REJECTED = "tool_rejected"
     DAYDREAM_GENERATED = "daydream_generated"

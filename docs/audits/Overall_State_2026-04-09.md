@@ -3,13 +3,13 @@
 **Baseline:** `docs/opencas-architecture-and-comparison.md` (2026-04-08)
 
 ## 1. Executive Summary
-OpenCAS has made significant operational strides since the initial architectural assessment. While the core philosophy remains intact—a local-first autonomous operator combining LegacyPrototype's inner life with OpenClaw's raw execution power—the project has aggressively closed major foundational gaps identified in the initial report. It is now transitioning from a solid theoretical foundation into a deployment-ready system.
+OpenCAS has made significant operational strides since the initial architectural assessment. While the core philosophy remains intact—a local-first autonomous operator combining OpenBulma's inner life with OpenClaw's raw execution power—the project has aggressively closed major foundational gaps identified in the initial report. It is now transitioning from a solid theoretical foundation into a deployment-ready system.
 
 ## 2. Status vs. Initial Architecture Assessment
 
 ### What Has Been Fixed (Major Gaps Closed)
 *   **Vector Search Scaling:** The initial audit flagged the brute-force SQLite vector scan `O(N)` as a production liability without Qdrant. **Resolved:** A local Approximate Nearest Neighbor (ANN) backend using `hnswlib` has been successfully implemented (`opencas/embeddings/hnsw_backend.py`), providing scalable local memory retrieval without requiring an external Qdrant container.
-*   **Model Context Protocol (MCP) Support:** The initial audit highlighted the complete absence of MCP integration compared to LegacyPrototype-v4. **Resolved:** Full MCP support has been added via `mcp_client.py`, `mcp_adapter.py`, and `mcp_registry.py` inside `opencas/tools/`.
+*   **Model Context Protocol (MCP) Support:** The initial audit highlighted the complete absence of MCP integration compared to OpenBulma-v4. **Resolved:** Full MCP support has been added via `mcp_client.py`, `mcp_adapter.py`, and `mcp_registry.py` inside `opencas/tools/`.
 *   **Operational Validation:** The initial report noted a lack of real-world "shakedown." **Resolved:** Long integrated day-to-day scenarios (Scenarios 1-6) have been successfully executed, proving the system's ability to recover from browser drift, TUI errors, and provider timeouts.
 *   **Test Coverage:** Test coverage has expanded dramatically. The initial audit noted 644 tests; the suite now contains **838 tests**, representing an almost 30% increase in validated paths.
 

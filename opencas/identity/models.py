@@ -53,7 +53,14 @@ class ContinuityState(BaseModel):
     last_session_id: Optional[str] = None
     last_shutdown_time: Optional[datetime] = None
     boot_count: int = 0
+    compaction_count: int = 0
     version: str = "0.1.0"
     source_system: Optional[str] = None
     temporal_bridges: Dict[str, Any] = Field(default_factory=dict)
     integrity_report: Dict[str, Any] = Field(default_factory=dict)
+
+    # Phase 9: Continuous Present
+    continuous_present_score: float = Field(default=1.0, ge=0.0, le=1.0)
+    last_continuity_monologue: Optional[str] = None
+    continuity_decay_rate: float = 0.95  # multiplied per hour of sleep
+    continuity_recovery_rate: float = 0.05  # added per meaningful turn

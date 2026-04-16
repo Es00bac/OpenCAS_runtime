@@ -60,3 +60,38 @@ async def test_search_session_isolation(store):
     results = await store.search("alpha", session_id="s1")
     assert len(results) == 1
     assert results[0].content == "alpha beta"
+
+
+@pytest.mark.asyncio
+async def test_ensure_session_lists_empty_session_without_hidden_message(store):
+    await store.ensure_session("empty-session")
+
+    sessions = await store.list_session_ids(limit=10, status="active")
+    meta = await store.get_session_meta("empty-session")
+    recent = await store.list_recent("empty-session", limit=10)
+
+    assert any(item["session_id"] == "empty-session" for item in sessions)
+    assert meta is not None
+    assert meta["status"] == "active"
+    assert meta["message_count"] == 0
+    assert recent == []
+
+
+@pytest.mark.asyncio
+async def test_session_metadata_supports_rename_archive_and_search(store):
+    await store.ensure_session("portfolio-review")
+    await store.update_session_name("portfolio-review", "Portfolio Review")
+    await store.set_session_status("portfolio-review", "archived")
+
+    archived = await store.list_session_ids(limit=10, status="archived")
+    active = await store.list_session_ids(limit=10, status="active")
+    searched = await store.search_sessions("portfolio", status="archived", limit=10)
+    meta = await store.get_session_meta("portfolio-review")
+
+    assert any(item["session_id"] == "portfolio-review" for item in archived)
+    assert all(item["session_id"] != "portfolio-review" for item in active)
+    assert len(searched) == 1
+    assert searched[0]["name"] == "Portfolio Review"
+    assert meta is not None
+    assert meta["name"] == "Portfolio Review"
+    assert meta["status"] == "archived"

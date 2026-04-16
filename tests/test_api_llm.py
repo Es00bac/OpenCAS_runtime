@@ -5,6 +5,7 @@ import pytest_asyncio
 from unittest.mock import MagicMock, AsyncMock
 
 from opencas.api.llm import LLMClient
+from opencas.model_routing import ModelRoutingConfig
 from opencas.telemetry import EventKind, TelemetryStore, Tracer
 
 
@@ -156,3 +157,42 @@ async def test_llm_stream_records_token_telemetry(
     summary = token_telemetry.get_session_summary("session-3")
     assert summary.total_calls == 1
     assert summary.avg_latency_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_completion_uses_tiered_routing(
+    mock_provider_manager: MagicMock,
+) -> None:
+    client = LLMClient(
+        mock_provider_manager,
+        default_model="anthropic/claude-sonnet-4-6",
+        model_routing=ModelRoutingConfig(
+            mode="tiered",
+            light_model="google/gemini-2.5-flash",
+            standard_model="anthropic/claude-sonnet-4-6",
+            high_model="openai/gpt-5.3-codex",
+            extra_high_model="codex-cli/gpt-5.3-codex",
+        ),
+    )
+    await client.chat_completion(
+        messages=[{"role": "user", "content": "hello"}],
+        complexity="high",
+    )
+    mock_provider_manager.resolve.assert_called_once_with("openai/gpt-5.3-codex")
+
+
+def test_llm_resolve_model_for_single_mode_uses_same_model_for_every_tier() -> None:
+    mgr = MagicMock()
+    client = LLMClient(
+        mgr,
+        default_model="anthropic/claude-sonnet-4-6",
+        model_routing=ModelRoutingConfig(
+            mode="single",
+            single_model="codex-cli/gpt-5.3-codex",
+        ),
+    )
+
+    assert client.resolve_model_for_complexity(complexity="light") == "codex-cli/gpt-5.3-codex"
+    assert client.resolve_model_for_complexity(complexity="standard") == "codex-cli/gpt-5.3-codex"
+    assert client.resolve_model_for_complexity(complexity="high") == "codex-cli/gpt-5.3-codex"
+    assert client.resolve_model_for_complexity(complexity="extra_high") == "codex-cli/gpt-5.3-codex"

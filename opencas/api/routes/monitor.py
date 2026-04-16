@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Dict, List
 
 from fastapi import APIRouter
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from opencas.diagnostics.models import CheckStatus
 from opencas.telemetry import EventKind
@@ -42,6 +42,8 @@ class RuntimeStatusResponse(BaseModel):
     workspace: Dict[str, Any]
     sandbox: Dict[str, Any]
     execution: Dict[str, Any]
+    activity: Dict[str, Any] = Field(default_factory=dict)
+    consolidation: Dict[str, Any] = Field(default_factory=dict)
 
 
 def build_monitor_router(runtime: Any) -> APIRouter:
@@ -141,6 +143,8 @@ def build_monitor_router(runtime: Any) -> APIRouter:
                     "pty": {"total_count": 0, "running_count": 0, "completed_count": 0, "scope_count": 0, "entries": []},
                     "browser": {"available": False, "total_count": 0, "scope_count": 0, "entries": []},
                 },
+                "activity": {},
+                "consolidation": {},
             }
         return RuntimeStatusResponse(**snapshot)
 

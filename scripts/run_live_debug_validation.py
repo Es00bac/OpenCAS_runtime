@@ -14,7 +14,10 @@ from pathlib import Path
 from typing import Any, Dict, List
 from urllib.parse import quote
 
-sys.path.insert(0, str(Path(__file__).parent.parent))
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_SOURCE_ENV = REPO_ROOT.parent / "openbulma-v4" / ".env"
+
+sys.path.insert(0, str(REPO_ROOT))
 
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
 from opencas.runtime import AgentRuntime
@@ -32,7 +35,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--workspace-root",
-        default="(workspace_root)",
+        default=str(REPO_ROOT),
         help="Workspace root exposed to the agent.",
     )
     parser.add_argument(
@@ -42,7 +45,7 @@ def _build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--source-env",
-        default="(legacy_path)/.env",
+        default=str(DEFAULT_SOURCE_ENV) if DEFAULT_SOURCE_ENV.exists() else None,
         help="Source .env used to copy provider env material.",
     )
     parser.add_argument(
@@ -102,7 +105,7 @@ async def main() -> None:
 
     now = datetime.now(timezone.utc)
     run_id = now.strftime("debug-validation-%Y%m%d-%H%M%S")
-    state_dir = Path(args.state_dir or f"(workspace_root)/.opencas_live_test_state/{run_id}")
+    state_dir = Path(args.state_dir or (REPO_ROOT / ".opencas_live_test_state" / run_id))
     state_dir.mkdir(parents=True, exist_ok=True)
     session_id = args.session_id or run_id
     workspace_root = Path(args.workspace_root).expanduser().resolve()
@@ -116,7 +119,9 @@ async def main() -> None:
         default_llm_model=args.model,
         embedding_model_id=args.embedding_model,
         credential_source_config_path=Path(args.source_config).expanduser().resolve(),
-        credential_source_env_path=Path(args.source_env).expanduser().resolve(),
+        credential_source_env_path=(
+            Path(args.source_env).expanduser().resolve() if args.source_env else None
+        ),
         credential_profile_ids=[
             "kimi-coding:default",
             "google:default",
@@ -435,7 +440,7 @@ async def _run_agent_checks(
                 "assign it a bounded real task. Tell Kilo to create the file "
                 f"{kilocode_task_path} with exactly this content:\n\n"
                 "# Kilocode Supervised Validation Note\n\n"
-                "- Workspace: (workspace_root)\n"
+                f"- Workspace: {workspace_root}\n"
                 "- Goal: verify PTY-supervised real work\n"
                 "- Status: completed by kilocode in TUI\n\n"
                 "Tell Kilo not to explain the work: it should only create the file exactly as "

@@ -14,6 +14,7 @@ class RefusalCategory(str, Enum):
     BOUNDARY_VIOLATION = "boundary_violation"
     HARMFUL_REQUEST = "harmful_request"
     POLICY_HOOK_BLOCK = "policy_hook_block"
+    VALUE_VIOLATION = "value_violation"
 
 
 class ConversationalRequest(BaseModel):

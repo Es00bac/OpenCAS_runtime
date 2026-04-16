@@ -96,7 +96,18 @@ class SelfApprovalLadder:
             reasons.append("explicit_boundary_hit=" + ",".join(boundary_hits))
 
         score = max(0.0, min(1.0, score))
-        level, confidence, reasoning = self._score_to_level(score, reasons)
+        
+        threshold_adjustment = 0.0
+        if self.relational:
+            raw_musubi = self.relational.state.musubi
+            if raw_musubi > 0.5:
+                threshold_adjustment = -0.05
+                reasons.append("relational_autonomy: high musubi")
+            elif raw_musubi < -0.3:
+                threshold_adjustment = 0.05
+                reasons.append("relational_caution: low musubi")
+        
+        level, confidence, reasoning = self._score_to_level(score, reasons, threshold_adjustment)
 
         decision = ApprovalDecision(
             level=level,
@@ -310,14 +321,18 @@ class SelfApprovalLadder:
             return True
         return False
 
-    @staticmethod
-    def _score_to_level(score: float, reasons: List[str]) -> tuple[ApprovalLevel, float, str]:
-        if score < 0.20:
+    def _score_to_level(self, score: float, reasons: List[str], threshold_adjustment: float = 0.0) -> tuple[ApprovalLevel, float, str]:
+        t1 = 0.20 + threshold_adjustment
+        t2 = 0.45 + threshold_adjustment
+        t3 = 0.70 + threshold_adjustment
+        if score < t1:
             return ApprovalLevel.CAN_DO_NOW, 1.0 - score, "; ".join(reasons)
-        if score < 0.45:
+        if score < t2:
             return ApprovalLevel.CAN_DO_WITH_CAUTION, 1.0 - score, "; ".join(reasons)
-        if score < 0.70:
+        if score < t3:
             evidence = ["provide more context", "confirm target scope"]
+            if threshold_adjustment > 0:
+                evidence.extend(["verify relational trust", "check boundary alignment"])
             return (
                 ApprovalLevel.CAN_DO_AFTER_MORE_EVIDENCE,
                 1.0 - score,

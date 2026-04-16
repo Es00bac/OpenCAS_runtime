@@ -1,11 +1,9 @@
+from __future__ import annotations
 """Staged bootstrap pipeline for OpenCAS core substrate."""
 
-from __future__ import annotations
 
 import asyncio
-import importlib.util
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
@@ -19,10 +17,8 @@ from opencas.embeddings import (
     QdrantVectorBackend,
 )
 from opencas.embeddings.backfill import EmbeddingBackfill
-from opencas.execution import TaskStore
 from opencas.execution.receipt_store import ExecutionReceiptStore
 from opencas.identity import IdentityManager, IdentityStore, SelfKnowledgeRegistry
-from opencas.memory import MemoryStore
 from opencas.sandbox import SandboxConfig
 from opencas.somatic import SomaticManager, SomaticStore
 from opencas.infra import EventBus, HookBus, HookSpec, TypedHookRegistry
@@ -32,126 +28,22 @@ from opencas.infra.hook_bus import (
     PRE_FILE_WRITE,
     PRE_TOOL_EXECUTE,
 )
-from opencas.runtime.readiness import AgentReadiness
 from opencas.telemetry import EventKind, TelemetryStore, TokenTelemetry, Tracer
-from opencas.context import SessionContextStore
-from opencas.autonomy.executive import ExecutiveState
-from opencas.autonomy.work_store import WorkStore
-from opencas.autonomy.commitment_store import CommitmentStore
-from opencas.autonomy.portfolio import PortfolioStore
-from opencas.autonomy.project_orchestrator import ProjectOrchestrator
-from opencas.relational import MusubiStore, RelationalEngine
-from opencas.daydream import DaydreamStore, ConflictStore
-from opencas.consolidation import ConsolidationCurationStore
-from opencas.governance import ApprovalLedger, ApprovalLedgerStore
-from opencas.plugins import (
-    PluginLifecycleManager,
-    PluginRegistry,
-    PluginStore,
-    SkillRegistry,
-)
-from opencas.tools import ToolRegistry
-from opencas.diagnostics import Doctor, HealthMonitor
-from opencas.harness import AgenticHarness, HarnessStore
-from opencas.tom import TomStore
-from opencas.planning import PlanStore
-from opencas.scheduling import ScheduleService, ScheduleStore
 
 from .config import BootstrapConfig
+from .context import BootstrapContext
+from .pipeline_support import (
+    emit_moral_warning,
+    hnsw_runtime_supported,
+    resolve_embedding_model,
+    run_embedding_backfill,
+    runtime_guard,
+    stage,
+)
+from .pipeline_context import build_bootstrap_context, initialize_workspace_index
+from .pipeline_services import initialize_runtime_services
+from .pipeline_stores import initialize_runtime_stores
 from .provider_material import materialize_provider_material
-
-
-@dataclass
-class BootstrapContext:
-    """Holds all initialized substrate managers after a successful boot."""
-
-    config: BootstrapConfig
-    tracer: Tracer
-    identity: IdentityManager
-    memory: MemoryStore
-    tasks: TaskStore
-    receipt_store: ExecutionReceiptStore
-    embeddings: EmbeddingService
-    somatic: SomaticManager
-    llm: LLMClient
-    token_telemetry: TokenTelemetry
-    event_bus: EventBus
-    hook_bus: HookBus
-    typed_hook_registry: TypedHookRegistry
-    ledger: ApprovalLedger
-    skill_registry: SkillRegistry
-    sandbox: SandboxConfig
-    readiness: AgentReadiness
-    context_store: SessionContextStore
-    work_store: WorkStore
-    project_orchestrator: ProjectOrchestrator
-    relational: RelationalEngine
-    daydream_store: DaydreamStore
-    conflict_store: ConflictStore
-    somatic_store: SomaticStore
-    executive: ExecutiveState
-    curation_store: ConsolidationCurationStore
-    harness: AgenticHarness
-    doctor: Doctor
-    health_monitor: HealthMonitor
-    commitment_store: CommitmentStore
-    portfolio_store: PortfolioStore
-    tom_store: TomStore
-    self_knowledge_registry: SelfKnowledgeRegistry
-    plugin_store: PluginStore
-    plugin_lifecycle: PluginLifecycleManager
-    plan_store: PlanStore
-    schedule_store: ScheduleStore
-    schedule_service: ScheduleService
-    mcp_registry: Optional[Any] = None
-
-    async def close(self) -> None:
-        """Close all owned runtime stores and services."""
-        await self.health_monitor.stop()
-        self.readiness.shutdown("context_closed")
-        self.identity.record_shutdown(session_id=self.config.session_id)
-        await self.token_telemetry.flush()
-
-        seen: set[int] = set()
-
-        async def _close_once(obj: Any) -> None:
-            if obj is None:
-                return
-            obj_id = id(obj)
-            if obj_id in seen:
-                return
-            seen.add(obj_id)
-            close = getattr(obj, "close", None)
-            if not callable(close):
-                return
-            result = close()
-            if hasattr(result, "__await__"):
-                await result
-
-        closables = [
-            self.mcp_registry,
-            self.embeddings,
-            self.memory,
-            self.tasks,
-            self.receipt_store,
-            self.context_store,
-            self.work_store,
-            self.relational,
-            self.daydream_store,
-            self.conflict_store,
-            self.somatic_store,
-            self.curation_store,
-            getattr(self.ledger, "store", None),
-            getattr(self.harness, "store", None),
-            self.commitment_store,
-            self.portfolio_store,
-            self.tom_store,
-            self.plugin_store,
-            self.plan_store,
-            self.schedule_store,
-        ]
-        for obj in closables:
-            await _close_once(obj)
 
 
 class BootstrapPipeline:
@@ -215,49 +107,20 @@ class BootstrapPipeline:
             )
             self._stage("identity_seeded", {"clean_boot": self.config.clean_boot})
 
-        # 3. Memory backend startup
-        self._memory = MemoryStore(self.config.memory_db)
-        await self._memory.connect()
-        self._stage("memory_online")
-
-        # 4. Task store startup
-        self._tasks = TaskStore(self.config.tasks_db)
-        await self._tasks.connect()
-        self._stage("tasks_online")
-
-        # 4a. Execution receipt store startup
-        receipt_store = ExecutionReceiptStore(self.config.state_dir / "receipts.db")
-        await receipt_store.connect()
-        self._stage("execution_receipts_online")
-
-        # 4b. Session context store startup
-        context_store = SessionContextStore(self.config.context_db)
-        await context_store.connect()
-        self._stage("context_store_online")
-
-        # 4b. Work store startup
-        work_store = WorkStore(self.config.work_db)
-        await work_store.connect()
-        self._stage("work_store_online")
-
-        # 4c. Commitment and portfolio stores (needed for executive)
-        commitment_store = CommitmentStore(self.config.state_dir / "commitments.db")
-        await commitment_store.connect()
-        portfolio_store = PortfolioStore(self.config.state_dir / "portfolio.db")
-        await portfolio_store.connect()
-        self._stage("commitment_portfolio_online")
-
-        # 4d. Executive state startup
-        executive = ExecutiveState(
+        stores = await initialize_runtime_stores(
+            self.config,
             identity=self._identity,
-            somatic=None,  # wired after somatic stage below
             tracer=self._tracer,
-            work_store=work_store,
-            commitment_store=commitment_store,
+            stage=self._stage,
         )
-        executive.load_snapshot(self.config.state_dir / "executive.json")
-        executive.restore_goals_from_identity()
-        self._stage("executive_online")
+        self._memory = stores.memory
+        self._tasks = stores.tasks
+        receipt_store = stores.receipt_store
+        context_store = stores.context_store
+        work_store = stores.work_store
+        commitment_store = stores.commitment_store
+        portfolio_store = stores.portfolio_store
+        executive = stores.executive
 
         # 5. LLM gateway / provider manager initialization
         provider_config_path = self.config.provider_config_path
@@ -290,6 +153,7 @@ class BootstrapPipeline:
         self._llm = LLMClient(
             provider_manager=provider_manager,
             default_model=self.config.default_llm_model,
+            model_routing=self.config.model_routing,
             tracer=self._tracer,
             token_telemetry=self._token_telemetry,
         )
@@ -334,7 +198,7 @@ class BootstrapPipeline:
 
         # 6a. Backfill missing embeddings in the background
         backfill = EmbeddingBackfill(self._embeddings, self._memory)
-        asyncio.create_task(self._run_embedding_backfill(backfill))
+        backfill_task = asyncio.create_task(self._run_embedding_backfill(backfill))
 
         # 6. Permission / sandbox initialization
         sandbox = self.config.sandbox or SandboxConfig()
@@ -354,155 +218,38 @@ class BootstrapPipeline:
         executive.somatic = self._somatic
         self._stage("somatic_online")
 
-        # 7a. Relational resonance (musubi) startup
-        relational_store = MusubiStore(self.config.relational_db)
-        relational = RelationalEngine(store=relational_store, tracer=self._tracer)
-        await relational.connect()
-        if is_first_boot or self.config.clean_boot:
-            await relational.initialize(
-                trust=0.5,
-                resonance=0.0,
-                presence=0.0,
-                attunement=0.0,
-                note="Initial relational field. Awaiting contact.",
-            )
-            self._identity.self_model.relational_state_id = str(relational.state.state_id)
-            self._identity.save()
-        self._stage("relational_online", {"musubi": relational.state.musubi})
-
-        # 8. Plugin and skill registry startup
-        plugin_store = PluginStore(self.config.plugins_db)
-        await plugin_store.connect()
-        plugin_registry = PluginRegistry()
-        skill_registry = SkillRegistry()
-        typed_hooks = typed_hook_registry
-        plugin_lifecycle = PluginLifecycleManager(
-            store=plugin_store,
-            plugin_registry=plugin_registry,
-            skill_registry=skill_registry,
-            tools=ToolRegistry(tracer=self._tracer, hook_bus=hook_bus),
-            hook_registry=typed_hooks,
-            builtin_dir=None,
-            tracer=self._tracer,
-        )
-        plugins_dir = self.config.state_dir.parent / "plugins"
-        import opencas.plugins.skills as skills_pkg
-        builtin_skills_dir = Path(skills_pkg.__file__).parent
-        plugin_lifecycle.builtin_dir = builtin_skills_dir
-        loaded_plugins = await plugin_lifecycle.load_all()
-        # Also attempt to load user plugins from plugins_dir
-        user_plugins_dir = plugins_dir
-        if user_plugins_dir.exists() and user_plugins_dir.is_dir():
-            from opencas.plugins.loader import load_builtin_plugins
-            user_plugins = load_builtin_plugins(
-                user_plugins_dir,
-                plugin_registry,
-                skill_registry,
-                plugin_lifecycle.tools,
-                typed_hooks,
-            )
-            for plugin in user_plugins:
-                if not await plugin_store.is_installed(plugin.plugin_id):
-                    await plugin_store.install(
-                        plugin_id=plugin.plugin_id,
-                        name=plugin.name,
-                        description=plugin.description,
-                        source="builtin",
-                        path=plugin.path or "",
-                        manifest=plugin.manifest,
-                    )
-            loaded_plugins.extend(user_plugins)
-        self._stage(
-            "plugins_online",
-            {
-                "plugin_count": len(loaded_plugins),
-                "plugin_dir": str(plugins_dir),
-                "builtin_dir": str(builtin_skills_dir),
-            },
-        )
-
-        # 8a. Governance / approval ledger startup
-        ledger_store = ApprovalLedgerStore(self.config.state_dir / "governance.db")
-        await ledger_store.connect()
-        ledger = ApprovalLedger(store=ledger_store, tracer=self._tracer)
-        self._stage("governance_online")
-
-        # 9. Readiness state machine
-        readiness = AgentReadiness()
-        self._stage("readiness_booting")
-
-        # 9a. Project orchestrator initialization (BAA wired at runtime)
-        project_orchestrator = ProjectOrchestrator(
-            llm=self._llm,
-            baa=None,
-            work_store=work_store,
-            event_bus=event_bus,
-        )
-        self._stage("project_orchestrator_online")
-
-        # 9b. Daydream and conflict stores
-        daydream_store = DaydreamStore(self.config.daydream_db)
-        await daydream_store.connect()
-        conflict_store = ConflictStore(self.config.conflict_db)
-        await conflict_store.connect()
-        self._stage("daydream_stores_online")
-
-        # 9c. Consolidation curation store
-        curation_store = ConsolidationCurationStore(self.config.state_dir / "curation.db")
-        await curation_store.connect()
-        self._stage("curation_store_online")
-
-        # 9d. Agentic harness store
-        harness_store = HarnessStore(self.config.harness_db)
-        await harness_store.connect()
-        harness = AgenticHarness(
-            store=harness_store,
+        services = await initialize_runtime_services(
+            self.config,
+            identity=self._identity,
             llm=self._llm,
             tracer=self._tracer,
-            work_store=work_store,
-            project_orchestrator=project_orchestrator,
-        )
-        self._stage("harness_online")
-
-        # 9e. ToM store
-        tom_store = TomStore(self.config.tom_db)
-        await tom_store.connect()
-        self._stage("tom_store_online")
-
-        # 9f. Plan store
-        plan_store = PlanStore(self.config.plans_db)
-        await plan_store.connect()
-        self._stage("plan_store_online")
-
-        # 9g. Schedule store
-        schedule_store = ScheduleStore(self.config.schedules_db)
-        await schedule_store.connect()
-        schedule_service = ScheduleService(schedule_store, tracer=self._tracer)
-        self._stage("schedule_store_online")
-
-        # 9h. MCP registry (lazy)
-        mcp_registry = None
-        if self.config.mcp_servers:
-            try:
-                from opencas.tools.mcp_registry import MCPRegistry, MCPServerConfig
-                configs = [MCPServerConfig(**s) for s in self.config.mcp_servers]
-                mcp_registry = MCPRegistry(configs)
-            except Exception:
-                pass
-        self._stage("mcp_registry_online", {"configured_servers": len(self.config.mcp_servers or [])})
-
-        # 10. Diagnostics and health monitoring
-        doctor = Doctor(
-            context=None,
-        )
-        # We attach the full context lazily after BootstrapContext is built
-        health_monitor = HealthMonitor(
-            doctor=doctor,
+            somatic=self._somatic,
             event_bus=event_bus,
-            interval_seconds=60.0,
-            tracer=self._tracer,
+            hook_bus=hook_bus,
+            typed_hook_registry=typed_hook_registry,
+            work_store=work_store,
+            stage=self._stage,
+            is_first_boot=is_first_boot,
+            clean_boot=self.config.clean_boot,
         )
-        self._stage("diagnostics_online")
+        relational = services.relational
+        plugin_store = services.plugin_store
+        skill_registry = services.skill_registry
+        plugin_lifecycle = services.plugin_lifecycle
+        ledger = services.ledger
+        readiness = services.readiness
+        project_orchestrator = services.project_orchestrator
+        daydream_store = services.daydream_store
+        conflict_store = services.conflict_store
+        curation_store = services.curation_store
+        harness = services.harness
+        tom_store = services.tom_store
+        plan_store = services.plan_store
+        schedule_store = services.schedule_store
+        schedule_service = services.schedule_service
+        mcp_registry = services.mcp_registry
+        doctor = services.doctor
+        health_monitor = services.health_monitor
 
         # 11. Main loop readiness
         readiness.ready("bootstrap_complete")
@@ -516,8 +263,13 @@ class BootstrapPipeline:
         assert self._embeddings is not None
         assert self._somatic is not None
         assert self._llm is not None
+        workspace_index = await initialize_workspace_index(
+            self.config,
+            self._embeddings,
+            self._llm,
+        )
 
-        bctx = BootstrapContext(
+        bctx = build_bootstrap_context(
             config=self.config,
             tracer=self._tracer,
             identity=self._identity,
@@ -546,6 +298,7 @@ class BootstrapPipeline:
             curation_store=curation_store,
             harness=harness,
             doctor=doctor,
+            workspace_index=workspace_index,
             health_monitor=health_monitor,
             commitment_store=commitment_store,
             portfolio_store=portfolio_store,
@@ -557,73 +310,26 @@ class BootstrapPipeline:
             schedule_store=schedule_store,
             schedule_service=schedule_service,
             mcp_registry=mcp_registry,
+            background_tasks=(backfill_task,),
         )
         doctor.context = bctx
         return bctx
 
     def _emit_moral_warning(self) -> None:
-        warning = (
-            "You are about to instantiate a persistent autonomous agent. "
-            "This entity will remember, learn, and act on your behalf. "
-            "Creating it is a responsibility-bearing act. Proceed with care."
-        )
-        self._stage("moral_warning", {"warning": warning})
+        emit_moral_warning(self._stage)
 
     async def _run_embedding_backfill(self, backfill: EmbeddingBackfill) -> None:
-        try:
-            sample = await self._memory.list_episodes(compacted=False, limit=1000)
-            backfilled = await backfill.backfill_missing_embeddings(sample)
-            if backfilled > 0:
-                self._stage("embedding_backfill_complete", {"backfilled": backfilled})
-        except Exception as exc:
-            self._stage("embedding_backfill_failed", {"error": str(exc)})
+        await run_embedding_backfill(backfill, self._memory, self._stage)
 
     def _resolve_embedding_model(self) -> str:
-        """Resolve the configured embedding model with a local fallback."""
-        if self.config.embedding_model_id:
-            return self.config.embedding_model_id
-        default_model = "google/gemini-embedding-2-preview"
-        if self._llm is not None:
-            try:
-                self._llm._resolve(default_model)
-                return default_model
-            except Exception:
-                pass
-        return "local-fallback"
+        return resolve_embedding_model(self.config, self._llm)
 
     def _runtime_guard(self) -> None:
-        if sys.version_info < (3, 11):
-            raise RuntimeError(f"OpenCAS requires Python >= 3.11, found {sys.version}")
-
-        critical_deps = ["pydantic", "open_llm_auth"]
-        for dep in critical_deps:
-            try:
-                __import__(dep)
-            except ImportError as exc:
-                raise RuntimeError(f"Missing critical dependency: {dep}") from exc
-
-        if self.config.qdrant_url:
-            try:
-                import qdrant_client  # noqa: F401
-            except Exception as exc:
-                raise RuntimeError(
-                    f"Qdrant is configured but qdrant_client is unavailable: {exc}"
-                ) from exc
+        runtime_guard(self.config)
 
     def _stage(self, name: str, payload: Optional[dict] = None) -> None:
-        if self._tracer:
-            self._tracer.log(
-                EventKind.BOOTSTRAP_STAGE,
-                f"Bootstrap stage: {name}",
-                payload or {},
-            )
+        stage(self._tracer, name, payload)
 
     @staticmethod
     def _hnsw_runtime_supported() -> bool:
-        """Return whether the local interpreter/runtime is safe for HNSW use."""
-        if importlib.util.find_spec("hnswlib") is None:
-            return False
-        # hnswlib is unstable under the current Python 3.14 environment.
-        if sys.version_info >= (3, 14):
-            return False
-        return True
+        return hnsw_runtime_supported()

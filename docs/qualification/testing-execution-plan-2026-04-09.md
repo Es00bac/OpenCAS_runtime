@@ -34,7 +34,7 @@ What still requires the human/operator:
 Run this before any live or repeated qualification work:
 
 ```bash
-cd (workspace_root)
+cd .
 source .venv/bin/activate
 python scripts/sweep_operator_processes.py --json
 ```
@@ -69,12 +69,17 @@ Optional local-only scope:
 Run these before changing code:
 
 ```bash
-timeout 180s .venv/bin/python -m pytest tests/test_operations_routes.py -q
-timeout 120s .venv/bin/python -m pytest tests/test_dashboard_api.py -q
+timeout 120s .venv/bin/python -m pytest tests/test_api_smoke.py -q
 timeout 120s .venv/bin/python -m pytest tests/test_sweep_operator_processes.py -q
 ```
 
 If any of these fail, stop qualification work and hand off to GPT 5.4 High for code repair.
+
+Why the smoke file is the baseline gate:
+
+- in the current Python 3.14 shell environment, FastAPI `TestClient` can hang even when the underlying route logic is healthy
+- `tests/test_api_smoke.py` uses direct route invocation and static asset inspection instead of `TestClient`, so it is the reliable pre-run health gate here
+- the broader `tests/test_operations_routes.py` and `tests/test_dashboard_api.py` suites remain useful as deeper coverage when the environment supports them cleanly
 
 ## Phase 2: Qualification Inspection
 
@@ -115,9 +120,18 @@ After the rerun:
 python scripts/summarize_live_validations.py \
   --runs-dir .opencas_live_test_state \
   --output-dir docs/qualification
+python scripts/summarize_qualification_remediation.py \
+  --runs-dir .opencas_live_test_state \
+  --history-path .opencas_live_test_state/qualification_rerun_history.jsonl \
+  --output-dir docs/qualification
 ```
 
 Direct CLI runs of `scripts/run_qualification_cycle.py` now auto-record rerun provenance into `.opencas_live_test_state/qualification_rerun_history.jsonl`, even when no API request launched them.
+
+Interpretation note:
+
+- `live_validation_summary.md` is a retained-run snapshot of the folders currently present under `.opencas_live_test_state`
+- `qualification_remediation_rollup.md` is the request-level decision surface for whether a weak label still warrants reruns or now justifies code changes
 
 ## Phase 4: Post-Run Cleanup
 

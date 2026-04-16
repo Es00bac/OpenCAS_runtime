@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Test script for AsyncHTTPClient."""
 
-import sys
 import asyncio
+import sys
+from pathlib import Path
 
-
+OPENBULMA_PROJECTS = Path(__file__).resolve().parents[1].parent / "openbulma-v4" / "workspaces" / "v3-projects"
+if OPENBULMA_PROJECTS.exists():
+    sys.path.insert(0, str(OPENBULMA_PROJECTS))
 
 from async_http_client import (
     AsyncHTTPClient,

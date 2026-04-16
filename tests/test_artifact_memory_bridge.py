@@ -28,7 +28,7 @@ async def test_artifact_bridge_syncs_text_artifact_into_memory(tmp_path: Path) -
     bridge = ArtifactMemoryBridge(state_dir=state_dir, memory=memory, embeddings=embeddings)
 
     result = await bridge.sync()
-    episodes = await memory.list_artifact_episodes("story/story.md")
+    episodes = await memory.list_artifact_episodes(".opencas/plans/story/story.md")
     memories = await memory.list_memories(limit=10)
 
     assert result["artifacts"] == 1
@@ -36,7 +36,7 @@ async def test_artifact_bridge_syncs_text_artifact_into_memory(tmp_path: Path) -
     assert episodes[0].kind.value == "artifact"
     assert episodes[0].payload["artifact"]["title"] == "The Lighthouse Keeper's Letter"
     assert "bring the keeper home" in episodes[0].content
-    assert any("artifact_path:story/story.md" in item.tags for item in memories)
+    assert any("artifact_path:.opencas/plans/story/story.md" in item.tags for item in memories)
 
     await memory.close()
     await cache.close()
@@ -58,10 +58,10 @@ async def test_artifact_bridge_updates_changed_artifact_without_leaving_stale_ch
     bridge = ArtifactMemoryBridge(state_dir=state_dir, memory=memory, embeddings=embeddings)
 
     first = await bridge.sync()
-    initial = await memory.list_artifact_episodes("story.md")
+    initial = await memory.list_artifact_episodes(".opencas/plans/story.md")
     artifact.write_text("short artifact now\n", encoding="utf-8")
     second = await bridge.sync()
-    updated = await memory.list_artifact_episodes("story.md")
+    updated = await memory.list_artifact_episodes(".opencas/plans/story.md")
 
     assert first["episodes_created"] >= 2
     assert len(initial) >= 2

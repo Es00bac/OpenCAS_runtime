@@ -14,6 +14,8 @@ from scripts.run_live_debug_validation import (
     _render_markdown_report,
 )
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def test_collect_expected_artifact_reads_existing_file(tmp_path: Path) -> None:
     target = tmp_path / "note.md"
@@ -77,7 +79,7 @@ def test_render_markdown_report_supports_in_progress_reports() -> None:
         "run_id": "debug-validation-test",
         "session_id": "debug-validation-test",
         "state_dir": "/tmp/debug-validation-test",
-        "workspace_root": "(workspace_root)",
+        "workspace_root": str(REPO_ROOT),
         "model": "kimi-coding/k2p5",
         "embedding_model": "google/gemini-embedding-2-preview",
         "started_at": "2026-04-08T00:00:00+00:00",
@@ -112,7 +114,7 @@ def test_render_markdown_report_includes_request_id() -> None:
         "run_id": "debug-validation-test",
         "session_id": "debug-validation-test",
         "state_dir": "/tmp/debug-validation-test",
-        "workspace_root": "(workspace_root)",
+        "workspace_root": str(REPO_ROOT),
         "model": "kimi-coding/k2p5",
         "embedding_model": "google/gemini-embedding-2-preview",
         "request_id": "req-123",

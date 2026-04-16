@@ -1,6 +1,6 @@
 """Pure scoring helpers for emotionally-aware memory retrieval.
 
-These functions are ported and adapted from LegacyPrototype-v4's MemoryFabric
+These functions are ported and adapted from OpenBulma-v4's MemoryFabric
 multi-signal fusion engine.
 """
 

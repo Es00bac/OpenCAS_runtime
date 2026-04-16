@@ -1,48 +1,83 @@
 {
-  "history_path": "(workspace_root)/.opencas_live_test_state/qualification_rerun_history.jsonl",
-  "runs_dir": "(workspace_root)/.opencas_live_test_state",
-  "count": 2,
+  "history_path": "${REPO_ROOT}/.opencas_live_test_state/qualification_rerun_history.jsonl",
+  "runs_dir": "${REPO_ROOT}/.opencas_live_test_state",
+  "rate_scope": "retained_label_runs",
+  "count": 3,
   "items": [
     {
-      "request_id": "eba545433ee84ad494552f5ed13bc1cf",
-      "label": "integrated_operator_workflow",
-      "returncode": 1,
-      "latest_run_id": null,
-      "generated_run_ids": [],
-      "before_rate": 0.75,
-      "after_rate": 0.75,
-      "previous_run": {
-        "run_id": "debug-validation-20260409-164343",
-        "success": true,
-        "outcome": "artifact_verified",
-        "response": "Factual summary:\n- Created an active plan with ID `plan-5d1ebdd9` via `workflow_create_plan`.\n- Opened the provided `data:text/html` page in a headless browser, extracted the mission and three bullet points, then closed the browser session.\n- Launched `vim -Nu NONE -n` in a PTY session, wrote the required report to `(workspace_root)/.opencas_live_test_state/debug-validation-20260409-164343/workspace_artifacts/notes/integrated_operator_validation.md`, saved with `:wq`, and exited successfully (14 lines, 422 bytes written).\n- Verified the file contents with `fs_read_file`; all required sections and bullets are present."
-      },
-      "latest_run": null,
-      "recommended_action": "investigate_runner"
-    },
-    {
-      "request_id": "24a6b4e5b1b2423297c8fb0ff5da3752",
+      "request_id": "7ddf2492ba1946328ca6398e7b541fed",
       "label": "integrated_operator_workflow",
       "returncode": 0,
-      "latest_run_id": "debug-validation-20260409-160102",
+      "latest_run_id": "debug-validation-20260415-155925",
       "generated_run_ids": [
-        "debug-validation-20260409-160102"
+        "debug-validation-20260415-155629",
+        "debug-validation-20260415-155925"
       ],
-      "before_rate": 0.5,
-      "after_rate": 0.667,
+      "before_rate": 1.0,
+      "after_rate": 1.0,
       "previous_run": {
-        "run_id": "debug-validation-20260409-003117",
+        "run_id": "debug-validation-20260415-155629",
         "success": true,
         "outcome": "artifact_verified",
-        "response": "Summary:\n\n- Created plan `plan-52f3015f` for Integrated Operator Validation.\n- Opened the data URL in a headless browser, extracted the mission and three bullet points.\n- Wrote the final report via `vim -Nu NONE` in a PTY session to:\n  `(workspace_root)/.opencas_live_test_state/debug-validation-20260409-003117/workspace_artifacts/notes/integrated_operator_validation.md`\n- Verified the file exists and contains the required sections.\n\nNote: there was minor friction where the first vim session did not cleanly exit and left a swap file; recovery and a second vim session succeeded, and the final file was written and verified. The file includes an extra `:wq` artifact at the end because the first session\u2019s buffer was recovered with the command line still in the buffer. If desired, I can clean that up."
+        "response": "Done.\n\n- **Plan created:** `plan-21c89978`\n- **Browser inspection:** Opened the data URL, extracted the mission and three bullet points.\n- **PTY editing:** Wrote the report in `vim -Nu NONE -n` and saved it with `:wq` (14 lines, 422 bytes written).\n- **Verification:** File exists at `${REPO_ROOT}/.opencas_live_test_state/debug-validation-20260415-155629/workspace_artifacts/notes/integrated_operator_validation.md` with all required sections and bullets."
       },
       "latest_run": {
-        "run_id": "debug-validation-20260409-160102",
+        "run_id": "debug-validation-20260415-155925",
         "success": true,
         "outcome": "artifact_verified",
-        "response": "**Summary**\n\n- **Plan created:** `plan-0b490a76` for Integrated Operator Validation.\n- **Browser inspection:** Opened the data URL, extracted the mission (\"validate coordinated planning, browser inspection, and PTY editing\") and three bullet points (Priority, Evidence, Closure).\n- **PTY editing:** Launched `vim -Nu NONE -n`, wrote the report, saved, and exited successfully (14 lines, 423 bytes written).\n- **Verification:** File confirmed at `(workspace_root)/.opencas_live_test_state/debug-validation-20260409-160102/workspace_artifacts/notes/integrated_operator_validation.md` with the required sections and bullets. No failures encountered."
+        "response": "Done.\n\n- Plan created: `plan-349a1721`\n- Browser opened the data URL and extracted the mission plus three bullet points.\n- PTY vim session wrote the report to `${REPO_ROOT}/.opencas_live_test_state/debug-validation-20260415-155925/workspace_artifacts/notes/integrated_operator_validation.md`, saved 14 lines (422 bytes), and exited cleanly.\n- Filesystem read confirmed the file contains the required sections and bullets."
       },
-      "recommended_action": "continue_testing"
+      "recommended_action": "watch_only"
+    },
+    {
+      "request_id": "0249235e74ae4b8382c83c76e30f8e91",
+      "label": "kilocode_supervised_work",
+      "returncode": 0,
+      "latest_run_id": "debug-validation-20260415-162602",
+      "generated_run_ids": [
+        "debug-validation-20260415-162521",
+        "debug-validation-20260415-162602"
+      ],
+      "before_rate": 0.0,
+      "after_rate": 0.0,
+      "previous_run": {
+        "run_id": "debug-validation-20260415-162521",
+        "success": false,
+        "outcome": "artifact_missing",
+        "response": "The supervised session did not produce the file. Kilo's TUI started and was ready for input, but after 5 rounds it timed out without creating `${REPO_ROOT}/.opencas_live_test_state/debug-validation-20260415-162521/workspace_artifacts/notes/kilocode_supervised_validation_note.md`. I also could not kill/remove the session cleanly (both returned `false`). \n\nSummary: PTY-supervised `kilocode` launch succeeded, but the task completion failed\u2014no file was created and session cleanup encountered errors."
+      },
+      "latest_run": {
+        "run_id": "debug-validation-20260415-162602",
+        "success": false,
+        "outcome": "artifact_missing",
+        "response": "Result: failure.\n\n- `kilocode` launched in its TUI and reached an interactive ready state.\n- The supervised session ran through 6 observation rounds without the target file being created.\n- The file `${REPO_ROOT}/.opencas_live_test_state/debug-validation-20260415-162602/workspace_artifacts/notes/kilocode_supervised_validation_note.md` does not exist.\n- PTY session cleaned up.\n\nLikely cause: `kilocode` may require explicit user confirmation in its TUI before executing file writes, or the prompt was not submitted/actioned as expected. The supervision tool observed idle readiness but could not drive the TUI to completion."
+      },
+      "recommended_action": "code_change_justified"
+    },
+    {
+      "request_id": "b404b54a8f414e36a6f96d531708b6bf",
+      "label": "kilocode_supervised_work",
+      "returncode": 0,
+      "latest_run_id": "debug-validation-20260415-163002",
+      "generated_run_ids": [
+        "debug-validation-20260415-162921",
+        "debug-validation-20260415-163002"
+      ],
+      "before_rate": 0.333,
+      "after_rate": 0.5,
+      "previous_run": {
+        "run_id": "debug-validation-20260415-162921",
+        "success": true,
+        "outcome": "artifact_verified",
+        "response": "Done.\n\n- **Kilocode TUI session**: launched and supervised successfully.\n- **Task**: create the exact validation note file.\n- **Result**: file created at the requested path with the exact specified content.\n- **Verification**: `verification_exists: true` during supervision; file content confirmed via `fs_read_file`.\n- **Cleanup**: PTY session cleaned up.\n\nOne minor note: `pty_kill` and `pty_remove` both returned `{\"ok\": false}`, suggesting the session may have already exited or the cleanup had a tracking hiccup. The artifact is verified and correct."
+      },
+      "latest_run": {
+        "run_id": "debug-validation-20260415-163002",
+        "success": true,
+        "outcome": "artifact_verified",
+        "response": "Summary:\n\n- Launched `kilocode` TUI via `workflow_supervise_session`.\n- Task: create `${REPO_ROOT}/.../kilocode_supervised_validation_note.md` with exact specified content.\n- Kilo created the directory, wrote the file, and confirmed completion.\n- `workflow_supervise_session` detected `verification_exists: true` after 4 rounds (~11.8 s) and advised cleanup.\n- Final filesystem read confirms the file content matches exactly.\n- PTY cleanup attempted; session already gone.\n\nResult: success."
+      },
+      "recommended_action": "watch_only"
     }
   ]
 }

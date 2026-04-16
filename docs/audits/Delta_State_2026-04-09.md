@@ -7,7 +7,7 @@ This document tracks explicit changes made to the OpenCAS repository since the p
 
 ## 2. New Subsystems & Files
 *   **`opencas/embeddings/hnsw_backend.py`**: Added to the codebase to support `hnswlib`. This directly solves the `O(N)` SQLite brute-force search limitation identified in early audits. The requirements list was updated to include `hnswlib>=0.7.0`.
-*   **`opencas/tools/mcp_client.py` & `mcp_adapter.py`**: Implemented standard Model Context Protocol (MCP) integrations. This closes the feature-parity gap with LegacyPrototype-v4 regarding external tool usage.
+*   **`opencas/tools/mcp_client.py` & `mcp_adapter.py`**: Implemented standard Model Context Protocol (MCP) integrations. This closes the feature-parity gap with OpenBulma-v4 regarding external tool usage.
 *   **`scripts/sweep_operator_processes.py`**: A new script added to ensure process hygiene and cleanup after intensive background executions (BAA runs).
 
 ## 3. Metrics & Scenarios Executed

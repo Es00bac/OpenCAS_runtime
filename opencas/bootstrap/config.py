@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from opencas.model_routing import ModelRoutingConfig
 from opencas.sandbox import SandboxConfig
 
 
@@ -33,6 +34,7 @@ class BootstrapConfig(BaseModel):
     # Explicit workspaces the agent is allowed to operate in
     workspace_root: Optional[Path] = None
     workspace_roots: List[Path] = Field(default_factory=list)
+    managed_workspace_root: Optional[Path] = None
 
     # Embedding model override
     embedding_model_id: Optional[str] = "google/gemini-embedding-2-preview"
@@ -57,6 +59,7 @@ class BootstrapConfig(BaseModel):
 
     # LLM gateway default model
     default_llm_model: Optional[str] = "anthropic/claude-sonnet-4-6"
+    model_routing: ModelRoutingConfig = Field(default_factory=ModelRoutingConfig)
 
     # Per-project OpenLLMAuth configuration
     provider_config_path: Optional[Path] = None
@@ -120,6 +123,10 @@ class BootstrapConfig(BaseModel):
         self.workspace_roots = [
             Path(root).expanduser().resolve() for root in self.workspace_roots
         ]
+        if self.managed_workspace_root is not None:
+            self.managed_workspace_root = (
+                self.managed_workspace_root.expanduser().resolve()
+            )
         if self.provider_config_path is not None:
             self.provider_config_path = self.provider_config_path.expanduser().resolve()
         if self.provider_env_path is not None:
@@ -142,6 +149,10 @@ class BootstrapConfig(BaseModel):
         if self.workspace_root is not None:
             roots.append(self.workspace_root)
         roots.extend(self.workspace_roots)
+        if self.managed_workspace_root is not None and not any(
+            self.managed_workspace_root.is_relative_to(root) for root in roots
+        ):
+            roots.append(self.managed_workspace_root)
         if not roots:
             roots.append(self.state_dir.parent)
         deduped = []
@@ -157,3 +168,9 @@ class BootstrapConfig(BaseModel):
     def primary_workspace_root(self) -> Path:
         """Return the primary workspace root for execution defaults."""
         return self.all_workspace_roots()[0]
+
+    def agent_workspace_root(self) -> Path:
+        """Return the dedicated workspace root for agent-created artifacts and projects."""
+        if self.managed_workspace_root is not None:
+            return self.managed_workspace_root
+        return (self.primary_workspace_root() / "workspace").resolve()

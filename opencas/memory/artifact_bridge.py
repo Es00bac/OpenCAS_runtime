@@ -195,11 +195,18 @@ class ArtifactMemoryBridge:
         }
 
     def _relative_artifact_path(self, path: Path, relative_to: Optional[Path] = None) -> str:
+        resolved = path.resolve()
+        project_root = self.state_dir.parent.resolve()
         try:
-            base = relative_to.resolve() if relative_to else self.state_dir.parent.resolve()
-            return str(path.resolve().relative_to(base))
+            return str(resolved.relative_to(project_root))
         except Exception:
-            return str(path)
+            pass
+        if relative_to is not None:
+            try:
+                return str(resolved.relative_to(relative_to.resolve()))
+            except Exception:
+                pass
+        return str(path)
 
     @staticmethod
     def _title_for(path: Path, text: str) -> str:

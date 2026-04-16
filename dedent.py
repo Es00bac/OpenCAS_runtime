@@ -1,5 +1,7 @@
-import sys
-content = open("(workspace_root)/opencas/execution/baa.py").read()
+from pathlib import Path
+
+TARGET = Path(__file__).resolve().parent / "opencas" / "execution" / "baa.py"
+content = TARGET.read_text(encoding="utf-8")
 # We know lines 148+ have bad indentation
 lines = content.split('\n')
 new_lines = []
@@ -27,4 +29,4 @@ for i, line in enumerate(lines):
     else:
         new_lines.append(line)
 
-open("(workspace_root)/opencas/execution/baa.py", "w").write('\n'.join(new_lines))
+TARGET.write_text('\n'.join(new_lines), encoding="utf-8")

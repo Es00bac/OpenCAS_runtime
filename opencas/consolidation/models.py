@@ -45,3 +45,7 @@ class ConsolidationResult(BaseModel):
     merges_rejected: int = 0
     orphans_recovered: int = 0
     beliefs_decayed: int = 0
+    commitments_consolidated: int = 0
+    commitment_clusters_formed: int = 0
+    commitment_work_objects_created: int = 0
+    commitments_extracted_from_chat: int = 0

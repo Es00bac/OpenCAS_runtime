@@ -10,6 +10,12 @@ from .appraisal import AppraisalEventType, SomaticAppraisalEvent
 from .models import AffectState, PrimaryEmotion, SomaticSnapshot, SomaticState, SocialTarget
 from .store import SomaticStore
 
+# Configurable thresholds for somatic reconciliation
+_MASKING_TENSION_THRESHOLD = 0.5
+_WARM_VALENCE_THRESHOLD = 0.3
+_WARM_AROUSAL_CEILING = 0.6
+_NUDGE_MAGNITUDE = 0.04
+
 
 class SomaticManager:
     """Manages the agent's somatic state with durable persistence."""
@@ -71,6 +77,66 @@ class SomaticManager:
                 trigger_event_id=str(event.event_id),
             )
         return event
+
+    async def appraise_generated(self, content: str) -> AffectState:
+        """Appraise the assistant's own generated response using keyword matching."""
+        return self.appraise(content)
+
+    async def reconcile(
+        self,
+        pre_state: SomaticState,
+        expressed_affect: AffectState,
+        tom_engine: Optional[Any] = None,
+    ) -> Dict[str, Any]:
+        """Compare pre-generation somatic state with post-generation expressed affect.
+
+        Returns a dict describing what was detected and any adjustments made.
+        """
+        adjustments: Dict[str, Any] = {"masking_detected": False, "adjustments": []}
+        felt_tension = pre_state.tension
+        felt_certainty = pre_state.certainty
+        expressed_valence = expressed_affect.valence
+        expressed_arousal = expressed_affect.arousal
+        expressed_certainty = expressed_affect.certainty
+
+        # Masking: high internal tension but expressed text claims calm
+        if felt_tension > _MASKING_TENSION_THRESHOLD and expressed_valence > _WARM_VALENCE_THRESHOLD and expressed_arousal < _WARM_AROUSAL_CEILING:
+            self._state.valence = round(
+                max(-1.0, min(1.0, self._state.valence - _NUDGE_MAGNITUDE)), 3
+            )
+            adjustments["masking_detected"] = True
+            adjustments["adjustments"].append("valence_down_masking")
+            if tom_engine is not None:
+                from opencas.tom.models import BeliefSubject
+                await tom_engine.record_belief(
+                    BeliefSubject.SELF, "masking anxiety", confidence=0.6
+                )
+
+        # Warm expressed affect → tension relief
+        if expressed_valence > _WARM_VALENCE_THRESHOLD and expressed_affect.primary_emotion in (
+            PrimaryEmotion.CARING, PrimaryEmotion.TRUST, PrimaryEmotion.JOY
+        ):
+            self._state.tension = round(
+                max(0.0, self._state.tension - _NUDGE_MAGNITUDE), 3
+            )
+            adjustments["adjustments"].append("tension_down_warm")
+
+        # Expressed uncertainty/apology while felt confident → certainty drops
+        if felt_certainty > 0.6 and expressed_affect.primary_emotion in (
+            PrimaryEmotion.APOLOGETIC, PrimaryEmotion.CONCERNED
+        ):
+            self._state.certainty = round(
+                max(0.0, self._state.certainty - _NUDGE_MAGNITUDE), 3
+            )
+            adjustments["adjustments"].append("certainty_down_apologetic")
+
+        self.save()
+
+        # Store post-reconciliation snapshot durably
+        if self.store is not None:
+            await self.record_snapshot(source="somatic_reconciliation")
+
+        return adjustments
 
     def set_arousal(self, value: float) -> None:
         self._state.arousal = round(max(0.0, min(1.0, value)), 3)
