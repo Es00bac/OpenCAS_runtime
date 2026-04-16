@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 import json
 from typing import Any, Callable, Dict, List, Optional
 
@@ -69,6 +70,7 @@ class ToolUseLoop:
                 )
 
         all_tool_calls: List[Dict[str, Any]] = []
+        executed_steps: List[Dict[str, Any]] = []
         iterations = 0
         guard = ToolLoopGuard()
         _in_focus_mode = False
@@ -138,20 +140,19 @@ class ToolUseLoop:
                     guard_reason = _check_guard(tc)
                     if guard_reason:
                         self._trace("tool_loop_guard_fired", {"reason": guard_reason, "session_id": ctx.session_id, "tool_loop_guard_fires": 1})
-                        for _tc in tool_calls:
-                            if _tc["id"] not in fulfilled_ids:
-                                messages.append(self._build_tool_result_message(_tc, {
-                                    "success": False,
-                                    "output": f"[Tool loop halted] {guard_reason}",
-                                    "metadata": {"guard_fired": True},
-                                }))
-                                fulfilled_ids.add(_tc["id"])
                         return ToolUseResult(
-                            final_output=f"[Tool loop halted] {guard_reason}",
+                            final_output=self._build_guard_summary(
+                                guard_reason=guard_reason,
+                                executed_steps=executed_steps,
+                                pending_calls=[
+                                    _tc for _tc in tool_calls if _tc["id"] not in fulfilled_ids
+                                ],
+                            ),
                             messages=messages,
                             tool_calls=all_tool_calls,
                             iterations=iterations,
                             guard_fired=True,
+                            guard_reason=guard_reason,
                         )
 
                 # Execute concurrent batch
@@ -163,6 +164,12 @@ class ToolUseLoop:
                     for tc, result in zip(concurrent_calls, results):
                         if isinstance(result, Exception):
                             result = {"success": False, "output": str(result), "metadata": {}}
+                        executed_steps.append(
+                            {
+                                "name": tc["name"],
+                                "success": bool(result.get("success", False)),
+                            }
+                        )
                         messages.append(self._build_tool_result_message(tc, result))
                         fulfilled_ids.add(tc["id"])
 
@@ -171,25 +178,30 @@ class ToolUseLoop:
                     guard_reason = _check_guard(tc)
                     if guard_reason:
                         self._trace("tool_loop_guard_fired", {"reason": guard_reason, "session_id": ctx.session_id, "tool_loop_guard_fires": 1})
-                        for _tc in tool_calls:
-                            if _tc["id"] not in fulfilled_ids:
-                                messages.append(self._build_tool_result_message(_tc, {
-                                    "success": False,
-                                    "output": f"[Tool loop halted] {guard_reason}",
-                                    "metadata": {"guard_fired": True},
-                                }))
-                                fulfilled_ids.add(_tc["id"])
                         return ToolUseResult(
-                            final_output=f"[Tool loop halted] {guard_reason}",
+                            final_output=self._build_guard_summary(
+                                guard_reason=guard_reason,
+                                executed_steps=executed_steps,
+                                pending_calls=[
+                                    _tc for _tc in tool_calls if _tc["id"] not in fulfilled_ids
+                                ],
+                            ),
                             messages=messages,
                             tool_calls=all_tool_calls,
                             iterations=iterations,
                             guard_fired=True,
+                            guard_reason=guard_reason,
                         )
                     try:
                         result = await self._execute_tool_call(tc, ctx)
                     except Exception as exc:
                         result = {"success": False, "output": str(exc), "metadata": {}}
+                    executed_steps.append(
+                        {
+                            "name": tc["name"],
+                            "success": bool(result.get("success", False)),
+                        }
+                    )
                     messages.append(self._build_tool_result_message(tc, result))
                     fulfilled_ids.add(tc["id"])
 
@@ -454,6 +466,57 @@ class ToolUseLoop:
             "name": tc["name"],
             "content": content,
         }
+
+    def _build_guard_summary(
+        self,
+        *,
+        guard_reason: str,
+        executed_steps: List[Dict[str, Any]],
+        pending_calls: List[Dict[str, Any]],
+    ) -> str:
+        """Summarize partial progress when the tool loop guard fires."""
+        segments: List[str] = []
+        if executed_steps:
+            success_count = sum(1 for step in executed_steps if step["success"])
+            failure_count = len(executed_steps) - success_count
+            completed_counts = Counter(step["name"] for step in executed_steps)
+            segments.append(
+                "I made partial progress before pausing because the tool loop guard fired "
+                f"({guard_reason})."
+            )
+            if failure_count:
+                segments.append(
+                    f"Completed {len(executed_steps)} tool calls: {success_count} succeeded, "
+                    f"{failure_count} failed."
+                )
+            else:
+                segments.append(
+                    f"Completed {len(executed_steps)} tool calls successfully."
+                )
+            segments.append(
+                "Completed tools: "
+                + ", ".join(
+                    f"{name} x{count}" for name, count in sorted(completed_counts.items())
+                )
+                + "."
+            )
+        else:
+            segments.append(
+                "I paused before executing the remaining tool plan because the tool loop guard "
+                f"fired ({guard_reason})."
+            )
+
+        if pending_calls:
+            pending_counts = Counter(tc["name"] for tc in pending_calls)
+            segments.append(
+                "Deferred pending tools: "
+                + ", ".join(
+                    f"{name} x{count}" for name, count in sorted(pending_counts.items())
+                )
+                + "."
+            )
+        segments.append("Continue in a follow-up turn with the next narrow step.")
+        return " ".join(segments)
 
     def _trace(self, event: str, payload: Optional[Dict[str, Any]] = None) -> None:
         if self.tracer:

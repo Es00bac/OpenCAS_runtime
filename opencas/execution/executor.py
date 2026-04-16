@@ -224,6 +224,9 @@ class RepairExecutor:
                 on_focus_enter=scheduler.enter_focus_mode if scheduler else None,
                 on_focus_exit=scheduler.exit_focus_mode if scheduler else None,
             )
+            if result.guard_fired:
+                reason = result.guard_reason or result.final_output
+                return f"execute failed: tool loop guard fired: {reason}"
             return result.final_output
 
         # Fallback heuristic when no runtime/tool_loop is available

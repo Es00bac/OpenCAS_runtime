@@ -32,6 +32,7 @@ from opencas.bootstrap.tui_runtime import BootstrapScreen
 from opencas.bootstrap.tui_screens_setup import (
     AdvancedScreen,
     CredentialsScreen,
+    IntegrationsScreen,
     ModelsScreen,
     ReviewScreen,
     WorkspaceScreen,
@@ -137,6 +138,7 @@ class BootstrapTUI(App):
                 "credentials": CredentialsScreen,
                 "models": ModelsScreen,
                 "advanced": AdvancedScreen,
+                "integrations": IntegrationsScreen,
                 "review": ReviewScreen,
                 "bootstrap": BootstrapScreen,
             }

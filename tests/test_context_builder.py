@@ -114,6 +114,36 @@ async def test_to_message_list_includes_user_attachment_content(builder_deps):
 
 
 @pytest.mark.asyncio
+async def test_to_message_list_filters_dangling_assistant_tool_calls(builder_deps):
+    builder, ctx_store, _mem_store = builder_deps
+    await ctx_store.append(
+        "s1",
+        MessageRole.ASSISTANT,
+        "",
+        meta={
+            "tool_calls": [
+                {"id": "tc1", "function": {"name": "fs_read_file"}},
+                {"id": "tc2", "function": {"name": "fs_read_file"}},
+            ]
+        },
+    )
+    await ctx_store.append(
+        "s1",
+        MessageRole.TOOL,
+        "done",
+        meta={"tool_call_id": "tc1", "name": "fs_read_file"},
+    )
+    manifest = await builder.build("continue", session_id="s1")
+
+    messages = manifest.to_message_list()
+
+    assistant = next(msg for msg in messages if msg["role"] == "assistant")
+    assert [tc["id"] for tc in assistant["tool_calls"]] == ["tc1"]
+    tool = next(msg for msg in messages if msg["role"] == "tool")
+    assert tool["tool_call_id"] == "tc1"
+
+
+@pytest.mark.asyncio
 async def test_build_includes_somatic_style_note(builder_deps):
     from opencas.somatic import SomaticModulators, SomaticState
     builder, ctx_store, _mem_store = builder_deps

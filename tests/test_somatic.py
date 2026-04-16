@@ -33,6 +33,19 @@ def test_somatic_decay(tmp_path: Path) -> None:
     assert mgr.state.tension == 0.49
 
 
+def test_somatic_decay_recovers_idle_fatigue_and_arousal(tmp_path: Path) -> None:
+    mgr = SomaticManager(tmp_path / "somatic.json")
+    mgr.set_fatigue(0.5)
+    mgr.set_arousal(0.5)
+    mgr.set_tension(0.0)
+
+    for _ in range(8):
+        mgr.decay()
+
+    assert mgr.state.arousal < 0.5
+    assert mgr.state.fatigue < 0.5
+
+
 def test_somatic_bump_from_work(tmp_path: Path) -> None:
     mgr = SomaticManager(tmp_path / "somatic.json")
     mgr.set_fatigue(0.0)

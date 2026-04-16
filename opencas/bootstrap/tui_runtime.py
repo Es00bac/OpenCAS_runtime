@@ -31,7 +31,7 @@ class BootstrapScreen(Screen):
     """
 
     def compose(self) -> ComposeResult:
-        yield StepHeader(15, 15, "Bringing Your Agent to Life")
+        yield StepHeader(16, 16, "Bringing Your Agent to Life")
         yield ProgressBar(total=100, id="progress-bar")
         yield RichLog(id="bootstrap-log", highlight=True)
         yield Button("Cancel", id="btn-cancel", variant="error")
@@ -110,5 +110,4 @@ class BootstrapScreen(Screen):
             self._cancelled = True
             self._log("Shutdown requested...")
             self.app.exit()
-
 

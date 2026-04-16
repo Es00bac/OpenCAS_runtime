@@ -39,3 +39,4 @@ class ToolUseResult:
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
     iterations: int = 0
     guard_fired: bool = False
+    guard_reason: Optional[str] = None

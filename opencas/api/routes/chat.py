@@ -14,6 +14,7 @@ from opencas.api.chat_service import (
     perform_chat_turn,
     store_uploaded_file,
 )
+from opencas.runtime.lane_metadata import build_runtime_lane_meta
 
 router = APIRouter(tags=["chat"])
 
@@ -245,24 +246,7 @@ def build_chat_router(runtime: Any) -> APIRouter:
             except Exception:
                 somatic = None
 
-        lane: Dict[str, Any] = {}
-        llm_client = getattr(runtime.ctx, "llm", None)
-        default_model = getattr(llm_client, "default_model", None)
-        lane["model"] = default_model
-        manager = getattr(llm_client, "manager", None)
-        if manager is not None and default_model:
-            try:
-                resolved = manager.resolve(default_model)
-                lane.update(
-                    {
-                        "provider": resolved.provider_id,
-                        "resolved_model": f"{resolved.provider_id}/{resolved.model_id}",
-                        "profile_id": resolved.profile_id,
-                        "auth_source": resolved.auth_source,
-                    }
-                )
-            except Exception:
-                pass
+        lane: Dict[str, Any] = build_runtime_lane_meta(runtime)
 
         workflow = await runtime.workflow_status(limit=task_limit)
         work_items = workflow.get("work", {}).get("items", []) or []

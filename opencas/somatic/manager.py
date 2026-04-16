@@ -170,16 +170,35 @@ class SomaticManager:
         self._state.somatic_tag = tag
         self.save()
 
-    def decay(self, fatigue_delta: float = 0.02, tension_delta: float = -0.01) -> None:
-        """Apply natural decay: fatigue rises under load, recovers at rest; tension relaxes."""
-        # Recover fatigue when the agent is idle (low arousal, low tension)
+    def decay(
+        self,
+        fatigue_delta: float = 0.02,
+        tension_delta: float = -0.01,
+        arousal_delta: float = -0.05,
+    ) -> None:
+        """Apply natural recovery between cycles.
+
+        Neutral or idle states should not accumulate fatigue on their own. Arousal and
+        tension settle over time, fatigue rises only under sustained activation, and
+        rest recovers faster than ordinary neutral operation.
+        """
         s = self._state
-        if s.arousal < 0.3 and s.tension < 0.3:
-            effective_fatigue_delta = -fatigue_delta * 2  # rest recovers twice as fast as load builds
-        else:
+        next_arousal = round(max(0.0, min(1.0, s.arousal + arousal_delta)), 3)
+        next_tension = round(max(0.0, min(1.0, s.tension + tension_delta)), 3)
+
+        if next_arousal <= 0.35 and next_tension < 0.3:
+            effective_fatigue_delta = -fatigue_delta * 2
+        elif next_arousal > 0.6 or next_tension > 0.45:
             effective_fatigue_delta = fatigue_delta
-        self._state.fatigue = round(max(0.0, min(1.0, s.fatigue + effective_fatigue_delta)), 3)
-        self._state.tension = round(max(0.0, min(1.0, s.tension + tension_delta)), 3)
+        else:
+            effective_fatigue_delta = -fatigue_delta
+
+        self._state.arousal = next_arousal
+        self._state.fatigue = round(
+            max(0.0, min(1.0, s.fatigue + effective_fatigue_delta)),
+            3,
+        )
+        self._state.tension = next_tension
         self.save()
 
     def bump_from_work(self, intensity: float = 0.1, success: bool = True) -> None:

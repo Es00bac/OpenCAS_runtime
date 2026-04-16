@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List
+from typing import Any, Dict, List
 
 from opencas.bootstrap import BootstrapConfig
+from opencas.model_routing import ModelRoutingConfig, ModelRoutingMode
+from opencas.sandbox import SandboxConfig
+from opencas.sandbox.config import SandboxMode
 from opencas.bootstrap.tui_state import WizardState
 
 
@@ -87,27 +90,135 @@ def questionnaire_payload(state: WizardState) -> Dict[str, Dict[str, object]]:
 
 def save_questionnaire(state: WizardState, state_dir: Path) -> Path:
     path = state_dir / "bootstrap_questionnaire.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(questionnaire_payload(state), indent=2), encoding="utf-8")
     return path
+
+
+def _optional_path(value: str) -> Path | None:
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return Path(cleaned)
+
+
+def _optional_text(value: str) -> str | None:
+    cleaned = value.strip()
+    return cleaned or None
+
+
+def _split_items(value: str) -> List[str]:
+    tokens = value.replace("\n", ",").split(",")
+    return [token.strip() for token in tokens if token.strip()]
+
+
+def _parse_int(value: str, *, default: int, field_name: str) -> int:
+    cleaned = value.strip()
+    if not cleaned:
+        return default
+    try:
+        return int(cleaned)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be an integer") from exc
+
+
+def _parse_float(value: str, *, default: float, field_name: str) -> float:
+    cleaned = value.strip()
+    if not cleaned:
+        return default
+    try:
+        return float(cleaned)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a number") from exc
+
+
+def _parse_mcp_servers(value: str) -> List[Dict[str, Any]]:
+    cleaned = value.strip()
+    if not cleaned:
+        return []
+    try:
+        parsed = json.loads(cleaned)
+    except json.JSONDecodeError as exc:
+        raise ValueError("MCP servers must be valid JSON") from exc
+    if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
+        raise ValueError("MCP servers JSON must be a list of objects")
+    return parsed
 
 
 def build_bootstrap_config(state: WizardState) -> BootstrapConfig:
     extra_roots = [r.strip() for r in state.workspace_extra.split(",") if r.strip()]
     state_dir = Path(state.state_dir)
+    provider_config_path = None
+    provider_env_path = None
+    credential_source_config_path = None
+    credential_source_env_path = None
+    credential_profile_ids: List[str] = []
+    credential_env_keys: List[str] = []
+
+    if state.provider_mode == "custom":
+        provider_config_path = _optional_path(state.provider_config_path)
+        provider_env_path = _optional_path(state.provider_env_path)
+    elif state.provider_mode == "copy":
+        credential_source_config_path = _optional_path(state.credential_source_config)
+        credential_source_env_path = _optional_path(state.credential_source_env_path)
+        credential_profile_ids = list(state.selected_profiles)
+        credential_env_keys = list(state.credential_env_keys)
+
     return BootstrapConfig(
         state_dir=state_dir,
         session_id=None,
         agent_profile_id=state.agent_profile_id,
         workspace_root=Path(state.workspace_root),
         workspace_roots=[Path(r) for r in extra_roots],
+        managed_workspace_root=_optional_path(state.managed_workspace_root),
         default_llm_model=state.default_llm_model,
         embedding_model_id=state.embedding_model_id,
-        provider_config_path=Path(state.provider_config_path) if state.provider_config_path else None,
-        provider_env_path=Path(state.provider_env_path) if state.provider_env_path else None,
-        credential_source_config_path=Path(state.credential_source_config) if state.credential_source_config else None,
-        credential_source_env_path=None,
-        credential_profile_ids=state.selected_profiles,
-        credential_env_keys=state.credential_env_keys,
+        model_routing=ModelRoutingConfig(
+            mode=ModelRoutingMode(state.model_routing_mode),
+            single_model=state.default_llm_model if state.model_routing_mode == "single" else None,
+            light_model=_optional_text(state.routing_light_model),
+            standard_model=_optional_text(state.routing_standard_model),
+            high_model=_optional_text(state.routing_high_model),
+            extra_high_model=_optional_text(state.routing_extra_high_model),
+            auto_escalation=state.routing_auto_escalation,
+        ),
+        provider_config_path=provider_config_path,
+        provider_env_path=provider_env_path,
+        credential_source_config_path=credential_source_config_path,
+        credential_source_env_path=credential_source_env_path,
+        credential_profile_ids=credential_profile_ids,
+        credential_env_keys=credential_env_keys,
+        qdrant_url=_optional_text(state.qdrant_url),
+        qdrant_api_key=_optional_text(state.qdrant_api_key),
+        qdrant_collection=state.qdrant_collection.strip() or "opencas_embeddings",
+        hnsw_enabled=state.hnsw_enabled,
+        hnsw_m=_parse_int(state.hnsw_m, default=16, field_name="HNSW M"),
+        hnsw_ef_construction=_parse_int(
+            state.hnsw_ef_construction,
+            default=200,
+            field_name="HNSW ef_construction",
+        ),
+        mcp_servers=_parse_mcp_servers(state.mcp_servers_json),
+        mcp_auto_register=state.mcp_auto_register,
+        telegram_enabled=state.telegram_enabled,
+        telegram_bot_token=_optional_text(state.telegram_bot_token),
+        telegram_dm_policy=state.telegram_dm_policy,
+        telegram_allow_from=_split_items(state.telegram_allow_from),
+        telegram_poll_interval_seconds=_parse_float(
+            state.telegram_poll_interval_seconds,
+            default=1.0,
+            field_name="Telegram poll interval",
+        ),
+        telegram_pairing_ttl_seconds=_parse_int(
+            state.telegram_pairing_ttl_seconds,
+            default=3600,
+            field_name="Telegram pairing TTL",
+        ),
+        telegram_api_base_url=state.telegram_api_base_url.strip() or "https://api.telegram.org",
+        sandbox=SandboxConfig(
+            mode=SandboxMode(state.sandbox_mode),
+            allowed_roots=[Path(root) for root in _split_items(state.sandbox_allowed_roots)],
+        ),
         persona_name=state.persona_name,
         user_name=state.user_name or None,
         user_bio=compose_user_bio(state) or None,

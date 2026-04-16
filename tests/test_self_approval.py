@@ -168,6 +168,59 @@ def test_somatic_tension_increases_caution(
     )
 
 
+def test_managed_workspace_write_gets_payload_credit_under_stress(
+    ladder: SelfApprovalLadder,
+    identity: IdentityManager,
+    somatic: SomaticManager,
+) -> None:
+    identity.user_model.trust_level = 0.95
+    identity.save()
+    somatic.set_tension(1.0)
+    somatic.set_fatigue(1.0)
+    req = ActionRequest(
+        tier=ActionRiskTier.WORKSPACE_WRITE,
+        description="write experiment scaffold file",
+        tool_name="fs_write_file",
+        payload={
+            "file_path": "/tmp/workspace/experiment/README.md",
+            "write_scope": "managed_workspace",
+        },
+    )
+    dec = ladder.evaluate(req)
+    assert dec.level in (
+        ApprovalLevel.CAN_DO_NOW,
+        ApprovalLevel.CAN_DO_WITH_CAUTION,
+    )
+
+
+def test_managed_workspace_shell_verification_gets_payload_credit_under_stress(
+    ladder: SelfApprovalLadder,
+    identity: IdentityManager,
+    somatic: SomaticManager,
+) -> None:
+    identity.user_model.trust_level = 0.95
+    identity.save()
+    somatic.set_tension(1.0)
+    somatic.set_fatigue(1.0)
+    req = ActionRequest(
+        tier=ActionRiskTier.SHELL_LOCAL,
+        description="verify generated parser inside managed workspace",
+        tool_name="bash_run_command",
+        payload={
+            "command_family": "safe",
+            "command_permission_class": "bounded_write",
+            "command_scope": "managed_workspace",
+            "command_effective_family": "safe",
+            "command_effective_permission_class": "bounded_write",
+        },
+    )
+    dec = ladder.evaluate(req)
+    assert dec.level in (
+        ApprovalLevel.CAN_DO_NOW,
+        ApprovalLevel.CAN_DO_WITH_CAUTION,
+    )
+
+
 def test_no_somatic_does_not_crash(identity: IdentityManager) -> None:
     ladder_no_somatic = SelfApprovalLadder(identity=identity)
     req = ActionRequest(tier=ActionRiskTier.READONLY, description="read")

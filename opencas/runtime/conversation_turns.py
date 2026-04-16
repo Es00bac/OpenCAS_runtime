@@ -11,11 +11,13 @@ from opencas.autonomy.models import (
     ApprovalDecision,
     ApprovalLevel,
 )
-from opencas.context import MessageRole
+from opencas.context import MessageRole, repair_tool_message_sequence
 from opencas.memory import Episode, EpisodeKind
 from opencas.somatic import AppraisalEventType
 from opencas.tom import BeliefSubject
 from opencas.tools import UserInputRequired
+
+from .lane_metadata import build_assistant_message_meta
 
 if TYPE_CHECKING:
     from .agent_loop import AgentRuntime
@@ -71,7 +73,12 @@ async def handle_refusal_turn(
         except Exception:
             pass
     response_text = refusal.suggested_response or "I'm not able to respond to that."
-    await runtime.ctx.context_store.append(session_id, MessageRole.ASSISTANT, response_text)
+    await runtime.ctx.context_store.append(
+        session_id,
+        MessageRole.ASSISTANT,
+        response_text,
+        meta=build_assistant_message_meta(runtime),
+    )
     return response_text
 
 
@@ -151,14 +158,19 @@ async def persist_tool_loop_messages(
     if has_system and not artifacts.had_system:
         offset += 1
 
-    for message in loop_result.messages[offset:]:
+    repaired_messages = repair_tool_message_sequence(loop_result.messages[offset:])
+
+    for message in repaired_messages:
         role = message.get("role")
         if role == "assistant" and message.get("tool_calls"):
             await runtime.ctx.context_store.append(
                 session_id,
                 MessageRole.ASSISTANT,
                 message.get("content", ""),
-                meta={"tool_calls": message["tool_calls"]},
+                meta=build_assistant_message_meta(
+                    runtime,
+                    extra={"tool_calls": message["tool_calls"]},
+                ),
             )
         elif role == "tool":
             await runtime.ctx.context_store.append(
@@ -182,7 +194,12 @@ async def finalize_assistant_turn(
 ) -> None:
     # Persist the visible assistant turn first; every downstream subsystem
     # should be reacting to a response that already exists in session history.
-    await runtime.ctx.context_store.append(session_id, MessageRole.ASSISTANT, content)
+    await runtime.ctx.context_store.append(
+        session_id,
+        MessageRole.ASSISTANT,
+        content,
+        meta=build_assistant_message_meta(runtime),
+    )
     await runtime._record_episode(content, EpisodeKind.TURN, session_id=session_id, role="assistant")
 
     pre_appraisal_state = runtime.ctx.somatic.state.model_copy()

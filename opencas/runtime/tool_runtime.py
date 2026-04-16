@@ -7,6 +7,8 @@ plugin lifecycle, and MCP registration logic inline.
 
 from __future__ import annotations
 
+import re
+import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -33,9 +35,9 @@ async def hydrate_runtime_tool_use_context(
 ) -> ToolUseContext:
     """Populate plan-mode state on a freshly created tool-use context."""
     plan_store = getattr(runtime.ctx, "plan_store", None)
-    if plan_store is not None:
+    if plan_store is not None and ctx.task_id:
         try:
-            active_plans = await plan_store.list_active()
+            active_plans = await plan_store.list_active(task_id=ctx.task_id)
             if active_plans:
                 ctx.plan_mode = True
                 ctx.active_plan_id = active_plans[0].plan_id
@@ -137,7 +139,7 @@ async def execute_runtime_tool(
         tier=entry.risk_tier,
         description=f"tool {name}: {entry.description}",
         tool_name=name,
-        payload=_build_tool_request_payload(name, args),
+        payload=_build_tool_request_payload(runtime, name, args),
     )
     approval = await handle_runtime_action(runtime, request)
     if not approval["approved"]:
@@ -282,6 +284,7 @@ def _register_mcp_tools(
 
 
 def _build_tool_request_payload(
+    runtime: "AgentRuntime",
     name: str,
     args: Dict[str, Any],
 ) -> Dict[str, Any]:
@@ -307,6 +310,7 @@ def _build_tool_request_payload(
                     "command_subcommand": assessment.subcommand,
                 }
             )
+            request_payload.update(_classify_shell_command_scope(runtime, args, command))
         elif name in {"pty_interact", "pty_write", "workflow_supervise_session"} and args.get("session_id"):
             request_payload.update(
                 {
@@ -328,4 +332,111 @@ def _build_tool_request_payload(
                 "command_permission_class": "bounded_write",
             }
         )
+    elif name in {"fs_write_file", "edit_file"}:
+        request_payload.update(_classify_workspace_write_scope(runtime, args))
     return request_payload
+
+
+def _classify_workspace_write_scope(
+    runtime: "AgentRuntime",
+    args: Dict[str, Any],
+) -> Dict[str, Any]:
+    file_path = str(args.get("file_path") or args.get("path") or "").strip()
+    if not file_path:
+        return {}
+
+    resolved = Path(file_path).expanduser().resolve()
+    managed_root = runtime.ctx.config.agent_workspace_root()
+    plans_root = (runtime.ctx.config.state_dir / "plans").resolve()
+
+    try:
+        resolved.relative_to(managed_root)
+        return {
+            "write_scope": "managed_workspace",
+            "managed_workspace_root": str(managed_root),
+        }
+    except ValueError:
+        pass
+
+    try:
+        resolved.relative_to(plans_root)
+        return {
+            "write_scope": "plans",
+            "plans_root": str(plans_root),
+        }
+    except ValueError:
+        pass
+
+    return {"write_scope": "other"}
+
+
+def _classify_shell_command_scope(
+    runtime: "AgentRuntime",
+    args: Dict[str, Any],
+    command: str,
+) -> Dict[str, Any]:
+    managed_root = runtime.ctx.config.agent_workspace_root()
+    candidates: List[Path] = []
+    explicit_cwd = str(args.get("cwd") or "").strip()
+    if explicit_cwd:
+        try:
+            candidates.append(Path(explicit_cwd).expanduser().resolve())
+        except OSError:
+            pass
+
+    prefix = _extract_leading_cd_prefix(command)
+    if prefix is not None:
+        try:
+            resolved = Path(prefix).expanduser().resolve()
+            candidates.append(resolved)
+        except OSError:
+            pass
+
+    for candidate in candidates:
+        try:
+            candidate.relative_to(managed_root)
+        except ValueError:
+            continue
+
+        payload = {
+            "command_scope": "managed_workspace",
+            "managed_workspace_root": str(managed_root),
+        }
+        remainder = _command_after_leading_cd(command)
+        if remainder:
+            effective = assess_command(remainder)
+            payload.update(
+                {
+                    "command_effective_family": effective.family,
+                    "command_effective_permission_class": effective.permission_class,
+                    "command_effective_executable": effective.executable,
+                    "command_effective_subcommand": effective.subcommand,
+                }
+            )
+        return payload
+
+    return {}
+
+
+def _extract_leading_cd_prefix(command: str) -> Optional[str]:
+    stripped = command.strip()
+    match = re.match(r"^cd\s+(.+?)\s*(?:&&|;)", stripped)
+    if match is None:
+        return None
+    raw = match.group(1).strip()
+    try:
+        tokenized = shlex.split(raw)
+    except ValueError:
+        return raw.strip("\"'")
+    if not tokenized:
+        return None
+    return tokenized[0]
+
+
+def _command_after_leading_cd(command: str) -> Optional[str]:
+    stripped = command.strip()
+    match = re.match(r"^cd\s+.+?\s*(?:&&|;)\s*(.+)$", stripped)
+    if match is None:
+        return None
+    remainder = match.group(1).strip()
+    return remainder or None

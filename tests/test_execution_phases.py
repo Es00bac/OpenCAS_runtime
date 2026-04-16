@@ -1,10 +1,13 @@
 """Tests for RepairExecutor explicit phases."""
 
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 
 from opencas.autonomy.models import ActionRiskTier
 from opencas.execution import ExecutionPhase, ExecutionStage, RepairExecutor, RepairTask
+from opencas.tools import ToolUseResult
 from opencas.tools import FileSystemToolAdapter, ShellToolAdapter, ToolRegistry
 
 
@@ -75,5 +78,28 @@ async def test_executor_tool_loop_halted_fails_task(executor):
     result = await executor.run(task)
     exec_phase = [p for p in task.phases if p.phase == ExecutionPhase.EXECUTE][0]
     assert exec_phase.success is False
+    assert result.success is False
+    assert result.stage == ExecutionStage.FAILED
+
+
+@pytest.mark.asyncio
+async def test_executor_runtime_guard_fired_result_fails_task(executor):
+    async def _run(**kwargs):
+        return ToolUseResult(
+            final_output="I made partial progress before pausing after a long tool run.",
+            guard_fired=True,
+            guard_reason="Tool loop circuit breaker: exceeded 24 consecutive tool calls in this session.",
+        )
+
+    executor.runtime = SimpleNamespace(
+        tool_loop=SimpleNamespace(run=_run),
+        scheduler=None,
+    )
+
+    task = RepairTask(objective="halted task", max_attempts=1)
+    result = await executor.run(task)
+    exec_phase = [p for p in task.phases if p.phase == ExecutionPhase.EXECUTE][0]
+    assert exec_phase.success is False
+    assert "tool loop guard fired" in exec_phase.output.lower()
     assert result.success is False
     assert result.stage == ExecutionStage.FAILED

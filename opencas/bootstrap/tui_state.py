@@ -20,14 +20,39 @@ class WizardState:
         self.state_dir: str = "./.opencas"
         self.workspace_root: str = "."
         self.workspace_extra: str = ""
+        self.managed_workspace_root: str = ""
         self.provider_mode: str = "auto"
         self.provider_config_path: str = ""
         self.provider_env_path: str = ""
         self.credential_source_config: str = ""
+        self.credential_source_env_path: str = ""
         self.credential_env_keys: List[str] = []
         self.selected_profiles: List[str] = []
         self.default_llm_model: str = "anthropic/claude-sonnet-4-6"
         self.embedding_model_id: str = "google/gemini-embedding-2-preview"
+        self.model_routing_mode: str = "single"
+        self.routing_light_model: str = ""
+        self.routing_standard_model: str = ""
+        self.routing_high_model: str = ""
+        self.routing_extra_high_model: str = ""
+        self.routing_auto_escalation: bool = True
+        self.qdrant_url: str = ""
+        self.qdrant_api_key: str = ""
+        self.qdrant_collection: str = "opencas_embeddings"
+        self.hnsw_enabled: bool = True
+        self.hnsw_m: str = "16"
+        self.hnsw_ef_construction: str = "200"
+        self.mcp_auto_register: bool = False
+        self.mcp_servers_json: str = ""
+        self.telegram_enabled: bool = False
+        self.telegram_bot_token: str = ""
+        self.telegram_dm_policy: str = "pairing"
+        self.telegram_allow_from: str = ""
+        self.telegram_poll_interval_seconds: str = "1.0"
+        self.telegram_pairing_ttl_seconds: str = "3600"
+        self.telegram_api_base_url: str = "https://api.telegram.org"
+        self.sandbox_mode: str = "workspace-only"
+        self.sandbox_allowed_roots: str = ""
         self.use_server: bool = True
         self.host: str = "127.0.0.1"
         self.port: str = "8080"
@@ -104,6 +129,8 @@ def discover_model_choices(state: WizardState) -> Dict[str, List[tuple[str, str]
     elif state.provider_mode == "copy":
         if state.credential_source_config:
             config_path = Path(state.credential_source_config).expanduser()
+        if state.credential_source_env_path:
+            env_path = Path(state.credential_source_env_path).expanduser()
     else:
         default_path = Path.home() / ".open_llm_auth" / "config.json"
         if default_path.exists():

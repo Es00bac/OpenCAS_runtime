@@ -94,7 +94,7 @@ class ContextManifest(BaseModel):
             if entry.role == MessageRole.ASSISTANT and entry.meta.get("tool_calls"):
                 msg["tool_calls"] = entry.meta["tool_calls"]
             messages.append(msg)
-        return messages
+        return repair_tool_message_sequence(messages)
 
     @staticmethod
     def _render_entry_content(entry: MessageEntry) -> str:
@@ -131,3 +131,47 @@ class ContextManifest(BaseModel):
             location = attachment.get("url") or attachment.get("path") or filename
             parts.append(f"[Attached file: {filename} ({media_type}) available at {location}]")
         return "\n\n".join(part for part in parts if part)
+
+
+def repair_tool_message_sequence(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Strip dangling tool calls/results from a message sequence.
+
+    Provider APIs require every assistant ``tool_calls`` entry to be matched by a
+    subsequent ``tool`` message with the same ``tool_call_id``. Guarded tool
+    loops can leave partially-fulfilled assistant calls in persisted history, so
+    repair the sequence before replaying it to the model.
+    """
+
+    tool_result_ids = {
+        msg.get("tool_call_id")
+        for msg in messages
+        if msg.get("role") == "tool" and msg.get("tool_call_id")
+    }
+
+    repaired: List[Dict[str, Any]] = []
+    kept_call_ids: set[str] = set()
+    for msg in messages:
+        if msg.get("role") != "assistant" or not msg.get("tool_calls"):
+            repaired.append(msg)
+            continue
+
+        filtered_calls = [
+            tc for tc in (msg.get("tool_calls") or []) if tc.get("id") in tool_result_ids
+        ]
+        if not filtered_calls and not msg.get("content"):
+            continue
+
+        repaired_msg = dict(msg)
+        if filtered_calls:
+            repaired_msg["tool_calls"] = filtered_calls
+            kept_call_ids.update(tc.get("id") for tc in filtered_calls if tc.get("id"))
+        else:
+            repaired_msg.pop("tool_calls", None)
+        repaired.append(repaired_msg)
+
+    final_messages: List[Dict[str, Any]] = []
+    for msg in repaired:
+        if msg.get("role") == "tool" and msg.get("tool_call_id") not in kept_call_ids:
+            continue
+        final_messages.append(msg)
+    return final_messages

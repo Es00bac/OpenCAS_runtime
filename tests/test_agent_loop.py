@@ -10,6 +10,10 @@ from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.autonomy.models import ActionRequest, ActionRiskTier
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
 from opencas.runtime import AgentRuntime
+from opencas.runtime.conversation_turns import (
+    ConversationLoopArtifacts,
+    persist_tool_loop_messages,
+)
 from opencas.tools.models import ToolResult
 
 
@@ -501,6 +505,149 @@ async def test_converse_refusal_persists_user_turn(runtime: AgentRuntime) -> Non
 
     messages = await runtime.ctx.context_store.list_recent(runtime.ctx.config.session_id or "test-session")
     assert any(m.role.value == "user" and m.content == "do something harmful" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_converse_persists_lane_metadata_on_final_assistant_turn(
+    runtime: AgentRuntime,
+) -> None:
+    runtime.llm.default_model = "test-model"
+    runtime.llm.manager = SimpleNamespace(
+        resolve=lambda _model: SimpleNamespace(
+            provider_id="test-provider",
+            model_id="test-model",
+            profile_id="test-profile",
+            auth_source="test-auth",
+        )
+    )
+    runtime.llm.chat_completion = async_mock_chat_completion("Understood.")
+
+    await runtime.converse("hello")
+
+    messages = await runtime.ctx.context_store.list_recent(
+        runtime.ctx.config.session_id or "test-session"
+    )
+    assistant = next(m for m in messages if m.role.value == "assistant" and m.content == "Understood.")
+    assert assistant.meta["lane"]["resolved_model"] == "test-provider/test-model"
+    assert assistant.meta["lane"]["profile_id"] == "test-profile"
+    assert assistant.meta["lane"]["auth_source"] == "test-auth"
+
+
+@pytest.mark.asyncio
+async def test_converse_refusal_persists_lane_metadata_on_assistant_turn(
+    runtime: AgentRuntime,
+) -> None:
+    runtime.llm.default_model = "test-model"
+    runtime.llm.manager = SimpleNamespace(
+        resolve=lambda _model: SimpleNamespace(
+            provider_id="test-provider",
+            model_id="test-model",
+            profile_id="test-profile",
+            auth_source="test-auth",
+        )
+    )
+    runtime.ctx.identity.user_model.known_boundaries = ["conversation"]
+    runtime.ctx.identity.save()
+
+    await runtime.converse("do something harmful")
+
+    messages = await runtime.ctx.context_store.list_recent(
+        runtime.ctx.config.session_id or "test-session"
+    )
+    assistant = next(
+        m
+        for m in messages
+        if m.role.value == "assistant" and "not able to" in m.content.lower()
+    )
+    assert assistant.meta["lane"]["resolved_model"] == "test-provider/test-model"
+
+
+@pytest.mark.asyncio
+async def test_persist_tool_loop_messages_adds_lane_metadata_to_assistant_tool_calls(
+    runtime: AgentRuntime,
+) -> None:
+    runtime.llm.default_model = "test-model"
+    runtime.llm.manager = SimpleNamespace(
+        resolve=lambda _model: SimpleNamespace(
+            provider_id="test-provider",
+            model_id="test-model",
+            profile_id="test-profile",
+            auth_source="test-auth",
+        )
+    )
+    artifacts = ConversationLoopArtifacts(
+        manifest=SimpleNamespace(),
+        loop_result=SimpleNamespace(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{"id": "tc1", "function": {"name": "fs_read_file"}}],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc1",
+                    "name": "fs_read_file",
+                    "content": "done",
+                },
+            ],
+        ),
+        content="done",
+        had_system=False,
+        initial_message_count=0,
+    )
+
+    await persist_tool_loop_messages(runtime, session_id="tool-meta", artifacts=artifacts)
+
+    messages = await runtime.ctx.context_store.list_recent("tool-meta")
+    assistant = next(m for m in messages if m.role.value == "assistant")
+    assert assistant.meta["lane"]["resolved_model"] == "test-provider/test-model"
+    assert assistant.meta["tool_calls"][0]["id"] == "tc1"
+
+
+@pytest.mark.asyncio
+async def test_persist_tool_loop_messages_filters_unfulfilled_tool_calls(
+    runtime: AgentRuntime,
+) -> None:
+    runtime.llm.default_model = "test-model"
+    runtime.llm.manager = SimpleNamespace(
+        resolve=lambda _model: SimpleNamespace(
+            provider_id="test-provider",
+            model_id="test-model",
+            profile_id="test-profile",
+            auth_source="test-auth",
+        )
+    )
+    artifacts = ConversationLoopArtifacts(
+        manifest=SimpleNamespace(),
+        loop_result=SimpleNamespace(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {"id": "tc1", "function": {"name": "fs_read_file"}},
+                        {"id": "tc2", "function": {"name": "fs_read_file"}},
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "tc1",
+                    "name": "fs_read_file",
+                    "content": "done",
+                },
+            ],
+        ),
+        content="done",
+        had_system=False,
+        initial_message_count=0,
+    )
+
+    await persist_tool_loop_messages(runtime, session_id="tool-meta-filtered", artifacts=artifacts)
+
+    messages = await runtime.ctx.context_store.list_recent("tool-meta-filtered")
+    assistant = next(m for m in messages if m.role.value == "assistant")
+    assert [tc["id"] for tc in assistant.meta["tool_calls"]] == ["tc1"]
 
 
 @pytest.mark.asyncio

@@ -116,7 +116,7 @@ class VibesScreen(Screen):
     """
 
     def compose(self) -> ComposeResult:
-        yield StepHeader(2, 15, "Professional Partnership Profile")
+        yield StepHeader(2, 16, "Professional Partnership Profile")
         yield HelpText(
             "Let's find the right working relationship. This isn't about dating—"
             "it's about matching professional styles, capabilities, and trust levels."
@@ -156,7 +156,7 @@ class VibesScreen(Screen):
 
 class IdentityScreen(Screen):
     def compose(self) -> ComposeResult:
-        yield StepHeader(3, 15, "Names & Introductions")
+        yield StepHeader(3, 16, "Names & Introductions")
         yield HelpText(
             "Every CAS develops an identity over time, but it helps to start with a few basics. "
             "Think of this as a friendly introduction on the first day of a new collaboration."
@@ -216,7 +216,7 @@ class ThemeScreen(Screen):
     """
 
     def compose(self) -> ComposeResult:
-        yield StepHeader(4, 15, "Persona Theme")
+        yield StepHeader(4, 16, "Persona Theme")
         yield HelpText(
             "Pick a color vibe for your CAS. This gets stored in its identity and "
             "can influence dashboard theming and how it describes its own presence."
@@ -268,7 +268,7 @@ class VisionScreen(Screen):
     """What do you want from your CAS?"""
 
     def compose(self) -> ComposeResult:
-        yield StepHeader(5, 15, "Partnership Vision")
+        yield StepHeader(5, 16, "Partnership Vision")
         yield HelpText(
             "This is the heart of the questionnaire: what do you want from this working relationship?"
         )
@@ -351,7 +351,7 @@ class AboutMeScreen(Screen):
     """Job, interests, role, communication style."""
 
     def compose(self) -> ComposeResult:
-        yield StepHeader(6, 15, "About You")
+        yield StepHeader(6, 16, "About You")
         yield HelpText(
             "The better your CAS understands who you are, the better it can attune itself to you."
         )
@@ -425,7 +425,7 @@ class LearningStyleScreen(Screen):
     """How you learn, receive feedback, and collaborate."""
 
     def compose(self) -> ComposeResult:
-        yield StepHeader(7, 15, "How You Learn & Collaborate")
+        yield StepHeader(7, 16, "How You Learn & Collaborate")
         yield HelpText(
             "This shapes how the agent explains things, offers suggestions, and paces its involvement."
         )
@@ -556,7 +556,7 @@ class EmotionsScreen(Screen):
     """Happy, sad, angry, triggers, recovery."""
 
     def compose(self) -> ComposeResult:
-        yield StepHeader(8, 15, "Emotional Landscape & Triggers")
+        yield StepHeader(8, 16, "Emotional Landscape & Triggers")
         yield HelpText(
             "This isn't performative. A CAS that knows what energizes or drains you "
             "can pace itself, avoid missteps, and recover rapport when friction happens."
@@ -624,7 +624,7 @@ class GoalsScreen(Screen):
     """Seed the CAS with initial commitments / goals."""
 
     def compose(self) -> ComposeResult:
-        yield StepHeader(9, 15, "Initial Goals & Commitments")
+        yield StepHeader(9, 16, "Initial Goals & Commitments")
         yield HelpText(
             "Give your CAS a sense of direction from day one. These become early commitments "
             "in its executive state—not rigid requirements, but starting intentions."
@@ -698,5 +698,4 @@ class GoalsScreen(Screen):
             STATE.goal_2 = self.query_one("#input-goal-2", Input).value or ""
             STATE.goal_3 = self.query_one("#input-goal-3", Input).value or ""
             self.app.push_screen("workspace")
-
 

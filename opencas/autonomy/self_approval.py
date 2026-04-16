@@ -237,10 +237,28 @@ class SelfApprovalLadder:
         payload = request.payload or {}
         permission_class = str(payload.get("command_permission_class", "")).lower()
         command_family = str(payload.get("command_family", "")).lower()
+        command_scope = str(payload.get("command_scope", "")).lower()
+        effective_permission_class = str(
+            payload.get("command_effective_permission_class", "")
+        ).lower()
+        effective_family = str(payload.get("command_effective_family", "")).lower()
+        write_scope = str(payload.get("write_scope", "")).lower()
 
+        if (
+            request.tier == ActionRiskTier.SHELL_LOCAL
+            and command_scope == "managed_workspace"
+            and effective_family == "safe"
+            and effective_permission_class in {"read_only", "bounded_write"}
+        ):
+            return -0.30
         if permission_class == "read_only" and request.tier == ActionRiskTier.SHELL_LOCAL:
             return -0.18
         if permission_class == "bounded_write" and request.tier == ActionRiskTier.SHELL_LOCAL:
+            return -0.12
+        if (
+            request.tier == ActionRiskTier.WORKSPACE_WRITE
+            and write_scope in {"managed_workspace", "plans"}
+        ):
             return -0.12
         if permission_class == "network":
             return 0.08

@@ -14,7 +14,9 @@ from opencas.execution import (
     RepairResult,
     RepairTask,
 )
+from opencas.relational.models import MusubiState
 from opencas.runtime import AgentRuntime
+from opencas.tools import ToolUseContext
 from opencas.tools import ToolRegistry
 
 
@@ -150,6 +152,98 @@ async def test_runtime_submit_repair(runtime: AgentRuntime) -> None:
     assert isinstance(result, RepairResult)
     assert result.success is True
     await runtime.baa.stop()
+
+
+@pytest.mark.asyncio
+async def test_runtime_allows_managed_workspace_write_under_stress(
+    runtime: AgentRuntime,
+) -> None:
+    target = runtime.ctx.config.agent_workspace_root() / "stress-write-check.md"
+    runtime.ctx.identity.user_model.trust_level = 0.95
+    runtime.ctx.identity.save()
+    runtime.ctx.somatic.set_tension(1.0)
+    runtime.ctx.somatic.set_fatigue(1.0)
+
+    result = await runtime.execute_tool(
+        "fs_write_file",
+        {"file_path": str(target), "content": "ok\n"},
+    )
+
+    assert result["success"] is True
+    assert target.read_text(encoding="utf-8") == "ok\n"
+
+
+@pytest.mark.asyncio
+async def test_runtime_allows_managed_workspace_shell_verification_under_stress(
+    runtime: AgentRuntime,
+) -> None:
+    managed_root = runtime.ctx.config.agent_workspace_root()
+    managed_root.mkdir(parents=True, exist_ok=True)
+    script = managed_root / "echo_ok.py"
+    script.write_text("print('ok')\n", encoding="utf-8")
+
+    runtime.ctx.identity.user_model.trust_level = 0.95
+    runtime.ctx.identity.save()
+    runtime.ctx.somatic.set_tension(1.0)
+    runtime.ctx.somatic.set_fatigue(1.0)
+    if runtime.ctx.relational is not None:
+        runtime.ctx.relational._state = MusubiState(musubi=0.8)
+
+    result = await runtime.execute_tool(
+        "bash_run_command",
+        {"command": f"cd {managed_root} && python echo_ok.py"},
+    )
+
+    assert result["success"] is True
+    assert "\"stdout\": \"ok\\n\"" in result["output"]
+
+
+@pytest.mark.asyncio
+async def test_conversation_tool_context_does_not_inherit_unrelated_active_plan(
+    runtime: AgentRuntime,
+) -> None:
+    plan_store = getattr(runtime.ctx, "plan_store", None)
+    assert plan_store is not None
+    await plan_store.create_plan(
+        "plan-unrelated",
+        content="unrelated active plan",
+        task_id="different-task",
+    )
+    await plan_store.set_status("plan-unrelated", "active")
+
+    ctx = await runtime._build_tool_use_context("conversation-session")
+
+    assert ctx.plan_mode is False
+    assert ctx.active_plan_id is None
+
+
+@pytest.mark.asyncio
+async def test_task_tool_context_recovers_matching_active_plan(
+    runtime: AgentRuntime,
+) -> None:
+    plan_store = getattr(runtime.ctx, "plan_store", None)
+    assert plan_store is not None
+    await plan_store.create_plan(
+        "plan-task-match",
+        content="repair plan",
+        task_id="task-123",
+    )
+    await plan_store.set_status("plan-task-match", "active")
+
+    ctx = ToolUseContext(
+        runtime=runtime,
+        session_id="task-session",
+        task_id="task-123",
+    )
+    hydrated = await runtime._build_tool_use_context("conversation-session")
+    assert hydrated.task_id is None
+
+    from opencas.runtime.tool_runtime import hydrate_runtime_tool_use_context
+
+    hydrated = await hydrate_runtime_tool_use_context(runtime, ctx)
+
+    assert hydrated.plan_mode is True
+    assert hydrated.active_plan_id == "plan-task-match"
 
 
 @pytest.mark.asyncio
