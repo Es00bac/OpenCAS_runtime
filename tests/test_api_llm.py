@@ -1,0 +1,246 @@
+"""Tests for the LLM adapter using open_llm_auth."""
+
+import pytest
+import pytest_asyncio
+from unittest.mock import MagicMock, AsyncMock
+
+from opencas.api.llm import LLMClient
+from opencas.model_routing import ModelRoutingConfig, ReasoningEffort
+from opencas.telemetry import EventKind, TelemetryStore, Tracer
+
+
+@pytest.fixture
+def mock_provider_manager():
+    mgr = MagicMock()
+    resolved = MagicMock()
+    resolved.provider_id = "test-provider"
+    resolved.model_id = "test-model"
+    resolved.provider = MagicMock()
+    resolved.profile_id = "test-profile"
+    resolved.auth_source = "test-auth"
+    resolved.provider.supports_reasoning_effort = MagicMock(return_value=True)
+    resolved.provider.chat_completion = AsyncMock(return_value={"choices": [{"message": {"content": "hi"}}]})
+    async def _fake_stream():
+        for chunk in ["data: chunk1", "data: chunk2"]:
+            yield chunk
+    resolved.provider.chat_completion_stream = AsyncMock(return_value=_fake_stream())
+    resolved.provider.embeddings = AsyncMock(return_value={
+        "data": [{"embedding": [0.1, 0.2, 0.3]}]
+    })
+    mgr.resolve.return_value = resolved
+    return mgr
+
+
+@pytest.fixture
+def tracer(tmp_path):
+    store = TelemetryStore(tmp_path / "telemetry")
+    return Tracer(store)
+
+
+def test_llm_client_list_models() -> None:
+    mgr = MagicMock()
+    client = LLMClient(mgr)
+    models = client.list_available_models()
+    assert len(models) > 0
+    assert all("/" in m for m in models)
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_completion(mock_provider_manager: MagicMock, tracer: Tracer) -> None:
+    client = LLMClient(mock_provider_manager, default_model="test/model", tracer=tracer)
+    response = await client.chat_completion(messages=[{"role": "user", "content": "hello"}])
+    assert response["choices"][0]["message"]["content"] == "hi"
+    mock_provider_manager.resolve.assert_called_once_with("test/model")
+
+    events = tracer.store.query(kinds=[EventKind.TOOL_CALL])
+    assert len(events) == 1
+    assert "LLM chat_completion" in events[0].message
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_completion_stream(mock_provider_manager: MagicMock, tracer: Tracer) -> None:
+    client = LLMClient(mock_provider_manager, default_model="test/model", tracer=tracer)
+    chunks = []
+    async for chunk in client.chat_completion_stream(messages=[{"role": "user", "content": "hello"}]):
+        chunks.append(chunk)
+    assert chunks == ["data: chunk1", "data: chunk2"]
+
+
+@pytest.mark.asyncio
+async def test_llm_embed(mock_provider_manager: MagicMock, tracer: Tracer) -> None:
+    client = LLMClient(mock_provider_manager, default_model="test/model", tracer=tracer)
+    vector = await client.embed("hello world")
+    assert vector == [0.1, 0.2, 0.3]
+    mock_provider_manager.resolve.assert_called_with("openai/text-embedding-3-small")
+
+
+@pytest.mark.asyncio
+async def test_llm_embed_unsupported_provider(mock_provider_manager: MagicMock) -> None:
+    del mock_provider_manager.resolve.return_value.provider.embeddings
+    client = LLMClient(mock_provider_manager)
+    with pytest.raises(RuntimeError):
+        await client.embed("hello world")
+
+
+@pytest_asyncio.fixture
+async def token_telemetry(tmp_path):
+    from opencas.telemetry import TokenTelemetry
+    return TokenTelemetry(tmp_path / "token_telemetry", buffer_flush_size=1)
+
+
+@pytest.mark.asyncio
+async def test_llm_resolve_failure() -> None:
+    mgr = MagicMock()
+    mgr.resolve.return_value = None
+    client = LLMClient(mgr)
+    with pytest.raises(ValueError):
+        await client.chat_completion(messages=[])
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_completion_records_token_telemetry(
+    mock_provider_manager: MagicMock, token_telemetry, tracer: Tracer
+) -> None:
+    mock_provider_manager.resolve.return_value.provider.chat_completion = AsyncMock(
+        return_value={
+            "choices": [{"message": {"content": "hi"}}],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+        }
+    )
+    client = LLMClient(
+        mock_provider_manager,
+        default_model="test/model",
+        tracer=tracer,
+        token_telemetry=token_telemetry,
+    )
+    response = await client.chat_completion(
+        messages=[{"role": "user", "content": "hello"}],
+        session_id="session-1",
+        task_id="task-1",
+    )
+    assert response["choices"][0]["message"]["content"] == "hi"
+    summary = token_telemetry.get_session_summary("session-1")
+    assert summary.total_calls == 1
+    assert summary.total_tokens == 8
+
+
+@pytest.mark.asyncio
+async def test_llm_embed_records_token_telemetry(
+    mock_provider_manager: MagicMock, token_telemetry, tracer: Tracer
+) -> None:
+    client = LLMClient(
+        mock_provider_manager,
+        default_model="test/model",
+        tracer=tracer,
+        token_telemetry=token_telemetry,
+    )
+    vector = await client.embed("hello world", session_id="session-2")
+    assert vector == [0.1, 0.2, 0.3]
+    summary = token_telemetry.get_session_summary("session-2")
+    assert summary.total_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_llm_stream_records_token_telemetry(
+    mock_provider_manager: MagicMock, token_telemetry, tracer: Tracer
+) -> None:
+    client = LLMClient(
+        mock_provider_manager,
+        default_model="test/model",
+        tracer=tracer,
+        token_telemetry=token_telemetry,
+    )
+    chunks = []
+    async for chunk in client.chat_completion_stream(
+        messages=[{"role": "user", "content": "hello"}],
+        session_id="session-3",
+    ):
+        chunks.append(chunk)
+    assert chunks == ["data: chunk1", "data: chunk2"]
+    summary = token_telemetry.get_session_summary("session-3")
+    assert summary.total_calls == 1
+    assert summary.avg_latency_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_llm_chat_completion_uses_tiered_routing(
+    mock_provider_manager: MagicMock,
+) -> None:
+    client = LLMClient(
+        mock_provider_manager,
+        default_model="anthropic/claude-sonnet-4-6",
+        model_routing=ModelRoutingConfig(
+            mode="tiered",
+            light_model="google/gemini-2.5-flash",
+            standard_model="anthropic/claude-sonnet-4-6",
+            high_model="openai/gpt-5.3-codex",
+            extra_high_model="codex-cli/gpt-5.3-codex",
+            high_reasoning_effort=ReasoningEffort.HIGH,
+        ),
+    )
+    await client.chat_completion(
+        messages=[{"role": "user", "content": "hello"}],
+        complexity="high",
+    )
+    mock_provider_manager.resolve.assert_called_once_with("openai/gpt-5.3-codex")
+    payload = mock_provider_manager.resolve.return_value.provider.chat_completion.await_args.kwargs["payload"]
+    assert payload["reasoning_effort"] == "high"
+    lane = client.current_lane_meta()
+    assert lane["resolved_model"] == "test-provider/test-model"
+    assert lane["reasoning_effort"] == "high"
+    assert lane["reasoning_supported"] is True
+    assert lane["complexity"] == "high"
+
+
+def test_llm_resolve_model_for_single_mode_uses_same_model_for_every_tier() -> None:
+    mgr = MagicMock()
+    client = LLMClient(
+        mgr,
+        default_model="anthropic/claude-sonnet-4-6",
+        model_routing=ModelRoutingConfig(
+            mode="single",
+            single_model="codex-cli/gpt-5.3-codex",
+        ),
+    )
+
+    assert client.resolve_model_for_complexity(complexity="light") == "codex-cli/gpt-5.3-codex"
+    assert client.resolve_model_for_complexity(complexity="standard") == "codex-cli/gpt-5.3-codex"
+    assert client.resolve_model_for_complexity(complexity="high") == "codex-cli/gpt-5.3-codex"
+    assert client.resolve_model_for_complexity(complexity="extra_high") == "codex-cli/gpt-5.3-codex"
+
+
+def test_llm_resolve_reasoning_effort_for_tiers() -> None:
+    mgr = MagicMock()
+    client = LLMClient(
+        mgr,
+        default_model="codex-cli/gpt-5.4",
+        model_routing=ModelRoutingConfig(
+            mode="tiered",
+            light_model="codex-cli/gpt-5.4",
+            standard_model="codex-cli/gpt-5.4",
+            high_model="codex-cli/gpt-5.4",
+            extra_high_model="codex-cli/gpt-5.4",
+            light_reasoning_effort=ReasoningEffort.LOW,
+            standard_reasoning_effort=ReasoningEffort.MEDIUM,
+            high_reasoning_effort=ReasoningEffort.HIGH,
+            extra_high_reasoning_effort=ReasoningEffort.EXTRA_HIGH,
+        ),
+    )
+
+    assert client.resolve_reasoning_effort_for_complexity(complexity="light") == "low"
+    assert client.resolve_reasoning_effort_for_complexity(complexity="standard") == "medium"
+    assert client.resolve_reasoning_effort_for_complexity(complexity="high") == "high"
+    assert client.resolve_reasoning_effort_for_complexity(complexity="extra_high") == "xhigh"
+
+
+def test_llm_provider_supports_reasoning_effort_uses_resolved_provider() -> None:
+    mgr = MagicMock()
+    resolved = MagicMock()
+    resolved.model_id = "gpt-5.4"
+    resolved.provider = MagicMock()
+    resolved.provider.supports_reasoning_effort.return_value = True
+    mgr.resolve.return_value = resolved
+    client = LLMClient(mgr, default_model="codex-cli/gpt-5.4")
+
+    assert client.provider_supports_reasoning_effort() is True
+    resolved.provider.supports_reasoning_effort.assert_called_once_with(model="gpt-5.4")

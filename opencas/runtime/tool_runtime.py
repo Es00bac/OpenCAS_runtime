@@ -1,0 +1,656 @@
+"""Tool, plugin, and MCP execution helpers for AgentRuntime.
+
+This module owns the runtime-facing tool execution seam so `AgentRuntime`
+stays orchestration-shaped instead of carrying command assessment, approval,
+plugin lifecycle, and MCP registration logic inline.
+"""
+
+from __future__ import annotations
+
+import re
+import shlex
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
+
+from opencas.autonomy.models import ActionRequest, ActionRiskTier, ApprovalLevel
+from opencas.governance import classify_web_action, normalize_web_domain
+from opencas.platform import CapabilityDescriptor, CapabilitySource, CapabilityStatus
+from opencas.somatic import AppraisalEventType
+from opencas.tools import ToolUseContext
+from opencas.tools.validation import assess_command
+
+if TYPE_CHECKING:
+    from .agent_loop import AgentRuntime
+
+
+def build_runtime_tool_use_context(
+    runtime: "AgentRuntime",
+    session_id: str,
+) -> ToolUseContext:
+    """Create a tool-use context with the active plan, if one exists."""
+    return ToolUseContext(runtime=runtime, session_id=session_id)
+
+
+async def hydrate_runtime_tool_use_context(
+    runtime: "AgentRuntime",
+    ctx: ToolUseContext,
+) -> ToolUseContext:
+    """Populate plan-mode state on a freshly created tool-use context."""
+    plan_store = getattr(runtime.ctx, "plan_store", None)
+    if plan_store is not None and ctx.task_id:
+        try:
+            active_plans = await plan_store.list_active(task_id=ctx.task_id)
+            if active_plans:
+                ctx.plan_mode = True
+                ctx.active_plan_id = active_plans[0].plan_id
+        except Exception:
+            pass
+    return ctx
+
+
+async def discover_and_register_mcp_tools(
+    runtime: "AgentRuntime",
+) -> List[str]:
+    """Eagerly discover and register all configured MCP tools."""
+    registry = getattr(runtime.ctx, "mcp_registry", None)
+    if registry is None:
+        return []
+    registered: List[str] = []
+    for server_name in list(registry._configs.keys()):
+        try:
+            registered.extend(await _sync_mcp_server_registration(runtime, registry, server_name))
+        except Exception:
+            continue
+    return registered
+
+
+async def register_mcp_server_tools(
+    runtime: "AgentRuntime",
+    server_name: str,
+) -> List[str]:
+    """Lazy-register tools from a specific MCP server."""
+    registry = getattr(runtime.ctx, "mcp_registry", None)
+    if registry is None:
+        return []
+    return await _sync_mcp_server_registration(runtime, registry, server_name)
+
+
+def make_mcp_list_servers_adapter(runtime: "AgentRuntime"):
+    """Expose MCP server inventory through the normal tool registry."""
+    from opencas.tools.models import ToolResult
+
+    async def adapter(name: str, args: Dict[str, Any]) -> ToolResult:
+        registry = getattr(runtime.ctx, "mcp_registry", None)
+        if registry is None:
+            return ToolResult(success=True, output="No MCP registry configured.", metadata={})
+        configs = getattr(registry, "_configs", {})
+        initialized = getattr(registry, "_initialized", set())
+        lines = []
+        for server_name, cfg in configs.items():
+            status = "initialized" if server_name in initialized else "not_initialized"
+            lines.append(f"{server_name}: {status} (command: {cfg.command})")
+        return ToolResult(
+            success=True,
+            output="\n".join(lines) or "No MCP servers configured.",
+            metadata={"servers": list(configs.keys()), "initialized": list(initialized)},
+        )
+
+    return adapter
+
+
+def make_mcp_register_adapter(runtime: "AgentRuntime"):
+    """Expose lazy MCP registration through the tool registry."""
+    from opencas.tools.models import ToolResult
+
+    async def adapter(name: str, args: Dict[str, Any]) -> ToolResult:
+        server_name = str(args.get("server_name", ""))
+        try:
+            registered = await register_mcp_server_tools(runtime, server_name)
+        except Exception as exc:
+            failure = _get_mcp_failure_descriptor(runtime, server_name)
+            if failure is not None:
+                return ToolResult(
+                    success=False,
+                    output=f"MCP server '{server_name}' failed validation: {', '.join(failure.validation_errors)}",
+                    metadata={
+                        "server": server_name,
+                        "validation_errors": list(failure.validation_errors),
+                    },
+                )
+            return ToolResult(
+                success=False,
+                output=str(exc),
+                metadata={"server": server_name, "error_type": type(exc).__name__},
+            )
+
+        failure = _get_mcp_failure_descriptor(runtime, server_name)
+        if failure is not None:
+            return ToolResult(
+                success=False,
+                output=f"MCP server '{server_name}' failed validation: {', '.join(failure.validation_errors)}",
+                metadata={
+                    "server": server_name,
+                    "validation_errors": list(failure.validation_errors),
+                },
+            )
+        return ToolResult(
+            success=True,
+            output=f"Registered {len(registered)} tools from server '{server_name}'.",
+            metadata={"registered": registered, "server": server_name},
+        )
+
+    return adapter
+
+
+async def execute_runtime_tool(
+    runtime: "AgentRuntime",
+    name: str,
+    args: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Execute a tool through the registry after self-approval."""
+    entry = runtime.tools.get(name)
+    if entry is None:
+        return {"success": False, "output": f"Tool not found: {name}"}
+
+    plugin_lifecycle = getattr(runtime.ctx, "plugin_lifecycle", None)
+    if plugin_lifecycle is not None and plugin_lifecycle.is_tool_disabled(name):
+        return {
+            "success": False,
+            "output": f"Tool {name} is disabled because its plugin is disabled.",
+        }
+
+    request = ActionRequest(
+        tier=entry.risk_tier,
+        description=f"tool {name}: {entry.description}",
+        tool_name=name,
+        payload=_build_tool_request_payload(runtime, name, args),
+    )
+    approval = await handle_runtime_action(runtime, request)
+    if not approval["approved"]:
+        if entry.risk_tier != ActionRiskTier.READONLY:
+            runtime.ctx.somatic.bump_from_work(intensity=0.05, success=False)
+        await runtime.ctx.somatic.emit_appraisal_event(
+            AppraisalEventType.TOOL_REJECTED,
+            source_text=f"tool {name} rejected",
+            trigger_event_id=str(request.action_id),
+            meta={"tool_name": name, "args": args},
+        )
+        return {
+            "success": False,
+            "output": f"Tool execution blocked: {approval['decision'].reasoning}",
+            "decision": approval["decision"],
+        }
+
+    result = await runtime.tools.execute_async(name, args)
+    await _record_web_trust_outcome(runtime, request.payload, result.success)
+    if entry.risk_tier != ActionRiskTier.READONLY:
+        runtime.ctx.somatic.bump_from_work(intensity=0.1, success=result.success)
+    await runtime.ctx.somatic.emit_appraisal_event(
+        AppraisalEventType.TOOL_EXECUTED,
+        source_text=f"tool {name} executed",
+        trigger_event_id=str(request.action_id),
+        meta={"tool_name": name, "success": result.success},
+    )
+    if result.success:
+        resolved_goals = await runtime.executive.check_goal_resolution(result.output)
+        for goal in resolved_goals:
+            await runtime.ctx.somatic.emit_appraisal_event(
+                AppraisalEventType.GOAL_ACHIEVED,
+                source_text=f"Goal achieved: {goal}",
+                trigger_event_id=str(request.action_id),
+            )
+    runtime._sync_executive_snapshot()
+    return {
+        "success": result.success,
+        "output": result.output,
+        "metadata": result.metadata,
+    }
+
+
+async def install_runtime_plugin(
+    runtime: "AgentRuntime",
+    path: Path | str,
+) -> Optional[Any]:
+    """Install a plugin from a directory or manifest file."""
+    lifecycle = getattr(runtime.ctx, "plugin_lifecycle", None)
+    if lifecycle is None:
+        return None
+    return await lifecycle.install(path)
+
+
+async def uninstall_runtime_plugin(
+    runtime: "AgentRuntime",
+    plugin_id: str,
+) -> None:
+    """Uninstall a plugin."""
+    lifecycle = getattr(runtime.ctx, "plugin_lifecycle", None)
+    if lifecycle is not None:
+        await lifecycle.uninstall(plugin_id)
+
+
+async def enable_runtime_plugin(
+    runtime: "AgentRuntime",
+    plugin_id: str,
+) -> None:
+    """Enable a plugin."""
+    lifecycle = getattr(runtime.ctx, "plugin_lifecycle", None)
+    if lifecycle is not None:
+        await lifecycle.enable(plugin_id)
+
+
+async def disable_runtime_plugin(
+    runtime: "AgentRuntime",
+    plugin_id: str,
+) -> None:
+    """Disable a plugin."""
+    lifecycle = getattr(runtime.ctx, "plugin_lifecycle", None)
+    if lifecycle is not None:
+        await lifecycle.disable(plugin_id)
+
+
+async def submit_runtime_repair(
+    runtime: "AgentRuntime",
+    task: Any,
+) -> Any:
+    """Submit a repair task to the bounded assistant agent."""
+    await runtime.baa.start()
+    return await runtime.baa.submit(task)
+
+
+async def handle_runtime_action(
+    runtime: "AgentRuntime",
+    request: ActionRequest,
+) -> Dict[str, Any]:
+    """Evaluate an action through the self-approval ladder."""
+    decision = runtime.approval.evaluate(request)
+    await runtime.approval.maybe_record(decision, request, decision.score)
+    runtime._trace(
+        "handle_action",
+        {
+            "action_id": str(request.action_id),
+            "decision": decision.level.value,
+            "confidence": decision.confidence,
+        },
+    )
+    return {
+        "approved": decision.level in (
+            ApprovalLevel.CAN_DO_NOW,
+            ApprovalLevel.CAN_DO_WITH_CAUTION,
+        ),
+        "decision": decision,
+    }
+
+
+async def _sync_mcp_server_registration(
+    runtime: "AgentRuntime",
+    registry: Any,
+    server_name: str,
+) -> List[str]:
+    """Initialize an MCP server, project its current state, and surface failures."""
+
+    owner_id = _mcp_owner_id(server_name)
+    _clear_mcp_owner_state(runtime, owner_id)
+    ok = await registry.ensure_initialized(server_name)
+    if not ok:
+        _register_mcp_registration_failure(
+            runtime,
+            server_name,
+            ["MCP server initialization failed"],
+        )
+        return []
+    try:
+        return _register_mcp_tools(runtime, registry, server_name)
+    except Exception as exc:
+        _clear_mcp_owner_state(runtime, owner_id)
+        _register_mcp_registration_failure(runtime, server_name, [str(exc)])
+        raise
+
+
+def _register_mcp_tools(
+    runtime: "AgentRuntime",
+    registry: Any,
+    server_name: str,
+) -> List[str]:
+    from opencas.tools.mcp_adapter import make_mcp_tool_adapter
+
+    owner_id = _mcp_owner_id(server_name)
+    capability_registry = getattr(runtime, "capability_registry", None)
+    if capability_registry is not None:
+        capability_registry.unregister_owner(owner_id)
+
+    registered: List[str] = []
+    for tool_meta in registry._tools.get(server_name, {}).values():
+        tool_name = tool_meta["name"]
+        adapter = make_mcp_tool_adapter(registry, server_name, tool_name)
+        runtime.tools.register(
+            tool_name,
+            tool_meta.get("description", f"MCP tool {tool_name}"),
+            adapter,
+            ActionRiskTier.READONLY,
+            tool_meta.get("inputSchema", {"type": "object"}),
+            plugin_id=owner_id,
+        )
+        registered.append(tool_name)
+        if capability_registry is not None:
+            capability_registry.register(
+                CapabilityDescriptor(
+                    capability_id=_mcp_capability_id(server_name, tool_name),
+                    display_name=_mcp_capability_display_name(server_name, tool_name),
+                    kind="tool",
+                    source=CapabilitySource.MCP,
+                    owner_id=owner_id,
+                    status=CapabilityStatus.ENABLED,
+                    tool_names=[tool_name],
+                    metadata={"owner_name": server_name},
+                )
+            )
+    return registered
+
+
+def _clear_mcp_owner_state(runtime: "AgentRuntime", owner_id: str) -> None:
+    capability_registry = getattr(runtime, "capability_registry", None)
+    if capability_registry is not None:
+        capability_registry.unregister_owner(owner_id)
+    tools = getattr(runtime, "tools", None)
+    if tools is not None:
+        tools.unregister_owner(owner_id)
+
+
+def _register_mcp_registration_failure(
+    runtime: "AgentRuntime",
+    server_name: str,
+    validation_errors: List[str],
+) -> None:
+    owner_id = _mcp_owner_id(server_name)
+    capability_registry = getattr(runtime, "capability_registry", None)
+    if capability_registry is None:
+        return
+    capability_registry.register(
+        CapabilityDescriptor(
+            capability_id=owner_id,
+            display_name=server_name,
+            kind="mcp_server",
+            source=CapabilitySource.MCP,
+            owner_id=owner_id,
+            status=CapabilityStatus.FAILED_VALIDATION,
+            validation_errors=list(validation_errors),
+            metadata={"owner_name": server_name},
+        )
+    )
+
+
+def _mcp_capability_suffix(server_name: str, tool_name: str) -> str:
+    normalized = tool_name.strip()
+    for prefix in (f"mcp__{server_name}__", f"{server_name}__"):
+        if normalized.startswith(prefix):
+            return normalized[len(prefix) :]
+    return normalized
+
+
+def _mcp_owner_id(server_name: str) -> str:
+    return f"mcp:{server_name}"
+
+
+def _mcp_capability_id(server_name: str, tool_name: str) -> str:
+    return f"{_mcp_owner_id(server_name)}.{_mcp_capability_suffix(server_name, tool_name)}"
+
+
+def _mcp_capability_display_name(server_name: str, tool_name: str) -> str:
+    return f"{server_name}:{_mcp_capability_suffix(server_name, tool_name)}"
+
+
+def _get_mcp_failure_descriptor(
+    runtime: "AgentRuntime",
+    server_name: str,
+) -> CapabilityDescriptor | None:
+    capability_registry = getattr(runtime, "capability_registry", None)
+    if capability_registry is None:
+        return None
+    descriptor = capability_registry.get(_mcp_owner_id(server_name))
+    if descriptor is None:
+        return None
+    if descriptor.source is not CapabilitySource.MCP:
+        return None
+    if descriptor.status is not CapabilityStatus.FAILED_VALIDATION:
+        return None
+    return descriptor
+
+
+def _build_tool_request_payload(
+    runtime: "AgentRuntime",
+    name: str,
+    args: Dict[str, Any],
+) -> Dict[str, Any]:
+    request_payload = dict(args)
+    if name in {
+        "bash_run_command",
+        "pty_start",
+        "pty_interact",
+        "pty_write",
+        "pty_poll",
+        "pty_observe",
+        "process_start",
+        "workflow_supervise_session",
+    }:
+        command = str(args.get("command", "")).strip()
+        if command:
+            assessment = assess_command(command)
+            request_payload.update(
+                {
+                    "command_family": assessment.family,
+                    "command_permission_class": assessment.permission_class,
+                    "command_executable": assessment.executable,
+                    "command_subcommand": assessment.subcommand,
+                }
+            )
+            request_payload.update(_classify_shell_command_scope(runtime, args, command))
+        elif name in {"pty_interact", "pty_write", "workflow_supervise_session"} and args.get("session_id"):
+            request_payload.update(
+                {
+                    "command_family": "interactive_session",
+                    "command_permission_class": "bounded_write",
+                }
+            )
+        elif name in {"pty_poll", "pty_observe"} and args.get("session_id"):
+            request_payload.update(
+                {
+                    "command_family": "interactive_session",
+                    "command_permission_class": "read_only",
+                }
+            )
+    elif name in {"pty_kill", "pty_remove"}:
+        request_payload.update(
+            {
+                "command_family": "interactive_session",
+                "command_permission_class": "bounded_write",
+            }
+        )
+    elif name in {"fs_write_file", "edit_file"}:
+        request_payload.update(_classify_workspace_write_scope(runtime, args))
+    elif name in {"web_fetch", "web_search", "browser_navigate"}:
+        request_payload.update(_classify_web_request_target(name, args))
+    elif name in {
+        "browser_click",
+        "browser_type",
+        "browser_press",
+        "browser_wait",
+        "browser_snapshot",
+    }:
+        request_payload.update(_classify_browser_session_target(runtime, name, args))
+    return request_payload
+
+
+async def _record_web_trust_outcome(
+    runtime: "AgentRuntime",
+    payload: Dict[str, Any],
+    success: bool,
+) -> None:
+    web_trust = getattr(runtime.ctx, "web_trust", None)
+    if web_trust is None:
+        return
+    action_class = payload.get("web_action_class")
+    if not action_class:
+        return
+    await web_trust.record_outcome(
+        url=payload.get("web_url"),
+        domain=payload.get("web_domain"),
+        action_class=str(action_class),
+        success=success,
+    )
+
+
+def _classify_web_request_target(
+    name: str,
+    args: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    action_class = classify_web_action(name)
+    if action_class is None:
+        return payload
+    payload["web_action_class"] = action_class.value
+    if name == "web_search":
+        return payload
+    url = str(args.get("url", "")).strip()
+    if not url:
+        return payload
+    domain = normalize_web_domain(url)
+    if domain:
+        payload["web_url"] = url
+        payload["web_domain"] = domain
+    return payload
+
+
+def _classify_browser_session_target(
+    runtime: "AgentRuntime",
+    name: str,
+    args: Dict[str, Any],
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {}
+    action_class = classify_web_action(name)
+    if action_class is None:
+        return payload
+    payload["web_action_class"] = action_class.value
+    session_id = str(args.get("session_id", "")).strip()
+    scope_key = str(args.get("scope_key", "default")).strip() or "default"
+    if not session_id:
+        return payload
+    supervisor = getattr(runtime, "browser_supervisor", None)
+    if supervisor is None or not hasattr(supervisor, "describe_session"):
+        return payload
+    details = supervisor.describe_session(scope_key, session_id)
+    if not details:
+        return payload
+    url = str(details.get("url", "")).strip()
+    if not url:
+        return payload
+    domain = normalize_web_domain(url)
+    if not domain:
+        return payload
+    payload["web_url"] = url
+    payload["web_domain"] = domain
+    return payload
+
+
+def _classify_workspace_write_scope(
+    runtime: "AgentRuntime",
+    args: Dict[str, Any],
+) -> Dict[str, Any]:
+    file_path = str(args.get("file_path") or args.get("path") or "").strip()
+    if not file_path:
+        return {}
+
+    resolved = Path(file_path).expanduser().resolve()
+    managed_root = runtime.ctx.config.agent_workspace_root()
+    plans_root = (runtime.ctx.config.state_dir / "plans").resolve()
+
+    try:
+        resolved.relative_to(managed_root)
+        return {
+            "write_scope": "managed_workspace",
+            "managed_workspace_root": str(managed_root),
+        }
+    except ValueError:
+        pass
+
+    try:
+        resolved.relative_to(plans_root)
+        return {
+            "write_scope": "plans",
+            "plans_root": str(plans_root),
+        }
+    except ValueError:
+        pass
+
+    return {"write_scope": "other"}
+
+
+def _classify_shell_command_scope(
+    runtime: "AgentRuntime",
+    args: Dict[str, Any],
+    command: str,
+) -> Dict[str, Any]:
+    managed_root = runtime.ctx.config.agent_workspace_root()
+    candidates: List[Path] = []
+    explicit_cwd = str(args.get("cwd") or "").strip()
+    if explicit_cwd:
+        try:
+            candidates.append(Path(explicit_cwd).expanduser().resolve())
+        except OSError:
+            pass
+
+    prefix = _extract_leading_cd_prefix(command)
+    if prefix is not None:
+        try:
+            resolved = Path(prefix).expanduser().resolve()
+            candidates.append(resolved)
+        except OSError:
+            pass
+
+    for candidate in candidates:
+        try:
+            candidate.relative_to(managed_root)
+        except ValueError:
+            continue
+
+        payload = {
+            "command_scope": "managed_workspace",
+            "managed_workspace_root": str(managed_root),
+        }
+        remainder = _command_after_leading_cd(command)
+        if remainder:
+            effective = assess_command(remainder)
+            payload.update(
+                {
+                    "command_effective_family": effective.family,
+                    "command_effective_permission_class": effective.permission_class,
+                    "command_effective_executable": effective.executable,
+                    "command_effective_subcommand": effective.subcommand,
+                }
+            )
+        return payload
+
+    return {}
+
+
+def _extract_leading_cd_prefix(command: str) -> Optional[str]:
+    stripped = command.strip()
+    match = re.match(r"^cd\s+(.+?)\s*(?:&&|;)", stripped)
+    if match is None:
+        return None
+    raw = match.group(1).strip()
+    try:
+        tokenized = shlex.split(raw)
+    except ValueError:
+        return raw.strip("\"'")
+    if not tokenized:
+        return None
+    return tokenized[0]
+
+
+def _command_after_leading_cd(command: str) -> Optional[str]:
+    stripped = command.strip()
+    match = re.match(r"^cd\s+.+?\s*(?:&&|;)\s*(.+)$", stripped)
+    if match is None:
+        return None
+    remainder = match.group(1).strip()
+    return remainder or None
