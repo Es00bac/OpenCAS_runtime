@@ -14,12 +14,12 @@ This public repository is a clean runtime release. It includes source, public te
 
 ## Quick Start
 
-`requirements.txt` expects a sibling checkout of `open_llm_auth` at `../open_llm_auth/`. Replace that editable dependency if your deployment installs the gateway another way.
+`requirements.txt` expects a sibling checkout of `open_llm_auth` at `../open_llm_auth/`. The quickstart below clones the public gateway repo into that exact path. Replace that editable dependency only if your deployment installs the gateway another way.
 
 ```bash
 git clone https://github.com/Es00bac/OpenCAS_runtime.git OpenCAS
 cd OpenCAS
-git clone <open-llm-auth-repo-url> ../open_llm_auth
+git clone https://github.com/Es00bac/OpenLLMAuth.git ../open_llm_auth
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

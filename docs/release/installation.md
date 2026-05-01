@@ -7,7 +7,7 @@ This guide documents the repo as an editable source checkout that can be configu
 - Python `3.11+`
 - A POSIX shell for the commands below
 - Network access to whichever model providers you plan to use through `open_llm_auth`
-- The sibling `open_llm_auth` workspace available at `../open_llm_auth/`, because `requirements.txt` installs it as an editable dependency
+- The sibling `open_llm_auth` workspace available at `../open_llm_auth/`, because `requirements.txt` installs it as an editable dependency. The install command below clones the public OpenLLMAuth repo into that path.
 
 Optional:
 
@@ -19,8 +19,9 @@ Optional:
 ## Install From Repo
 
 ```bash
-git clone https://github.com/Es00bac/OpenCAS_runtime.git
+git clone https://github.com/Es00bac/OpenCAS_runtime.git OpenCAS
 cd OpenCAS
+git clone https://github.com/Es00bac/OpenLLMAuth.git ../open_llm_auth
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt

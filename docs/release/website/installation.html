@@ -35,7 +35,7 @@
       <span class="eyebrow">Installation</span>
       <h1>Install the repo as it exists now.</h1>
       <p class="section-lead">
-        This guide matches the current codebase. It assumes the sibling <code>open_llm_auth</code> workspace is available at <code>../open_llm_auth/</code>, because the repo installs it through <code>requirements.txt</code>.
+        This guide matches the current codebase. It clones the public OpenLLMAuth repo into the sibling <code>../open_llm_auth/</code> path required by <code>requirements.txt</code>.
       </p>
     </section>
 
@@ -53,7 +53,7 @@
           <h3>Prerequisites</h3>
           <ul class="list">
             <li>Python <code>3.11+</code></li>
-            <li>A working checkout of <code>../open_llm_auth/</code></li>
+            <li>Network access to clone <code>https://github.com/Es00bac/OpenLLMAuth.git</code> into <code>../open_llm_auth/</code></li>
             <li>Network access to whichever providers you plan to use through <code>open_llm_auth</code></li>
             <li>Optional: Telegram bot token if you want Telegram integration</li>
             <li>Optional: Qdrant if you want an external vector backend</li>
@@ -64,8 +64,9 @@
 
         <section class="page-card" id="install">
           <h3>Install from repo</h3>
-          <pre><code>git clone https://github.com/Es00bac/OpenCAS_runtime.git
+          <pre><code>git clone https://github.com/Es00bac/OpenCAS_runtime.git OpenCAS
 cd OpenCAS
+git clone https://github.com/Es00bac/OpenLLMAuth.git ../open_llm_auth
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt</code></pre>
@@ -135,7 +136,7 @@ pip install -r requirements.txt</code></pre>
         <section class="page-card" id="troubleshooting">
           <h3>Troubleshooting</h3>
           <ul class="list">
-            <li>If <code>open_llm_auth</code> cannot be imported, confirm the editable dependency path in <code>requirements.txt</code> matches your local checkout.</li>
+            <li>If <code>open_llm_auth</code> cannot be imported, confirm that <code>../open_llm_auth/</code> exists and was cloned from <code>https://github.com/Es00bac/OpenLLMAuth.git</code>.</li>
             <li>If the dashboard does not load, verify you are opening <code>127.0.0.1:8080</code>, not an older local <code>8000</code> default.</li>
             <li>If the wrong provider or model is active, reopen the TUI bootstrap or inspect the dashboard System tab.</li>
           </ul>

@@ -34,8 +34,9 @@ That means the project is local-state and operator-owned, but not “fully local
 ## Recommended First Run
 
 ```bash
-git clone https://github.com/Es00bac/OpenCAS_runtime.git
+git clone https://github.com/Es00bac/OpenCAS_runtime.git OpenCAS
 cd OpenCAS
+git clone https://github.com/Es00bac/OpenLLMAuth.git ../open_llm_auth
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -101,6 +102,12 @@ This release is documented as an editable source checkout. The current `requirem
 
 ```text
 ../open_llm_auth/
+```
+
+The recommended first-run command clones that dependency from:
+
+```text
+https://github.com/Es00bac/OpenLLMAuth.git
 ```
 
 If you move the repo to another machine or directory layout, update that dependency path or install `open_llm_auth` separately before running OpenCAS.
