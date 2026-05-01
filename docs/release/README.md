@@ -44,10 +44,18 @@ python -m opencas --tui
 
 The TUI bootstrap is the most user-friendly way to configure provider material, model selection, and Telegram settings for the current repo state.
 
+First boot is responsibility-gated. OpenCAS creates persistent continuity, not a disposable chat session. If you later delete the state directory, you delete that agent's continuity. The TUI asks you to acknowledge this before creation.
+
 After configuration:
 
 ```bash
 python -m opencas --with-server
+```
+
+For a non-TUI fresh bootstrap, acknowledge that boundary explicitly:
+
+```bash
+python -m opencas --with-server --accept-bootstrap-responsibility
 ```
 
 Then open:
@@ -104,7 +112,7 @@ Before calling a release artifact accurate, verify these commands on the current
 ```bash
 source .venv/bin/activate
 python -m opencas --help
-python -m opencas --with-server
+python -m opencas --with-server --accept-bootstrap-responsibility
 pytest tests/test_dashboard_api.py -q
 ```
 

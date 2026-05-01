@@ -80,6 +80,9 @@ pip install -r requirements.txt</code></pre>
           <p class="lede">
             The TUI bootstrap is the cleanest way to configure provider material, choose actual discovered chat and embedding models, and set up Telegram.
           </p>
+          <div class="callout warn">
+            <strong>First-boot responsibility.</strong> OpenCAS creates persistent continuity, not a disposable chat session. If you later delete the state directory, you delete that agent's continuity. The TUI asks you to acknowledge this before creation.
+          </div>
           <div class="table-wrap">
             <table>
               <thead>
@@ -120,8 +123,9 @@ pip install -r requirements.txt</code></pre>
 
         <section class="page-card" id="launch">
           <h3>Launch</h3>
-          <pre><code>python -m opencas --with-server</code></pre>
+          <pre><code>python -m opencas --with-server --accept-bootstrap-responsibility</code></pre>
           <p>The current default address is <code>http://127.0.0.1:8080/dashboard</code>.</p>
+          <p>The acknowledgement flag is required only for non-TUI fresh bootstraps. Later launches against an existing state directory do not require it.</p>
           <div class="callout warn">
             <strong>Truthful deployment note.</strong> OpenCAS keeps its state locally, but normal chat, voice, and embedding calls go through the configured provider lane. It is not accurate to describe the default setup as cloud-free.
           </div>

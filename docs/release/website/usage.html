@@ -52,8 +52,9 @@
       <div class="content-stack">
         <section class="page-card" id="launch">
           <h3>Launch modes</h3>
-          <pre><code>python -m opencas --with-server</code></pre>
+          <pre><code>python -m opencas --with-server --accept-bootstrap-responsibility</code></pre>
           <p>This is the primary operator mode. It serves the dashboard and the HTTP/WebSocket APIs on <code>127.0.0.1:8080</code> by default.</p>
+          <p>The acknowledgement flag is required only for non-TUI fresh bootstraps. It makes the first-boot boundary explicit: OpenCAS creates persistent continuity, not a disposable chat session, and deleting the state directory deletes that agent's continuity.</p>
           <pre><code>python -m opencas --tui</code></pre>
           <p>Use the TUI when you need to set up or change provider material, model selection, Telegram settings, or copied credential material.</p>
         </section>

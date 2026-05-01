@@ -13,6 +13,11 @@ from open_llm_auth.config import load_config
 from open_llm_auth.provider_catalog import get_builtin_provider_models
 
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
+from opencas.bootstrap.responsibility import (
+    BOOTSTRAP_RESPONSIBILITY_WARNING,
+    needs_bootstrap_responsibility_ack,
+    record_bootstrap_responsibility_ack,
+)
 from opencas.model_routing import (
     ModelRoutingMode,
     load_persisted_model_routing_state,
@@ -219,6 +224,24 @@ def _build_bootstrap_config(args, persisted_telegram) -> BootstrapConfig:
             Path(args.credential_source_env_path).expanduser().resolve()
         )
     return BootstrapConfig(**config_kwargs)
+
+
+def _enforce_bootstrap_responsibility_ack(args, state_dir: Path, *, stderr=sys.stderr) -> None:
+    """Require explicit acknowledgement before creating first continuity state."""
+
+    if not needs_bootstrap_responsibility_ack(state_dir):
+        return
+    if bool(getattr(args, "accept_bootstrap_responsibility", False)):
+        record_bootstrap_responsibility_ack(state_dir, source="cli")
+        return
+    print(BOOTSTRAP_RESPONSIBILITY_WARNING, file=stderr)
+    print("", file=stderr)
+    print(
+        "To create this first OpenCAS state directory, rerun with "
+        "--accept-bootstrap-responsibility.",
+        file=stderr,
+    )
+    raise SystemExit(2)
 
 
 def main() -> int:
@@ -431,6 +454,14 @@ def main() -> int:
         action="store_true",
         help="Launch the interactive TUI bootstrap wizard instead of using CLI arguments",
     )
+    parser.add_argument(
+        "--accept-bootstrap-responsibility",
+        action="store_true",
+        help=(
+            "Acknowledge first-boot responsibility for creating a persistent agent "
+            "state directory. Required for non-TUI fresh bootstraps."
+        ),
+    )
     args = parser.parse_args()
 
     if args.tui:
@@ -440,6 +471,7 @@ def main() -> int:
 
     async def _run() -> None:
         state_dir = Path(args.state_dir).expanduser().resolve()
+        _enforce_bootstrap_responsibility_ack(args, state_dir)
         persisted_telegram = load_telegram_runtime_config(state_dir)
         config = _build_bootstrap_config(args, persisted_telegram)
         ctx = await BootstrapPipeline(config).run()

@@ -34,6 +34,14 @@ python -m opencas --with-server
 
 Then open `http://127.0.0.1:8080/dashboard`.
 
+First boot is responsibility-gated. OpenCAS creates persistent continuity, not a disposable chat session. If you later delete the state directory, you delete that agent's continuity. The TUI asks you to acknowledge this before creation.
+
+For a non-TUI fresh bootstrap, acknowledge that boundary explicitly:
+
+```bash
+python -m opencas --with-server --accept-bootstrap-responsibility
+```
+
 ## Runtime Defaults
 
 - State defaults to `./.opencas/` unless `--state-dir` is set.

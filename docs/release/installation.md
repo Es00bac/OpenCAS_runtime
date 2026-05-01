@@ -50,6 +50,7 @@ Current important flags:
 - `--telegram-enabled`
 - `--telegram-disabled`
 - `--tui`
+- `--accept-bootstrap-responsibility`
 
 ## Recommended Setup Path
 
@@ -59,6 +60,8 @@ The most accurate and operator-friendly setup path in the current repo is the TU
 source .venv/bin/activate
 python -m opencas --tui
 ```
+
+First boot is responsibility-gated. OpenCAS creates persistent continuity, not a disposable chat session. If you later delete the state directory, you delete that agent's continuity. The TUI asks you to acknowledge this before creation.
 
 Use it to:
 
@@ -74,8 +77,10 @@ If you already have provider material configured:
 
 ```bash
 source .venv/bin/activate
-python -m opencas --with-server
+python -m opencas --with-server --accept-bootstrap-responsibility
 ```
+
+The `--accept-bootstrap-responsibility` flag is required only for non-TUI fresh bootstraps. Once a state directory contains continuity, later launches do not require it.
 
 Default server address:
 
@@ -91,6 +96,7 @@ Explicit project config/env paths:
 python -m opencas \
   --provider-config-path /path/to/open_llm_auth/config.json \
   --provider-env-path /path/to/open_llm_auth/.env \
+  --accept-bootstrap-responsibility \
   --with-server
 ```
 
@@ -102,6 +108,7 @@ python -m opencas \
   --credential-source-env-path /path/to/open_llm_auth/.env \
   --credential-profile-id kimi-coding:default \
   --credential-env-key MOONSHOT_API_KEY \
+  --accept-bootstrap-responsibility \
   --with-server
 ```
 
@@ -111,6 +118,7 @@ Override models directly:
 python -m opencas \
   --default-llm-model kimi-coding/k2p5 \
   --embedding-model-id google/embeddinggemma-300m \
+  --accept-bootstrap-responsibility \
   --with-server
 ```
 
@@ -158,6 +166,8 @@ Verify that the server is running on the current default port:
 ```bash
 python -m opencas --with-server
 ```
+
+Add `--accept-bootstrap-responsibility` if this is a non-TUI fresh bootstrap.
 
 Then open:
 

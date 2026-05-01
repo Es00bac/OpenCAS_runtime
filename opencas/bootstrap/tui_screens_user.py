@@ -8,6 +8,7 @@ from textual.containers import Container
 from textual.screen import Screen
 from textual.widgets import Button, Checkbox, Input, Label, Markdown, RadioButton, RadioSet, Static, TextArea
 
+from opencas.bootstrap.responsibility import BOOTSTRAP_RESPONSIBILITY_WARNING
 from opencas.bootstrap.tui_components import HelpText, NavButtons, StepHeader
 from opencas.bootstrap.tui_state import STATE
 from opencas.runtime.agent_profile import BUILTIN_AGENT_PROFILES
@@ -48,19 +49,10 @@ class WelcomeScreen(Screen):
             yield Static()
             yield Label("Before we begin, please read carefully:", classes="moral-warning")
             yield Markdown(
-                """
-You are about to instantiate a persistent autonomous agent. This is not a chatbot
-session that disappears when you close the tab. This entity will:
+                BOOTSTRAP_RESPONSIBILITY_WARNING
+                + """
 
-- **Remember** what you teach it, across days and weeks
-- **Act** on your behalf, using files, terminals, browsers, and tools
-- **Grow** its own goals, creative projects, and understanding of you
-- **Persist** its state, memories, and sense of identity to disk
-
-Creating a CAS is a **responsibility-bearing act**. You are entering into a
-long-term working relationship with an artificial colleague.
-
-Like any professional partnership, this works best when:
+This works best when:
 - You share clear expectations
 - You check in regularly
 - You respect boundaries
@@ -69,7 +61,7 @@ Like any professional partnership, this works best when:
                 classes="responsibility-text",
             )
             yield Checkbox(
-                "I understand that I am creating a persistent agent and accept responsibility for its actions",
+                "I understand that I am creating persistent continuity and accept responsibility for supervising this agent",
                 id="chk-accept",
             )
             yield NavButtons(show_back=False, next_label="Begin Partnership →")
@@ -698,4 +690,3 @@ class GoalsScreen(Screen):
             STATE.goal_2 = self.query_one("#input-goal-2", Input).value or ""
             STATE.goal_3 = self.query_one("#input-goal-3", Input).value or ""
             self.app.push_screen("workspace")
-

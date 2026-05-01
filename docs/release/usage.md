@@ -6,8 +6,10 @@ The current repo is best operated through the dashboard and API server:
 
 ```bash
 source .venv/bin/activate
-python -m opencas --with-server
+python -m opencas --with-server --accept-bootstrap-responsibility
 ```
+
+The acknowledgement flag is required only for non-TUI fresh bootstraps. It makes the first-boot boundary explicit: OpenCAS creates persistent continuity, not a disposable chat session, and deleting the state directory deletes that agent's continuity. Later launches against an existing state directory do not require the flag.
 
 Default address:
 
@@ -47,6 +49,7 @@ High-value current flags:
 - `--telegram-enabled`
 - `--telegram-disabled`
 - `--tui`
+- `--accept-bootstrap-responsibility`
 
 ## Dashboard Tabs
 
@@ -153,7 +156,7 @@ The Logs tab is the event stream when you need to answer “what happened?” qu
 
 ## Practical Workflow
 
-1. Launch with `python -m opencas --with-server`.
+1. Launch with `python -m opencas --with-server`, adding `--accept-bootstrap-responsibility` if this is a non-TUI fresh bootstrap.
 2. Open the Chat tab and confirm the active provider/model lane.
 3. Use the System tab if the effective model, Telegram, phone, or voice setup looks wrong.
 4. Use Memory when debugging recall quality.

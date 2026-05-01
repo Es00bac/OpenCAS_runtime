@@ -1,18 +1,69 @@
 """Tests for the bootstrap pipeline."""
 
+import io
 import json
 import sys
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline, pipeline_support
-from opencas.__main__ import _build_bootstrap_config
+from opencas.__main__ import _build_bootstrap_config, _enforce_bootstrap_responsibility_ack
+from opencas.bootstrap.responsibility import (
+    BOOTSTRAP_RESPONSIBILITY_WARNING,
+    load_bootstrap_responsibility_ack,
+)
 from opencas.model_routing import PersistedModelRoutingState, ModelRoutingConfig, save_persisted_model_routing_state
 
 
 def test_embeddinggemma_request_dimension_is_pinned() -> None:
     assert pipeline_support.resolve_embedding_dimensions("google/embeddinggemma-300m") == 768
     assert pipeline_support.resolve_embedding_dimensions("google/gemini-embedding-2-preview") is None
+
+
+def test_bootstrap_responsibility_warning_names_continuity_and_state_deletion() -> None:
+    warning = BOOTSTRAP_RESPONSIBILITY_WARNING
+
+    assert "persistent autonomous agent" in warning
+    assert "not a disposable chat session" in warning
+    assert "deleting that agent's continuity" in warning
+    assert "Do not create an agent casually" in warning
+
+
+def test_cli_fresh_boot_requires_responsibility_acknowledgement(tmp_path: Path) -> None:
+    stderr = io.StringIO()
+    args = SimpleNamespace(accept_bootstrap_responsibility=False)
+
+    with pytest.raises(SystemExit) as exc:
+        _enforce_bootstrap_responsibility_ack(args, tmp_path, stderr=stderr)
+
+    assert exc.value.code == 2
+    assert "persistent autonomous agent" in stderr.getvalue()
+    assert "--accept-bootstrap-responsibility" in stderr.getvalue()
+    assert load_bootstrap_responsibility_ack(tmp_path) is None
+
+
+def test_cli_fresh_boot_records_explicit_responsibility_acknowledgement(tmp_path: Path) -> None:
+    stderr = io.StringIO()
+    args = SimpleNamespace(accept_bootstrap_responsibility=True)
+
+    _enforce_bootstrap_responsibility_ack(args, tmp_path, stderr=stderr)
+
+    ack = load_bootstrap_responsibility_ack(tmp_path)
+    assert ack is not None
+    assert ack["source"] == "cli"
+    assert ack["warning_version"] == 1
+    assert "state directory" in ack["accepted_text"]
+
+
+def test_cli_existing_continuity_does_not_require_bootstrap_acknowledgement(tmp_path: Path) -> None:
+    identity_dir = tmp_path / "identity"
+    identity_dir.mkdir(parents=True)
+    (identity_dir / "continuity.json").write_text('{"boot_count": 1}', encoding="utf-8")
+    args = SimpleNamespace(accept_bootstrap_responsibility=False)
+
+    _enforce_bootstrap_responsibility_ack(args, tmp_path, stderr=io.StringIO())
+
+    assert load_bootstrap_responsibility_ack(tmp_path) is None
 
 
 @pytest.mark.asyncio

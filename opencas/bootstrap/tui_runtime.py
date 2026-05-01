@@ -7,6 +7,7 @@ from textual.screen import Screen
 from textual.widgets import Button, ProgressBar, RichLog
 
 from opencas.bootstrap import BootstrapPipeline
+from opencas.bootstrap.responsibility import record_bootstrap_responsibility_ack
 from opencas.bootstrap.tui_bootstrap import build_bootstrap_config, save_questionnaire
 from opencas.bootstrap.tui_components import StepHeader
 from opencas.bootstrap.tui_state import STATE
@@ -52,6 +53,7 @@ class BootstrapScreen(Screen):
 
         self._log("Saving questionnaire to state directory...")
         save_questionnaire(STATE, state_dir)
+        record_bootstrap_responsibility_ack(state_dir, source="tui")
         self.progress.update(progress=20)
 
         self._log("Starting bootstrap pipeline...")

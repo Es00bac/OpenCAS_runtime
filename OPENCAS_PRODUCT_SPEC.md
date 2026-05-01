@@ -376,6 +376,12 @@ Clean-bootstrap mode should show a one-time moral warning before creation.
 
 That warning exists because creating a new autonomous agent is a responsibility-bearing act.
 
+Non-TUI first boot must require explicit acknowledgement before creating the
+state directory. TUI bootstrap must require an acknowledgement checkbox. The
+warning must state that OpenCAS creates persistent continuity, not a disposable
+chat session, and that deleting the state directory deletes that agent's
+continuity.
+
 ### 9.4 Self-driven progress visibility
 
 The UI should show:

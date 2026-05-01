@@ -9,15 +9,11 @@ from typing import Any, Optional
 
 from opencas.embeddings.backfill import EmbeddingBackfill
 from opencas.telemetry import EventKind, Tracer
+from opencas.bootstrap.responsibility import BOOTSTRAP_RESPONSIBILITY_WARNING
 
 
 def emit_moral_warning(stage_callback: Any) -> None:
-    warning = (
-        "You are about to instantiate a persistent autonomous agent. "
-        "This entity will remember, learn, and act on your behalf. "
-        "Creating it is a responsibility-bearing act. Proceed with care."
-    )
-    stage_callback("moral_warning", {"warning": warning})
+    stage_callback("moral_warning", {"warning": BOOTSTRAP_RESPONSIBILITY_WARNING})
 
 
 async def run_embedding_backfill(
