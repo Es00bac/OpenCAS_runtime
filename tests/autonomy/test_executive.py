@@ -31,6 +31,7 @@ def test_load_save_snapshot(executive: ExecutiveState, tmp_path: Path) -> None:
     executive.set_intention("test intention")
     executive.add_goal("goal one")
     executive.add_goal("goal two")
+    executive.add_goal("repair /package")
 
     executive.save_snapshot()
 
@@ -41,6 +42,65 @@ def test_load_save_snapshot(executive: ExecutiveState, tmp_path: Path) -> None:
     assert fresh.intention == "test intention"
     assert "goal one" in fresh.active_goals
     assert "goal two" in fresh.active_goals
+    assert "repair /package" in fresh.parked_goals
+    assert fresh.parked_goal_metadata["repair /package"]["reason"] == "machine_fragment_goal"
+
+
+def test_load_snapshot_archives_large_parked_residue(identity: IdentityManager, tmp_path: Path) -> None:
+    snapshot = ExecutiveSnapshot(
+        intention="test intention",
+        active_goals=[],
+        parked_goals=[
+            "persistence",
+            "memory",
+            "assist",
+            "build",
+            "repair /package",
+            "repair /npx",
+            "test -01",
+            "verify tsconfig",
+        ],
+        parked_goal_reasons={
+            "persistence": "abstract_theme_goal",
+            "memory": "abstract_theme_goal",
+            "assist": "abstract_theme_goal",
+            "build": "generic_verb_without_binding",
+            "repair /package": "machine_fragment_goal",
+            "repair /npx": "machine_fragment_goal",
+            "test -01": "numbered_fragment_goal",
+            "verify tsconfig": "evidence_deferred",
+        },
+        parked_goal_metadata={
+            "persistence": {"reason": "abstract_theme_goal"},
+            "memory": {"reason": "abstract_theme_goal"},
+            "assist": {"reason": "abstract_theme_goal"},
+            "build": {"reason": "generic_verb_without_binding"},
+            "repair /package": {"reason": "machine_fragment_goal", "source_artifact": "repair /package"},
+            "repair /npx": {"reason": "machine_fragment_goal", "source_artifact": "repair /npx"},
+            "test -01": {"reason": "numbered_fragment_goal"},
+            "verify tsconfig": {
+                "reason": "evidence_deferred",
+                "wake_trigger": "TypeScript failure or direct user request",
+                "source_artifact": "tsconfig",
+            },
+        },
+    )
+    path = tmp_path / "executive.json"
+    path.write_text(snapshot.model_dump_json(indent=2), encoding="utf-8")
+
+    fresh = ExecutiveState(identity=identity)
+    fresh.load_snapshot(path)
+
+    assert fresh.parked_goals == ["verify tsconfig"]
+    assert len(fresh.archived_parked_goals) == 7
+    assert "repair /package" in fresh.archived_parked_goals
+    archived_metadata = fresh.archived_parked_goal_metadata["repair /package"]
+    assert archived_metadata["archive_reason"] == "residue_compaction"
+    assert "archived_at" in archived_metadata
+
+    saved = ExecutiveSnapshot.model_validate_json(path.read_text(encoding="utf-8"))
+    assert saved.parked_goals == ["verify tsconfig"]
+    assert "repair /package" in saved.archived_parked_goals
 
 
 def test_restore_goals_from_identity(identity: IdentityManager, tmp_path: Path) -> None:
@@ -53,6 +113,23 @@ def test_restore_goals_from_identity(identity: IdentityManager, tmp_path: Path) 
     assert count == 2
     assert "hydrate goals" in executive.active_goals
     assert "from identity" in executive.active_goals
+
+
+def test_restore_goals_from_identity_parks_machine_fragments(identity: IdentityManager) -> None:
+    identity.self_model.current_goals = [
+        "rewrite the readme",
+        "repair /package",
+        "test -01",
+        "memory",
+    ]
+    identity.save()
+
+    executive = ExecutiveState(identity=identity)
+    count = executive.restore_goals_from_identity()
+
+    assert count == 1
+    assert executive.active_goals == ["rewrite the readme"]
+    assert executive.parked_goals == ["repair /package", "test -01", "memory"]
 
 
 @pytest.mark.asyncio
@@ -134,3 +211,20 @@ def test_enqueue_respects_capacity(identity: IdentityManager) -> None:
     assert executive.enqueue(w2) is True
     assert executive.enqueue(w3) is False
     assert len(executive.task_queue) == 2
+
+
+def test_higher_priority_enqueue_preempts_lower_priority_head(identity: IdentityManager) -> None:
+    executive = ExecutiveState(identity=identity)
+
+    low = WorkObject(content="low priority", stage=WorkStage.MICRO_TASK, promotion_score=0.2)
+    high = WorkObject(content="high priority", stage=WorkStage.MICRO_TASK, promotion_score=0.9)
+
+    assert executive.enqueue(low) is True
+    assert executive.queue_metadata()[0]["work_id"] == str(low.work_id)
+
+    assert executive.enqueue(high) is True
+    snapshot = executive.snapshot()
+
+    assert [item["state"] for item in snapshot["queue_metadata"]] == ["active", "held"]
+    assert snapshot["queue_metadata"][0]["work_id"] == str(high.work_id)
+    assert snapshot["queue_metadata"][1]["work_id"] == str(low.work_id)

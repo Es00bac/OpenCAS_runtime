@@ -66,6 +66,7 @@ class FabricBuilder:
                     task_type="memory_episode",
                 )
                 ep.embedding_id = record.source_hash
+                await self.store.save_episode(ep)
 
         # Map by embedding_id because indexer.candidates returns source_hash values
         episode_map: Dict[str, Episode] = {

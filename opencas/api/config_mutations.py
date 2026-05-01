@@ -20,6 +20,7 @@ from opencas.model_routing import (
     sanitize_model_routing_state,
     save_persisted_model_routing_state,
 )
+from opencas.provenance_events_adapter import ProvenanceEventType, emit_provenance_event
 
 
 def slugify_profile_label(value: str) -> str:
@@ -84,6 +85,28 @@ def available_gateway_model_ids(cfg: Any) -> List[str]:
     return ordered
 
 
+def _emit_settings_provenance_event(
+    payload: Dict[str, Any],
+    *,
+    event_type: ProvenanceEventType,
+    triggering_artifact: str,
+    triggering_action: str,
+    parent_link_id: str | None = None,
+    linked_link_ids: List[str] | None = None,
+    details: Dict[str, Any],
+) -> Dict[str, Any]:
+    emit_provenance_event(
+        payload,
+        event_type=event_type,
+        triggering_artifact=triggering_artifact,
+        triggering_action=triggering_action,
+        parent_link_id=parent_link_id,
+        linked_link_ids=linked_link_ids,
+        details=details,
+    )
+    return payload
+
+
 def apply_sanitized_runtime_model_selection(runtime: Any, cfg: Any) -> Dict[str, Any]:
     current_default = (
         getattr(runtime.ctx.config, "default_llm_model", None)
@@ -109,7 +132,19 @@ def apply_sanitized_runtime_model_selection(runtime: Any, cfg: Any) -> Dict[str,
         Path(runtime.ctx.config.state_dir),
         sanitized,
     )
-    return {"state": sanitized, "settings_path": str(settings_path)}
+    response = {"state": sanitized, "settings_path": str(settings_path)}
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact="setting|config|model-routing",
+        triggering_action="UPDATE",
+        parent_link_id=str(settings_path),
+        linked_link_ids=[str(settings_path)],
+        details={
+            "settings_path": str(settings_path),
+            "default_llm_model": sanitized.default_llm_model,
+        },
+    )
 
 
 def build_provider_config_for_preset(
@@ -173,12 +208,24 @@ async def save_model_routing(runtime: Any, payload: Any) -> Dict[str, Any]:
     save_active_gateway_config(material, cfg)
     reload_runtime_gateway(runtime, material)
 
-    return {
+    response = {
         "status": "ok",
         "default_llm_model": standard_model,
         "model_routing": routing.model_dump(mode="json"),
         "settings_path": str(settings_path),
     }
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact="setting|config|model-routing",
+        triggering_action="UPDATE",
+        parent_link_id=str(settings_path),
+        linked_link_ids=[str(settings_path)],
+        details={
+            "default_llm_model": standard_model,
+            "settings_path": str(settings_path),
+        },
+    )
 
 
 async def save_guided_provider_setup(runtime: Any, payload: Any) -> Dict[str, Any]:
@@ -245,7 +292,7 @@ async def save_guided_provider_setup(runtime: Any, payload: Any) -> Dict[str, An
     save_active_gateway_config(material, cfg)
     reload_runtime_gateway(runtime, material)
 
-    return {
+    response = {
         "status": "ok",
         "provider_id": provider_id,
         "profile_id": created_profile_id,
@@ -253,6 +300,18 @@ async def save_guided_provider_setup(runtime: Any, payload: Any) -> Dict[str, An
         "config_mode": material.mode,
         "settings_path": sanitize_info["settings_path"],
     }
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact=f"setting|config|provider-setup|{provider_id}",
+        triggering_action="UPDATE",
+        parent_link_id=f"provider:{provider_id}",
+        linked_link_ids=[created_profile_id, sanitize_info["settings_path"]],
+        details={
+            "profile_id": created_profile_id,
+            "settings_path": sanitize_info["settings_path"],
+        },
+    )
 
 
 async def delete_auth_profile(runtime: Any, profile_id: str) -> Dict[str, Any]:
@@ -272,7 +331,16 @@ async def delete_auth_profile(runtime: Any, profile_id: str) -> Dict[str, Any]:
         raise HTTPException(status_code=404, detail="Auth profile not found")
     save_active_gateway_config(material, cfg)
     reload_runtime_gateway(runtime, material)
-    return {"status": "ok", "deleted": profile_id}
+    response = {"status": "ok", "deleted": profile_id}
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact=f"setting|config|auth-profile|{profile_id}",
+        triggering_action="DELETE",
+        parent_link_id=f"auth-profile:{profile_id}",
+        linked_link_ids=[profile_id],
+        details={"profile_id": profile_id},
+    )
 
 
 async def delete_provider(runtime: Any, provider_id: str) -> Dict[str, Any]:
@@ -312,11 +380,20 @@ async def delete_provider(runtime: Any, provider_id: str) -> Dict[str, Any]:
     sanitize_info = apply_sanitized_runtime_model_selection(runtime, cfg)
     save_active_gateway_config(material, cfg)
     reload_runtime_gateway(runtime, material)
-    return {
+    response = {
         "status": "ok",
         "deleted": normalized,
         "settings_path": sanitize_info["settings_path"],
     }
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact=f"setting|config|provider|{normalized}",
+        triggering_action="DELETE",
+        parent_link_id=f"provider:{normalized}",
+        linked_link_ids=[normalized, sanitize_info["settings_path"]],
+        details={"provider_id": normalized, "settings_path": sanitize_info["settings_path"]},
+    )
 
 
 async def delete_provider_model(runtime: Any, provider_id: str, model_id: str) -> Dict[str, Any]:
@@ -352,12 +429,25 @@ async def delete_provider_model(runtime: Any, provider_id: str, model_id: str) -
     sanitize_info = apply_sanitized_runtime_model_selection(runtime, cfg)
     save_active_gateway_config(material, cfg)
     reload_runtime_gateway(runtime, material)
-    return {
+    response = {
         "status": "ok",
         "provider_id": normalized_provider,
         "deleted_model_id": normalized_model,
         "settings_path": sanitize_info["settings_path"],
     }
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact=f"setting|config|provider-model|{normalized_provider}/{normalized_model}",
+        triggering_action="DELETE",
+        parent_link_id=f"provider-model:{normalized_provider}/{normalized_model}",
+        linked_link_ids=[normalized_provider, normalized_model, sanitize_info["settings_path"]],
+        details={
+            "provider_id": normalized_provider,
+            "model_id": normalized_model,
+            "settings_path": sanitize_info["settings_path"],
+        },
+    )
 
 
 async def test_provider_connection(runtime: Any, payload: Any) -> Dict[str, Any]:
@@ -382,7 +472,7 @@ async def test_provider_connection(runtime: Any, payload: Any) -> Dict[str, Any]
     try:
         resolved = manager.resolve(model_ref, preferred_profile=payload.profile_id)
         models = await resolved.provider.list_models()
-        return {
+        response = {
             "status": "ok",
             "provider_id": resolved.provider_id,
             "profile_id": resolved.profile_id,
@@ -390,13 +480,40 @@ async def test_provider_connection(runtime: Any, payload: Any) -> Dict[str, Any]
             "models_found": len(models),
         }
     except Exception as exc:
-        return {
+        response = {
             "status": "error",
             "provider_id": provider_id,
             "profile_id": payload.profile_id,
             "model_ref": model_ref,
             "detail": str(exc),
         }
+        return _emit_settings_provenance_event(
+            response,
+            event_type=ProvenanceEventType.BLOCKED,
+            triggering_artifact=f"setting|config|provider-test|{provider_id}",
+            triggering_action="CHECK",
+            parent_link_id=f"provider-test:{provider_id}",
+            linked_link_ids=[provider_id, model_ref],
+            details={
+                "profile_id": payload.profile_id,
+                "model_ref": model_ref,
+                "detail": str(exc),
+            },
+        )
+    else:
+        return _emit_settings_provenance_event(
+            response,
+            event_type=ProvenanceEventType.CHECK,
+            triggering_artifact=f"setting|config|provider-test|{provider_id}",
+            triggering_action="CHECK",
+            parent_link_id=f"provider-test:{provider_id}",
+            linked_link_ids=[provider_id, model_ref],
+            details={
+                "profile_id": resolved.profile_id,
+                "model_ref": model_ref,
+                "models_found": len(models),
+            },
+        )
 
 
 async def save_web_trust_policy(
@@ -419,7 +536,7 @@ async def save_web_trust_policy(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
+    response = {
         "status": "ok",
         "policy": {
             "domain": policy.domain,
@@ -429,6 +546,15 @@ async def save_web_trust_policy(
             "updated_at": policy.updated_at.isoformat(),
         },
     }
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact=f"setting|trust|web|{policy.domain}",
+        triggering_action="UPDATE",
+        parent_link_id=f"trust:web:{policy.domain}",
+        linked_link_ids=[policy.domain],
+        details={"domain": policy.domain, "level": policy.level.value},
+    )
 
 
 async def save_plugin_trust_policy(
@@ -455,7 +581,7 @@ async def save_plugin_trust_policy(
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
+    response = {
         "status": "ok",
         "policy": {
             "scope": policy.scope.value,
@@ -467,6 +593,15 @@ async def save_plugin_trust_policy(
             "updated_at": policy.updated_at.isoformat(),
         },
     }
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact=f"setting|trust|plugin|{policy.scope.value}:{policy.value}",
+        triggering_action="UPDATE",
+        parent_link_id=f"trust:plugin:{policy.scope.value}:{policy.value}",
+        linked_link_ids=[policy.scope.value, policy.value],
+        details={"scope": policy.scope.value, "value": policy.value, "level": policy.level.value},
+    )
 
 
 async def sync_plugin_trust_feed(
@@ -481,7 +616,7 @@ async def sync_plugin_trust_feed(
         result = await service.sync_feed(feed)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
+    response = {
         "status": "ok",
         "feed": {
             "source_id": result.source_id,
@@ -494,6 +629,19 @@ async def sync_plugin_trust_feed(
             "rejected": list(result.rejected),
         },
     }
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact=f"setting|trust|plugin-feed|{result.source_id}",
+        triggering_action="UPDATE",
+        parent_link_id=f"trust-feed:{result.source_id}",
+        linked_link_ids=[result.source_id],
+        details={
+            "source_id": result.source_id,
+            "imported_count": len(result.imported),
+            "removed_count": len(result.removed),
+        },
+    )
 
 
 async def delete_plugin_trust_policy(
@@ -509,7 +657,16 @@ async def delete_plugin_trust_policy(
         await service.remove_policy(PluginTrustScope(scope), value)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {"status": "ok", "deleted": {"scope": scope, "value": value}}
+    response = {"status": "ok", "deleted": {"scope": scope, "value": value}}
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact=f"setting|trust|plugin|{scope}:{value}",
+        triggering_action="DELETE",
+        parent_link_id=f"trust:plugin:{scope}:{value}",
+        linked_link_ids=[scope, value],
+        details={"scope": scope, "value": value},
+    )
 
 
 async def delete_web_trust_policy(runtime: Any, *, domain: str) -> Dict[str, Any]:
@@ -517,4 +674,13 @@ async def delete_web_trust_policy(runtime: Any, *, domain: str) -> Dict[str, Any
     if service is None:
         raise HTTPException(status_code=503, detail="Web trust service is unavailable")
     await service.remove_policy(domain)
-    return {"status": "ok", "deleted": domain}
+    response = {"status": "ok", "deleted": domain}
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact=f"setting|trust|web|{domain}",
+        triggering_action="DELETE",
+        parent_link_id=f"trust:web:{domain}",
+        linked_link_ids=[domain],
+        details={"domain": domain},
+    )

@@ -384,7 +384,23 @@ class AdvancedScreen(Screen):
         yield Input(value=STATE.cycle_interval, id="input-cycle")
         yield HelpText(
             "How often the agent evaluates its creative ladder, daydreams, and background work. "
-            "Default is 300s (5 minutes)."
+            "Default is 600s (10 minutes)."
+        )
+
+        yield Static()
+        yield Label("Daydream interval (seconds):", classes="field-label")
+        yield Input(value=STATE.daydream_interval, id="input-daydream")
+        yield HelpText(
+            "How often the agent runs background imaginative reflection when idle. "
+            "Default is 720s (12 minutes)."
+        )
+
+        yield Static()
+        yield Label("Heartbeat interval (seconds):", classes="field-label")
+        yield Input(value=STATE.baa_heartbeat_interval, id="input-heartbeat")
+        yield HelpText(
+            "How often the background heartbeat decays somatic state and samples queue health. "
+            "Default is 120s (2 minutes)."
         )
 
         yield Static()
@@ -442,7 +458,11 @@ class AdvancedScreen(Screen):
             STATE.use_server = self.query_one("#sw-server", Switch).value
             STATE.host = self.query_one("#input-host", Input).value or "127.0.0.1"
             STATE.port = self.query_one("#input-port", Input).value or "8080"
-            STATE.cycle_interval = self.query_one("#input-cycle", Input).value or "300"
+            STATE.cycle_interval = self.query_one("#input-cycle", Input).value or "600"
+            STATE.daydream_interval = self.query_one("#input-daydream", Input).value or "720"
+            STATE.baa_heartbeat_interval = (
+                self.query_one("#input-heartbeat", Input).value or "120"
+            )
             STATE.consolidation_interval = (
                 self.query_one("#input-consolidation", Input).value or "86400"
             )
@@ -679,6 +699,8 @@ class ReviewScreen(Screen):
 - **Dashboard server:** {'enabled' if STATE.use_server else 'disabled'}
 - **Host:** `{STATE.host}:{STATE.port}`
 - **Creative cycle:** {STATE.cycle_interval}s
+- **Daydream cadence:** {STATE.daydream_interval}s
+- **Heartbeat cadence:** {STATE.baa_heartbeat_interval}s
 - **Consolidation:** {STATE.consolidation_interval}s
         """
         yield Markdown(md)

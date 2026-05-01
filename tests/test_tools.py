@@ -1,5 +1,6 @@
 """Tests for the tool registry and adapters."""
 
+import asyncio
 from pathlib import Path
 import pytest
 
@@ -10,6 +11,8 @@ from opencas.tools import (
     ToolRegistry,
     ToolResult,
 )
+from opencas.planning import PlanStore
+from opencas.tools.adapters.plan import PlanToolAdapter
 from opencas.tools.validation import create_default_tool_validation_pipeline
 
 
@@ -117,3 +120,38 @@ def test_registry_surfaces_validation_metadata(tmp_dir: Path) -> None:
     assert result.success is True
     assert result.metadata["command_permission_class"] == "read_only"
     assert result.metadata["command_family"] == "safe"
+
+
+@pytest.mark.asyncio
+async def test_plan_adapter_does_not_block_running_event_loop(tmp_path: Path) -> None:
+    store = await PlanStore(tmp_path / "plans.db").connect()
+    registry = ToolRegistry()
+    registry.register(
+        "enter_plan_mode",
+        "Enter plan mode",
+        PlanToolAdapter(store),
+        ActionRiskTier.READONLY,
+    )
+
+    try:
+        result = await asyncio.wait_for(
+            registry.execute_async(
+                "enter_plan_mode",
+                {"plan_id": "plan-live", "content": "inspect first"},
+            ),
+            timeout=2.0,
+        )
+    finally:
+        await store.close()
+
+    assert result.success is True
+    assert result.metadata["plan_id"] == "plan-live"
+
+
+@pytest.mark.asyncio
+async def test_execute_in_async_context_returns_guidance(registry: ToolRegistry) -> None:
+    result = registry.execute("missing", {})
+    assert result.success is False
+    assert "execute_async" in result.output
+    assert result.metadata["suggested_api"] == "execute_async"
+    assert result.metadata["error_type"] == "RuntimeError"

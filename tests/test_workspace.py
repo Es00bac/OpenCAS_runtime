@@ -214,6 +214,32 @@ def test_intervention_verify_completed_work(executive: ExecutiveState) -> None:
     assert decision.kind == InterventionKind.VERIFY_COMPLETED_WORK
 
 
+def test_intervention_uses_affective_pressure_without_creating_work(executive: ExecutiveState) -> None:
+    focus = WorkspaceItem(
+        kind=WorkspaceItemKind.TASK,
+        content="background verification",
+        total_score=0.8,
+        execution_mode=ExecutionMode.BACKGROUND_AGENT,
+        meta={"verified": True},
+    )
+    workspace = ExecutiveWorkspace(focus=focus, queue=[focus])
+    decision = InterventionPolicy.evaluate(
+        workspace=workspace,
+        baa_queue_depth=0,
+        affective_pressures=[
+            {
+                "action_pressure": "rest",
+                "intensity": 0.8,
+                "confidence": 0.9,
+                "bounded_reason": "narrow or pause work",
+            }
+        ],
+    )
+
+    assert decision.kind == InterventionKind.RETIRE_OR_DEFER_FOCUS
+    assert decision.payload["affective_pressure"]["action_pressure"] == "rest"
+
+
 def test_intervention_no_intervention_empty_workspace(executive: ExecutiveState) -> None:
     workspace = ExecutiveWorkspace(focus=None, queue=[])
     decision = InterventionPolicy.evaluate(workspace=workspace)

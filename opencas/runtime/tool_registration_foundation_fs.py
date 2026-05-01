@@ -103,7 +103,7 @@ def register_foundation_fs_tools(runtime: Any, *, roots: Sequence[str]) -> None:
         [
             ToolRegistrationSpec(
                 name="grep_search",
-                description="Search files for a regex pattern.",
+                description="Search files for a regex pattern with optional glob filter and per-file match cap.",
                 risk_tier=ActionRiskTier.READONLY,
                 schema={
                     "type": "object",
@@ -117,6 +117,14 @@ def register_foundation_fs_tools(runtime: Any, *, roots: Sequence[str]) -> None:
                             "type": "string",
                             "enum": ["content", "files_with_matches"],
                             "description": "Return matching lines or just file paths.",
+                        },
+                        "glob": {
+                            "type": "string",
+                            "description": "Filename glob filter passed to ripgrep, e.g. '*.py' or '!*.test.ts'.",
+                        },
+                        "max_count": {
+                            "type": "integer",
+                            "description": "Max matches per file (ripgrep --max-count).",
                         },
                     },
                     "required": ["pattern"],

@@ -19,8 +19,8 @@ INSERT INTO episodes (
     affect_arousal, affect_certainty, affect_intensity,
     affect_social_target, affect_tags, salience, compacted,
     identity_core, confidence_score, access_count, last_accessed,
-    used_successfully, used_unsuccessfully, payload
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    used_successfully, used_unsuccessfully, identity_mutagen, payload
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(episode_id) DO UPDATE SET
     created_at = excluded.created_at,
     kind = excluded.kind,
@@ -43,8 +43,19 @@ ON CONFLICT(episode_id) DO UPDATE SET
     last_accessed = excluded.last_accessed,
     used_successfully = excluded.used_successfully,
     used_unsuccessfully = excluded.used_unsuccessfully,
+    identity_mutagen = excluded.identity_mutagen,
     payload = excluded.payload
 """
+
+
+async def update_episode_embedding(store: "MemoryStore", episode_id: str, embedding_id: str) -> None:
+    """Update only the embedding_id for a specific episode."""
+    assert store._db is not None
+    await store._db.execute(
+        "UPDATE episodes SET embedding_id = ? WHERE episode_id = ?",
+        (embedding_id, episode_id),
+    )
+    await store._db.commit()
 
 
 async def save_episodes_batch(store: "MemoryStore", episodes: List[Episode]) -> None:

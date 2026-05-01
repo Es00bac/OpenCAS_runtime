@@ -1,5 +1,6 @@
 """Tests for the telemetry module."""
 
+from datetime import datetime
 import pytest
 from pathlib import Path
 from opencas.telemetry import EventKind, TelemetryStore, Tracer
@@ -51,3 +52,22 @@ def test_telemetry_query_filter_session(tmp_path: Path) -> None:
     results = store.query(session_id="session-a")
     assert len(results) == 1
     assert results[0].message == "a"
+
+
+def test_telemetry_store_prune_old_files(tmp_path: Path) -> None:
+    store = TelemetryStore(tmp_path)
+    now = datetime(2026, 4, 28)
+    old_path = tmp_path / "2026-03-20.jsonl"
+    keep_path = tmp_path / "2026-04-27.jsonl"
+    non_date_path = tmp_path / "README.jsonl"
+
+    old_path.write_text("{}", encoding="utf-8")
+    keep_path.write_text("{}", encoding="utf-8")
+    non_date_path.write_text("{}", encoding="utf-8")
+
+    removed = store.prune_old_files(30, now=now)
+
+    assert removed == 1
+    assert not old_path.exists()
+    assert keep_path.exists()
+    assert non_date_path.exists()

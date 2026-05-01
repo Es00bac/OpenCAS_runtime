@@ -6,7 +6,7 @@ from opencas.maintenance import build_repo_local_bootstrap_config
 
 
 def test_build_repo_local_bootstrap_config_defaults_to_managed_workspace() -> None:
-    repo_root = Path("/tmp/opencas-repo")
+    repo_root = Path("/tmp/opencas-public-fixture")
     config = build_repo_local_bootstrap_config(
         repo_root,
         session_id="maintenance-test",
@@ -18,7 +18,7 @@ def test_build_repo_local_bootstrap_config_defaults_to_managed_workspace() -> No
 
 
 def test_build_repo_local_bootstrap_config_supports_managed_override() -> None:
-    repo_root = Path("/tmp/opencas-repo")
+    repo_root = Path("/tmp/opencas-public-fixture")
     managed_root = repo_root / "workspace" / "agents"
 
     config = build_repo_local_bootstrap_config(

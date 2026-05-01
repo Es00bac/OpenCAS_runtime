@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from opencas.embeddings import EmbeddingService
 from opencas.memory import MemoryStore
-from opencas.somatic.models import AffectState
+from opencas.somatic.models import AffectState, PrimaryEmotion
 
 from .models import RetrievalResult
 from .retrieval_query import (
@@ -54,6 +54,19 @@ class MemoryRetriever:
         "temporal_echo": 0.04,
         "reliability": 0.03,
         "relational_score": 0.08,
+        "affective_pressure_score": 0.04,
+    }
+    RECALL_FUSION_WEIGHTS: Dict[str, float] = {
+        "semantic_score": 0.20,
+        "keyword_score": 0.34,
+        "recency_score": 0.12,
+        "salience_score": 0.08,
+        "graph_score": 0.08,
+        "emotional_resonance": 0.08,
+        "temporal_echo": 0.04,
+        "reliability": 0.03,
+        "relational_score": 0.08,
+        "affective_pressure_score": 0.04,
     }
     def __init__(
         self,
@@ -63,6 +76,7 @@ class MemoryRetriever:
         episode_graph: Optional["EpisodeGraph"] = None,
         somatic_manager: Optional["SomaticManager"] = None,
         relational_engine: Optional["RelationalEngine"] = None,
+        affective_examinations: Optional[Any] = None,
     ) -> None:
         self.memory = memory
         self.embeddings = embeddings
@@ -70,6 +84,7 @@ class MemoryRetriever:
         self.episode_graph = episode_graph
         self.somatic_manager = somatic_manager
         self.relational_engine = relational_engine
+        self.affective_examinations = affective_examinations
 
     @staticmethod
     def extract_anchor_terms(query: str) -> List[str]:
@@ -166,6 +181,8 @@ class MemoryRetriever:
                     arousal=self.somatic_manager.state.arousal,
                     intensity=self.somatic_manager.state.certainty,
                 )
+        elif query_affect is None:
+            query_affect = await self._infer_query_affect_from_recent_episodes(session_id)
 
         candidate_map = build_candidate_map(
             semantic_results,
@@ -179,7 +196,18 @@ class MemoryRetriever:
         if expand_graph:
             keys = await expand_candidate_graph(self, candidate_map, now=now)
 
-        resolved_weights = resolve_fusion_weights(self.DEFAULT_FUSION_WEIGHTS, weights)
+        await self._apply_affective_pressure_to_candidates(
+            candidate_map,
+            session_id=session_id,
+        )
+
+        resolved_weights = dict(self.DEFAULT_FUSION_WEIGHTS)
+        if self.detect_personal_recall_intent(query):
+            resolved_weights = resolve_fusion_weights(
+                resolved_weights,
+                self.RECALL_FUSION_WEIGHTS,
+            )
+        resolved_weights = resolve_fusion_weights(resolved_weights, weights)
         fused, candidate_debug = fuse_candidates(
             self,
             candidate_map,
@@ -207,6 +235,11 @@ class MemoryRetriever:
         for item in candidate_debug:
             item["selected"] = (item["source_type"], item["source_id"]) in selected_ids
 
+        await self._record_retrieval_examinations(
+            fused,
+            session_id=session_id,
+        )
+
         candidate_debug.sort(key=lambda item: item["final_score"], reverse=True)
         return {
             "results": fused,
@@ -224,6 +257,103 @@ class MemoryRetriever:
                 "keyword_seed_count": len(keyword_results),
             },
         }
+
+    async def _apply_affective_pressure_to_candidates(
+        self,
+        candidate_map: Dict[Tuple[str, str], Dict[str, Any]],
+        *,
+        session_id: Optional[str],
+    ) -> None:
+        loader = getattr(self.affective_examinations, "list_unresolved_pressures", None)
+        if not callable(loader):
+            return
+        try:
+            records = await loader(session_id=session_id, limit=50)
+        except Exception:
+            return
+        if not records:
+            return
+
+        for key, candidate in candidate_map.items():
+            source_type, source_id = key
+            match = self._matching_affective_pressure(records, source_type, source_id)
+            if match is None:
+                continue
+            pressure = str(getattr(getattr(match, "action_pressure", ""), "value", getattr(match, "action_pressure", "")))
+            if pressure in {"", "archive_only", "continue"}:
+                continue
+            confidence = float(getattr(match, "confidence", 0.0) or 0.0)
+            intensity = float(getattr(match, "intensity", 0.0) or 0.0)
+            candidate["affective_pressure_score"] = min(1.0, max(0.0, (confidence + intensity) / 2.0))
+            candidate["affective_action_pressure"] = pressure
+            candidate["affective_pressure_reason"] = str(getattr(match, "bounded_reason", "") or "")
+
+    @staticmethod
+    def _matching_affective_pressure(
+        records: List[Any],
+        source_type: str,
+        source_id: str,
+    ) -> Optional[Any]:
+        scoped_id = f"{source_type}:{source_id}"
+        for record in records:
+            record_source_id = str(getattr(record, "source_id", "") or "")
+            meta = getattr(record, "meta", {}) if isinstance(getattr(record, "meta", None), dict) else {}
+            if record_source_id in {source_id, scoped_id}:
+                return record
+            if str(meta.get("memory_source_id") or "") == source_id:
+                record_type = str(meta.get("memory_source_type") or "")
+                if not record_type or record_type == source_type:
+                    return record
+        return None
+
+    async def _record_retrieval_examinations(
+        self,
+        results: List[RetrievalResult],
+        *,
+        session_id: Optional[str],
+        limit: int = 3,
+    ) -> None:
+        recorder = getattr(self.affective_examinations, "examine_memory_retrieval", None)
+        if not callable(recorder):
+            return
+        for result in results[:limit]:
+            episode = getattr(result, "episode", None)
+            affect = getattr(episode, "affect", None)
+            if affect is None:
+                continue
+            if getattr(affect, "primary_emotion", PrimaryEmotion.NEUTRAL) == PrimaryEmotion.NEUTRAL:
+                continue
+            if float(getattr(affect, "intensity", 0.0) or 0.0) < 0.6:
+                continue
+            try:
+                await recorder(
+                    session_id=session_id,
+                    source_type=result.source_type,
+                    source_id=result.source_id,
+                    content=result.content,
+                    affect=affect,
+                    meta={"retrieval_score": result.score},
+                )
+            except Exception:
+                continue
+
+    async def _infer_query_affect_from_recent_episodes(
+        self,
+        session_id: Optional[str],
+    ) -> Optional[AffectState]:
+        """Infer a durable emotional anchor from recently stored episodes."""
+        episodes = await self.memory.list_recent_episodes(session_id=session_id, limit=20)
+        if not episodes and session_id is not None:
+            episodes = await self.memory.list_recent_episodes(limit=20)
+
+        for episode in episodes:
+            affect = getattr(episode, "affect", None)
+            if affect is None:
+                continue
+            if affect.primary_emotion == PrimaryEmotion.NEUTRAL:
+                continue
+            return affect
+        return None
 
     @staticmethod
     def apply_temporal_decay(

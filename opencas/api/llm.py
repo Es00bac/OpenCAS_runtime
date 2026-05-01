@@ -34,7 +34,9 @@ class LLMClient:
         token_telemetry: Optional[TokenTelemetry] = None,
     ) -> None:
         self.manager = provider_manager
-        self.default_model = default_model or "anthropic/claude-sonnet-4-6"
+        self.default_model = default_model or getattr(
+            getattr(provider_manager, "_config", None), "default_model", None
+        ) or "anthropic/claude-sonnet-4-6"
         self.model_routing = (model_routing or ModelRoutingConfig()).normalized(
             self.default_model
         )
@@ -172,19 +174,21 @@ class LLMClient:
             model=model,
             complexity=tier,
         )
+        resolved = self._resolve(model_ref)
+        started = time.perf_counter()
         if self.tracer:
             self.tracer.log(
-                EventKind.TOOL_CALL,
+                EventKind.LLM_CALL,
                 f"LLM chat_completion: {model_ref}",
                 {
                     "model": model_ref,
+                    "provider": resolved.provider_id,
                     "message_count": len(messages),
                     "complexity": tier.value,
                     "routing_mode": self.model_routing.mode.value,
+                    "source": source,
                 },
             )
-        resolved = self._resolve(model_ref)
-        started = time.perf_counter()
         merged_payload = dict(payload or {})
         if not merged_payload.get("reasoning_effort"):
             reasoning_effort = self.resolve_reasoning_effort_for_complexity(
@@ -207,12 +211,41 @@ class LLMClient:
             merged_payload["tools"] = tools
         if tool_choice is not None:
             merged_payload["tool_choice"] = tool_choice
-        response = await resolved.provider.chat_completion(
-            model=resolved.model_id,
-            messages=messages,
-            payload=merged_payload,
-        )
+        try:
+            response = await resolved.provider.chat_completion(
+                model=resolved.model_id,
+                messages=messages,
+                payload=merged_payload,
+            )
+        except Exception as exc:
+            if self.tracer:
+                self.tracer.log(
+                    EventKind.ERROR,
+                    f"LLM chat_completion failed: {model_ref}: {exc}",
+                    {
+                        "model": model_ref,
+                        "provider": resolved.provider_id,
+                        "error": str(exc),
+                        "source": source,
+                    },
+                )
+            raise
         latency_ms = int((time.perf_counter() - started) * 1000)
+        if self.tracer:
+            usage = response.get("usage") or {}
+            self.tracer.log(
+                EventKind.LLM_CALL,
+                f"LLM chat_completion complete: {model_ref}",
+                {
+                    "model": model_ref,
+                    "provider": resolved.provider_id,
+                    "latency_ms": latency_ms,
+                    "prompt_tokens": usage.get("prompt_tokens"),
+                    "completion_tokens": usage.get("completion_tokens"),
+                    "total_tokens": usage.get("total_tokens"),
+                    "source": source,
+                },
+            )
         if self.token_telemetry:
             usage = response.get("usage") or {}
             await self.token_telemetry.record(
@@ -246,18 +279,20 @@ class LLMClient:
             model=model,
             complexity=tier,
         )
+        resolved = self._resolve(model_ref)
         if self.tracer:
             self.tracer.log(
-                EventKind.TOOL_CALL,
+                EventKind.LLM_CALL,
                 f"LLM chat_completion_stream: {model_ref}",
                 {
                     "model": model_ref,
+                    "provider": resolved.provider_id,
                     "message_count": len(messages),
                     "complexity": tier.value,
                     "routing_mode": self.model_routing.mode.value,
+                    "source": source,
                 },
             )
-        resolved = self._resolve(model_ref)
         merged_payload = dict(payload or {})
         if not merged_payload.get("reasoning_effort"):
             reasoning_effort = self.resolve_reasoning_effort_for_complexity(
@@ -313,28 +348,79 @@ class LLMClient:
         session_id: Optional[str] = None,
         task_id: Optional[str] = None,
         execution_mode: Optional[str] = None,
+        task_type: Optional[str] = None,
+        dimensions: Optional[int] = None,
     ) -> List[float]:
         """Compute an embedding vector for *text* via the LLM gateway.
 
         Falls back to the local hashing embedder if no gateway embedding
         provider is resolved.
         """
+        results = await self.embed_batch(
+            [text],
+            model=model,
+            source=source,
+            session_id=session_id,
+            task_id=task_id,
+            execution_mode=execution_mode,
+            task_type=task_type,
+            dimensions=dimensions,
+        )
+        return results[0]
+
+    async def embed_batch(
+        self,
+        texts: List[str],
+        model: Optional[str] = None,
+        source: str = "embed_batch",
+        session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        execution_mode: Optional[str] = None,
+        task_type: Optional[str] = None,
+        dimensions: Optional[int] = None,
+    ) -> List[List[float]]:
+        """Compute embedding vectors for a batch of texts via the LLM gateway."""
+        if not texts:
+            return []
+
         model_ref = model or "openai/text-embedding-3-small"
+        resolved = self._resolve(model_ref)
         if self.tracer:
             self.tracer.log(
-                EventKind.TOOL_CALL,
-                f"LLM embed: {model_ref}",
-                {"model": model_ref, "text_length": len(text)},
+                EventKind.LLM_CALL,
+                f"LLM embed_batch: {model_ref}",
+                {
+                    "model": model_ref,
+                    "provider": resolved.provider_id,
+                    "batch_size": len(texts),
+                    "total_text_length": sum(len(t) for l in texts for t in l),
+                    "source": source,
+                },
             )
-        resolved = self._resolve(model_ref)
         started = time.perf_counter()
+        payload: Dict[str, Any] = {}
+        if task_type is not None:
+            payload["task_type"] = task_type
+        if dimensions is not None:
+            payload["dimensions"] = dimensions
         if hasattr(resolved.provider, "embeddings"):
             result = await resolved.provider.embeddings(
                 model=resolved.model_id,
-                input_texts=[text],
-                payload={},
+                input_texts=texts,
+                payload=payload,
             )
             latency_ms = int((time.perf_counter() - started) * 1000)
+            if self.tracer:
+                self.tracer.log(
+                    EventKind.LLM_CALL,
+                    f"LLM embed_batch complete: {model_ref}",
+                    {
+                        "model": model_ref,
+                        "provider": resolved.provider_id,
+                        "latency_ms": latency_ms,
+                        "source": source,
+                    },
+                )
             if self.token_telemetry:
                 await self.token_telemetry.record(
                     model=model_ref,
@@ -345,7 +431,8 @@ class LLMClient:
                     task_id=task_id,
                     execution_mode=execution_mode,
                 )
-            return result["data"][0]["embedding"]
+            # The result is expected to be in OpenAI format: {"data": [{"embedding": [...]}, ...]}
+            return [item["embedding"] for item in result["data"]]
         raise RuntimeError(
             f"Provider {resolved.provider_id} does not support embeddings"
         )

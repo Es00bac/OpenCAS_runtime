@@ -1,6 +1,8 @@
 """Tests for the executive state tracker."""
 
 from pathlib import Path
+from types import SimpleNamespace
+
 import pytest
 
 from opencas.autonomy import WorkObject, WorkStage
@@ -40,11 +42,157 @@ def test_intention_set(executive: ExecutiveState) -> None:
     assert executive.intention == "plan the day"
 
 
+def test_intention_set_syncs_placeholder_identity_intention(
+    executive: ExecutiveState,
+    identity: IdentityManager,
+) -> None:
+    identity.self_model.current_intention = "establish trust and understanding"
+    identity.save()
+
+    executive.set_intention("plan the day")
+
+    assert identity.self_model.current_intention == "plan the day"
+
+
+def test_intention_set_preserves_explicit_identity_intention(
+    executive: ExecutiveState,
+    identity: IdentityManager,
+) -> None:
+    identity.self_model.current_intention = "protect an explicitly chosen intention"
+    identity.save()
+
+    executive.set_intention("plan the day")
+
+    assert identity.self_model.current_intention == "protect an explicitly chosen intention"
+
+
+def test_set_intention_from_work_preserves_explicit_objective(executive: ExecutiveState) -> None:
+    executive.set_intention("Continuity surface reconciliation decision bead")
+
+    executive.set_intention_from_work(
+        WorkObject(content="A quiet task beacon that collapses dozens of build/test fragments")
+    )
+
+    assert executive.intention == "Continuity surface reconciliation decision bead"
+    assert executive.intention_source == "explicit"
+
+
+def test_set_intention_from_work_replaces_prior_work_driven_focus(executive: ExecutiveState) -> None:
+    executive.set_intention_from_work(WorkObject(content="first active work"))
+    executive.set_intention_from_work(WorkObject(content="second active work"))
+
+    assert executive.intention == "second active work"
+    assert executive.intention_source == "active_work"
+
+
+def test_load_snapshot_syncs_placeholder_identity_intention(
+    identity: IdentityManager,
+    somatic: SomaticManager,
+    tracer: Tracer,
+    tmp_path: Path,
+) -> None:
+    identity.self_model.current_intention = "establish trust and understanding"
+    identity.save()
+
+    executive = ExecutiveState(identity=identity, somatic=somatic, tracer=tracer)
+    snapshot_path = tmp_path / "executive.json"
+    snapshot_path.write_text(
+        '{'
+        '"updated_at":"2026-04-22T00:00:00+00:00",'
+        '"intention":"revising the story and doing what you need to to complete it",'
+        '"intention_source":"active_work",'
+        '"active_goals":[],'
+        '"queue_metadata":[]'
+        '}',
+        encoding="utf-8",
+    )
+
+    executive.load_snapshot(snapshot_path)
+
+    assert identity.self_model.current_intention == "revising the story and doing what you need to to complete it"
+    assert executive.intention_source == "active_work"
+
+
 def test_goals_sync_to_identity(executive: ExecutiveState, identity: IdentityManager) -> None:
     executive.add_goal("learn rust")
     assert "learn rust" in identity.self_model.current_goals
     executive.remove_goal("learn rust")
     assert "learn rust" not in identity.self_model.current_goals
+
+
+def test_park_goal_moves_active_goal_to_parked_with_wake_condition(
+    executive: ExecutiveState,
+    identity: IdentityManager,
+) -> None:
+    executive.add_goal("verify tsconfig")
+
+    changed = executive.park_goal(
+        "verify tsconfig",
+        reason="evidence_deferred",
+        wake_trigger="TypeScript failure, tsconfig file change, objective dependency, or direct user request",
+        source_artifact="tsconfig",
+    )
+
+    assert changed is True
+    assert "verify tsconfig" not in executive.active_goals
+    assert "verify tsconfig" in executive.parked_goals
+    assert "verify tsconfig" not in identity.self_model.current_goals
+    metadata = executive.parked_goal_metadata["verify tsconfig"]
+    assert metadata["reason"] == "evidence_deferred"
+    assert metadata["wake_trigger"] == (
+        "TypeScript failure, tsconfig file change, objective dependency, or direct user request"
+    )
+    assert metadata["source_artifact"] == "tsconfig"
+
+
+def test_park_goal_merges_reframe_details_into_metadata(executive: ExecutiveState) -> None:
+    changed = executive.park_goal(
+        "continue chronicle",
+        reason="low_divergence_reframe",
+        details={
+            "reframe_hint": "Resume from workspace/Chronicles/4246/chronicle_4246.md with one narrow edit.",
+            "failed_framings": [
+                "Continue Chronicle 4246 from the existing manuscript.",
+            ],
+            "reframe_rule": "Do not retry this line with cosmetic rewording.",
+        },
+    )
+
+    assert changed is True
+    metadata = executive.parked_goal_metadata["continue chronicle"]
+    assert metadata["reason"] == "low_divergence_reframe"
+    assert metadata["wake_trigger"] == (
+        "fresh evidence, relevant artifact change, materially different framing, or direct user request"
+    )
+    assert metadata["reframe_hint"] == (
+        "Resume from workspace/Chronicles/4246/chronicle_4246.md with one narrow edit."
+    )
+    assert metadata["failed_framings"] == [
+        "Continue Chronicle 4246 from the existing manuscript.",
+    ]
+    assert metadata["reframe_rule"] == "Do not retry this line with cosmetic rewording."
+
+
+def test_refresh_structural_load_applies_parked_pressure_after_somatic_attach(
+    identity: IdentityManager,
+    somatic: SomaticManager,
+    tracer: Tracer,
+) -> None:
+    executive = ExecutiveState(identity=identity, somatic=None, tracer=tracer)
+    for goal in (
+        "repair /package",
+        "repair /npx",
+        "test /jsonlogger",
+        "build /reports/problems/problems-report",
+        "build /outputs/apk/debug/app-debug",
+        "verify tsconfig",
+    ):
+        executive.park_goal(goal)
+
+    executive.somatic = somatic
+    executive.refresh_structural_load()
+
+    assert somatic.state.somatic_tag == "continuity_pressure"
 
 
 def test_enqueue_and_dequeue(executive: ExecutiveState) -> None:
@@ -83,10 +231,12 @@ def test_capacity_limit(executive: ExecutiveState) -> None:
     rejected = WorkObject(content="overflow")
     assert executive.enqueue(rejected) is False
     assert executive.is_overloaded is True
+    assert executive.capacity_remaining == 0
 
 
 def test_recommend_pause_overload(executive: ExecutiveState) -> None:
-    for i in range(5):
+    executive._max_queue_depth = 20
+    for i in range(14):
         executive.enqueue(WorkObject(content=str(i)))
     assert executive.recommend_pause() is True
 
@@ -98,14 +248,117 @@ def test_recommend_pause_fatigue(executive: ExecutiveState, somatic: SomaticMana
 
 def test_snapshot(executive: ExecutiveState) -> None:
     executive.add_goal("test goal")
+    executive.add_goal("repair /package")
+    executive.set_intention("plan the day")
     executive.enqueue(WorkObject(content="work", stage=WorkStage.SPARK))
     snap = executive.snapshot()
-    assert snap["intention"] is None
+    assert snap["intention"] == "plan the day"
+    assert snap["intention_source"] == "explicit"
     assert snap["active_goals"] == ["test goal"]
+    assert snap["parked_goals"] == ["repair /package"]
+    assert snap["parked_goal_count"] == 1
+    assert snap["archived_parked_goal_count"] == 0
+    assert snap["parked_goal_metadata"]["repair /package"]["reason"] == "machine_fragment_goal"
+    assert "parked_at" in snap["parked_goal_metadata"]["repair /package"]
     assert snap["capacity_remaining"] == 4
     assert snap["queue_size"] == 1
     assert snap["queue_stages"] == ["spark"]
     assert "timestamp" in snap
+
+
+def test_structural_load_updates_somatic_from_queue_pressure(
+    executive: ExecutiveState,
+    somatic: SomaticManager,
+) -> None:
+    executive._max_queue_depth = 20
+    for i in range(6):
+        assert executive.enqueue(WorkObject(content=f"work-{i}", stage=WorkStage.MICRO_TASK)) is True
+
+    assert somatic.state.tension > 0.0
+    assert somatic.state.arousal > 0.0
+    assert somatic.state.somatic_tag in {"task_pressure", "crowded"}
+
+
+def test_queue_metadata_marks_one_item_active_and_labels_the_rest(executive: ExecutiveState) -> None:
+    top = WorkObject(content="top priority", stage=WorkStage.MICRO_TASK, promotion_score=3.0)
+    backup = WorkObject(content="backup priority", stage=WorkStage.PROJECT_SEED, promotion_score=2.0)
+    tail = WorkObject(content="tail priority", stage=WorkStage.PROJECT, promotion_score=1.0)
+
+    assert executive.enqueue(tail) is True
+    assert executive.enqueue(backup) is True
+    assert executive.enqueue(top) is True
+
+    snap = executive.snapshot()
+    assert [item["state"] for item in snap["queue_metadata"]] == ["active", "held", "held"]
+    assert [item["state_label"] for item in snap["queue_metadata"]] == ["Active", "Held", "Held"]
+    assert [item["role"] for item in snap["queue_metadata"]] == ["active", "held", "held"]
+    assert [item["role_label"] for item in snap["queue_metadata"]] == ["Active", "Held", "Held"]
+    assert [item["bearing"] for item in snap["queue_metadata"]] == ["ready", "queued", "waiting"]
+    assert [item["bearing_label"] for item in snap["queue_metadata"]] == ["Ready", "Queued", "Waiting"]
+    assert [item["is_active"] for item in snap["queue_metadata"]] == [True, False, False]
+    assert snap["queue_metadata"][0]["work_id"] == str(top.work_id)
+    assert snap["queue_metadata"][0]["title"] == "top priority"
+    assert snap["queue_metadata"][1]["work_id"] == str(backup.work_id)
+    assert snap["queue_metadata"][2]["work_id"] == str(tail.work_id)
+
+    dequeued = executive.dequeue()
+    assert dequeued is not None
+    assert dequeued.work_id == top.work_id
+
+    resumed = executive.snapshot()
+    assert [item["state"] for item in resumed["queue_metadata"]] == ["active", "held"]
+    assert [item["role"] for item in resumed["queue_metadata"]] == ["active", "held"]
+    assert [item["bearing"] for item in resumed["queue_metadata"]] == ["ready", "waiting"]
+    assert [item["bearing_label"] for item in resumed["queue_metadata"]] == ["Ready", "Waiting"]
+    assert resumed["queue_metadata"][0]["work_id"] == str(backup.work_id)
+    assert resumed["queue_metadata"][0]["is_active"] is True
+
+
+@pytest.mark.asyncio
+async def test_workflow_status_uses_canonical_queue_metadata(identity: IdentityManager) -> None:
+    from opencas.runtime.status_views import build_workflow_status
+
+    class FakeExecutive:
+        def __init__(self) -> None:
+            self.intention = "focus on the queue"
+            self.active_goals = ["keep one active"]
+            self.capacity_remaining = 4
+
+        def recommend_pause(self) -> bool:
+            return False
+
+        def queue_metadata(self):
+            return [
+                {"work_id": "w1", "state": "active", "bearing": "ready"},
+                {"work_id": "w2", "state": "held", "bearing": "queued"},
+                {"work_id": "w3", "state": "held", "bearing": "waiting"},
+            ]
+
+    runtime = SimpleNamespace(
+        agent_profile=SimpleNamespace(model_dump=lambda mode="json": {"name": "fake"}),
+        executive=FakeExecutive(),
+        commitment_store=None,
+        ctx=SimpleNamespace(
+            work_store=None,
+            plan_store=None,
+            receipt_store=None,
+        ),
+        project_resume=None,
+        _last_consolidation_result=None,
+    )
+
+    workflow = await build_workflow_status(runtime)
+
+    assert workflow["executive"]["queued_work_count"] == 3
+    assert workflow["executive"]["queue"]["counts"] == {
+        "total": 3,
+        "active": 1,
+        "held": 2,
+        "ready": 1,
+        "queued": 1,
+        "waiting": 1,
+    }
+    assert workflow["executive"]["queue"]["items"][0]["state"] == "active"
 
 
 def test_remove_work(executive: ExecutiveState) -> None:

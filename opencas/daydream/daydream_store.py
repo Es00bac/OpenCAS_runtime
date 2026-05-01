@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
 from typing import List, Optional
 
 import aiosqlite
@@ -17,7 +16,6 @@ from .models import (
     DaydreamSpark,
 )
 from .sqlite_base import SqliteBackedStore
-
 
 _DAYDREAM_SCHEMA = """
 CREATE TABLE IF NOT EXISTS daydream_reflections (
@@ -32,6 +30,7 @@ CREATE TABLE IF NOT EXISTS daydream_reflections (
     tension_hints TEXT NOT NULL DEFAULT '[]',
     alignment_score REAL NOT NULL DEFAULT 0.0,
     novelty_score REAL NOT NULL DEFAULT 0.0,
+    experience_context TEXT NOT NULL DEFAULT '{}',
     keeper INTEGER NOT NULL DEFAULT 0
 );
 
@@ -118,14 +117,23 @@ class DaydreamStore(SqliteBackedStore):
 
     SCHEMA = _DAYDREAM_SCHEMA
 
+    async def _migrate(self) -> None:
+        cursor = await self.db.execute("PRAGMA table_info(daydream_reflections)")
+        columns = {row["name"] for row in await cursor.fetchall()}
+        if "experience_context" not in columns:
+            await self.db.execute(
+                "ALTER TABLE daydream_reflections ADD COLUMN experience_context TEXT NOT NULL DEFAULT '{}'"
+            )
+
     async def save_reflection(self, reflection: DaydreamReflection) -> None:
         await self.db.execute(
             """
             INSERT INTO daydream_reflections (
                 reflection_id, created_at, spark_content, recollection,
                 interpretation, synthesis, open_question, changed_self_view,
-                tension_hints, alignment_score, novelty_score, keeper
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tension_hints, alignment_score, novelty_score, experience_context,
+                keeper
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(reflection_id) DO UPDATE SET
                 created_at = excluded.created_at,
                 spark_content = excluded.spark_content,
@@ -137,6 +145,7 @@ class DaydreamStore(SqliteBackedStore):
                 tension_hints = excluded.tension_hints,
                 alignment_score = excluded.alignment_score,
                 novelty_score = excluded.novelty_score,
+                experience_context = excluded.experience_context,
                 keeper = excluded.keeper
             """,
             (
@@ -151,6 +160,7 @@ class DaydreamStore(SqliteBackedStore):
                 json.dumps(reflection.tension_hints),
                 reflection.alignment_score,
                 reflection.novelty_score,
+                json.dumps(reflection.experience_context),
                 int(reflection.keeper),
             ),
         )
@@ -171,6 +181,7 @@ class DaydreamStore(SqliteBackedStore):
                 json.dumps(reflection.tension_hints),
                 reflection.alignment_score,
                 reflection.novelty_score,
+                json.dumps(reflection.experience_context),
                 int(reflection.keeper),
             )
             for reflection in reflections
@@ -180,8 +191,9 @@ class DaydreamStore(SqliteBackedStore):
             INSERT INTO daydream_reflections (
                 reflection_id, created_at, spark_content, recollection,
                 interpretation, synthesis, open_question, changed_self_view,
-                tension_hints, alignment_score, novelty_score, keeper
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                tension_hints, alignment_score, novelty_score, experience_context,
+                keeper
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(reflection_id) DO UPDATE SET
                 created_at = excluded.created_at,
                 spark_content = excluded.spark_content,
@@ -193,6 +205,7 @@ class DaydreamStore(SqliteBackedStore):
                 tension_hints = excluded.tension_hints,
                 alignment_score = excluded.alignment_score,
                 novelty_score = excluded.novelty_score,
+                experience_context = excluded.experience_context,
                 keeper = excluded.keeper
             """,
             params,
@@ -478,6 +491,7 @@ class DaydreamStore(SqliteBackedStore):
             tension_hints=json.loads(row["tension_hints"]) if row["tension_hints"] else [],
             alignment_score=row["alignment_score"],
             novelty_score=row["novelty_score"],
+            experience_context=json.loads(row["experience_context"]) if row["experience_context"] else {},
             keeper=bool(row["keeper"]),
         )
 

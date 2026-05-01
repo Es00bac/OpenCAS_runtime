@@ -16,6 +16,7 @@ from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
 from opencas.context.models import MessageRole
 from opencas.memory import EpisodeKind
 from opencas.runtime.agent_loop import AgentRuntime
+from opencas.tom import BeliefSubject, IntentionStatus
 
 
 class _FakeEmbeddings:
@@ -35,6 +36,40 @@ async def runtime(tmp_path: Path):
         yield runtime
     finally:
         await runtime._close_stores()
+
+
+@pytest.mark.asyncio
+async def test_contextual_self_commitments_persist_to_commitments_and_tom(
+    runtime: AgentRuntime,
+) -> None:
+    session_id = runtime.ctx.config.session_id or "promise-phase7"
+
+    content = (
+        "Got it. I'm logging this as a future capability you want to build for me: "
+        "voice mode via Edge TTS or similar, so we can converse naturally. "
+        "I'll remind you if it drifts.\n\n"
+        "**Tomorrow 10:30:**\n"
+        "- Screenshot body double session\n"
+        "- I'll hold your task list, watch your screen, chime in when you drift\n"
+        "- We'll calibrate \"too far\" live"
+    )
+
+    commitments = await runtime._capture_self_commitments(content, session_id)
+
+    assert {item.content for item in commitments} == {
+        "Remind user about voice mode via Edge TTS or similar",
+        "Support screenshot body double session",
+    }
+    assert all(item.status == CommitmentStatus.ACTIVE for item in commitments)
+    assert all(item.meta["source"] == "assistant_response" for item in commitments)
+
+    active_intentions = runtime.tom.list_intentions(
+        actor=BeliefSubject.SELF,
+        status=IntentionStatus.ACTIVE,
+    )
+    intention_contents = {item.content for item in active_intentions}
+    assert "remind user about voice mode via edge tts or similar" in intention_contents
+    assert "support screenshot body double session" in intention_contents
 
 
 @pytest.mark.asyncio

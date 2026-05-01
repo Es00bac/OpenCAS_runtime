@@ -1,0 +1,17 @@
+{
+  "manifest_version": 1,
+  "id": "diff",
+  "name": "Diff Tools",
+  "description": "Unified-diff between strings or files; counts insertions/deletions.",
+  "version": "1.0.0",
+  "entrypoint": "main.py",
+  "capabilities": [
+    {
+      "capability_id": "plugin:diff.main",
+      "display_name": "Diff Tools",
+      "kind": "tool",
+      "description": "Compare text or files.",
+      "tool_names": ["diff_text", "diff_files"]
+    }
+  ]
+}

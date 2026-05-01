@@ -45,6 +45,7 @@ data/
 *.db
 *.db-journal
 *.jsonl
+!tests/legacy/fixtures/*.jsonl
 logs/
 scratch/
 .opencas/
@@ -73,6 +74,7 @@ notes/
 docs/qualification/audio/
 
 # Runtime state and live test artifacts
+dev-notes/snapshots/
 .opencas_live_test_state/
 .opencas_release_audit/
 .opencas/

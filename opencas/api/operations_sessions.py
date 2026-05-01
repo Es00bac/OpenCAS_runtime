@@ -240,6 +240,7 @@ class SessionOperationsService:
             (item for item in refreshed.get("entries", []) if item.get("session_id") == session_id),
             entry,
         )
+        input_preview = self._truncate_text(payload.input)
         self._append_operator_action(
             self.runtime,
             {
@@ -249,9 +250,15 @@ class SessionOperationsService:
                 "scope_key": scope_key,
                 "ok": True,
                 "input_length": len(payload.input or ""),
-                "input_preview": self._truncate_text(payload.input),
+                "input_preview": input_preview,
                 "observe": bool(payload.observe),
                 "observed_mode": (observed or {}).get("screen_state", {}).get("mode"),
+                "source_trace": {
+                    "action": "pty_input",
+                    "input_preview": input_preview,
+                    "input_length": len(payload.input or ""),
+                    "observe": bool(payload.observe),
+                },
             },
         )
         return {

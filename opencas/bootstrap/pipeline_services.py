@@ -15,6 +15,8 @@ from opencas.governance import (
     ApprovalLedgerStore,
     PluginTrustService,
     PluginTrustStore,
+    ShadowRegistry,
+    ShadowRegistryStore,
     WebTrustService,
     WebTrustStore,
 )
@@ -53,6 +55,7 @@ class RuntimeServiceBundle:
     plugin_lifecycle: PluginLifecycleManager
     capability_registry: CapabilityRegistry
     ledger: ApprovalLedger
+    shadow_registry: ShadowRegistry
     web_trust: WebTrustService
     plugin_trust: PluginTrustService
     readiness: AgentReadiness
@@ -158,6 +161,10 @@ async def initialize_runtime_services(
     ledger_store = ApprovalLedgerStore(config.state_dir / "governance.db")
     await ledger_store.connect()
     ledger = ApprovalLedger(store=ledger_store, tracer=tracer)
+    shadow_registry = ShadowRegistry(
+        store=ShadowRegistryStore(config.state_dir / "shadow_registry"),
+        tracer=tracer,
+    )
     web_trust = await WebTrustService(WebTrustStore(config.state_dir / "web_trust.db")).connect()
     plugin_trust = await PluginTrustService(PluginTrustStore(config.state_dir / "plugin_trust.db")).connect()
     stage("governance_online")
@@ -170,6 +177,7 @@ async def initialize_runtime_services(
         baa=None,
         work_store=work_store,
         event_bus=event_bus,
+        shadow_registry=shadow_registry,
     )
     stage("project_orchestrator_online")
 
@@ -191,6 +199,7 @@ async def initialize_runtime_services(
         tracer=tracer,
         work_store=work_store,
         project_orchestrator=project_orchestrator,
+        shadow_registry=shadow_registry,
     )
     stage("harness_online")
 
@@ -233,6 +242,7 @@ async def initialize_runtime_services(
         plugin_lifecycle=plugin_lifecycle,
         capability_registry=capability_registry,
         ledger=ledger,
+        shadow_registry=shadow_registry,
         web_trust=web_trust,
         plugin_trust=plugin_trust,
         readiness=readiness,

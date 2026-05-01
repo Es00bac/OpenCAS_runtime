@@ -1,7 +1,9 @@
 """Tests for the execution and repair subsystem."""
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -14,6 +16,8 @@ from opencas.execution import (
     RepairResult,
     RepairTask,
 )
+from opencas.autonomy.executive import ExecutiveState
+from opencas.identity import IdentityManager, IdentityStore
 from opencas.relational.models import MusubiState
 from opencas.runtime import AgentRuntime
 from opencas.tools import ToolUseContext
@@ -96,6 +100,33 @@ async def test_repair_executor_records_artifacts(executor: RepairExecutor) -> No
 
 
 @pytest.mark.asyncio
+async def test_repair_executor_detect_extracts_real_paths(executor: RepairExecutor) -> None:
+    task = RepairTask(
+        objective=(
+            "Update opencas/execution/executor.py and tests/test_execution.py, "
+            "then verify README.md and .env.example."
+        )
+    )
+
+    detected = await executor._detect(task)
+
+    assert detected == (
+        "opencas/execution/executor.py,tests/test_execution.py,README.md,.env.example"
+    )
+
+
+@pytest.mark.asyncio
+async def test_repair_executor_detect_ignores_domains_and_versions(executor: RepairExecutor) -> None:
+    task = RepairTask(
+        objective="Investigate v1.2 behavior on example.com without touching files."
+    )
+
+    detected = await executor._detect(task)
+
+    assert detected == ""
+
+
+@pytest.mark.asyncio
 async def test_bounded_assistant_agent_submits_and_runs(tmp_path: Path) -> None:
     tools = ToolRegistry()
     workspace = str(tmp_path)
@@ -138,6 +169,97 @@ async def test_bounded_assistant_agent_limits_concurrency(tmp_path: Path) -> Non
     results = await asyncio.wait_for(asyncio.gather(*futures), timeout=10.0)
     assert all(r.success for r in results)
     await baa.stop()
+
+
+@pytest.mark.asyncio
+async def test_bounded_assistant_agent_suppresses_live_duplicate_objective(tmp_path: Path) -> None:
+    tools = ToolRegistry()
+    baa = BoundedAssistantAgent(tools=tools, max_concurrent=1)
+    first = RepairTask(objective="Quiet task beacon repair", project_id="loop-1")
+    duplicate = RepairTask(objective="Quiet task beacon repair", project_id="loop-1")
+
+    first_future = await baa.submit(first)
+    duplicate_future = await baa.submit(duplicate)
+
+    assert duplicate_future is first_future
+    assert duplicate.task_id == first.task_id
+
+
+@pytest.mark.asyncio
+async def test_bounded_assistant_agent_suppresses_recent_terminal_duplicate(tmp_path: Path) -> None:
+    tools = ToolRegistry()
+    baa = BoundedAssistantAgent(tools=tools, max_concurrent=1)
+    original = RepairTask(objective="Quiet task beacon repair", project_id="loop-1")
+    original_result = RepairResult(
+        task_id=original.task_id,
+        success=False,
+        stage=ExecutionStage.FAILED,
+        output="retry blocked",
+        timestamp=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    baa._remember_terminal_duplicate(original, original_result)
+
+    duplicate = RepairTask(objective="Quiet task beacon repair", project_id="loop-1")
+    future = await baa.submit(duplicate)
+    result = await future
+
+    assert result == original_result
+    assert duplicate.task_id == original.task_id
+
+
+@pytest.mark.asyncio
+async def test_bounded_assistant_agent_failed_duplicate_parks_reframe_and_captures_shadow(tmp_path: Path) -> None:
+    tools = ToolRegistry()
+    identity = IdentityManager(IdentityStore(tmp_path / "identity"))
+    identity.load()
+    executive = ExecutiveState(identity=identity)
+    captures: list[dict[str, object]] = []
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            executive=executive,
+            shadow_registry=SimpleNamespace(capture_retry_blocked=captures.append),
+        )
+    )
+    baa = BoundedAssistantAgent(tools=tools, max_concurrent=1, runtime=runtime)
+    original = RepairTask(
+        objective="Continue Chronicle 4246 from the existing manuscript.",
+        project_id="loop-1",
+        meta={
+            "resume_project": {
+                "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+                "best_next_step": "Resume from workspace/Chronicles/4246/chronicle_4246.md with one narrow edit.",
+            }
+        },
+    )
+    original_result = RepairResult(
+        task_id=original.task_id,
+        success=False,
+        stage=ExecutionStage.FAILED,
+        output="retry blocked",
+        timestamp=datetime.now(timezone.utc) - timedelta(minutes=5),
+    )
+    baa._remember_terminal_duplicate(original, original_result)
+
+    duplicate = RepairTask(
+        objective="Continue Chronicle 4246 from the existing manuscript.",
+        project_id="loop-1",
+    )
+    future = await baa.submit(duplicate)
+    result = await future
+
+    assert result == original_result
+    assert len(captures) == 1
+    assert captures[0]["capture_source"] == "baa_duplicate_suppression"
+    assert captures[0]["best_next_step"] == (
+        "Resume from workspace/Chronicles/4246/chronicle_4246.md with one narrow edit."
+    )
+    assert "Continue Chronicle 4246 from the existing manuscript." in executive.parked_goals
+    metadata = executive.parked_goal_metadata["Continue Chronicle 4246 from the existing manuscript."]
+    assert metadata["reason"] == "low_divergence_reframe"
+    assert metadata["reframe_hint"] == (
+        "Resume from workspace/Chronicles/4246/chronicle_4246.md with one narrow edit."
+    )
+    assert metadata["source_artifact"] == "workspace/Chronicles/4246/chronicle_4246.md"
 
 
 @pytest.mark.asyncio

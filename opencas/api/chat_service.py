@@ -48,7 +48,18 @@ class ChatTurnResult:
 
 def chat_upload_dir(runtime: Any) -> Path:
     """Return the canonical chat upload directory for *runtime*."""
-    upload_dir = Path(runtime.ctx.config.state_dir).parent / "chat_uploads"
+    config = runtime.ctx.config
+    agent_workspace_root = getattr(config, "agent_workspace_root", None)
+    if callable(agent_workspace_root):
+        workspace_root = Path(agent_workspace_root())
+    else:
+        managed_root = getattr(config, "managed_workspace_root", None)
+        workspace_root = (
+            Path(managed_root)
+            if managed_root is not None
+            else Path(config.state_dir).parent / "workspace"
+        )
+    upload_dir = workspace_root / "chat_uploads"
     upload_dir.mkdir(parents=True, exist_ok=True)
     return upload_dir
 
@@ -172,7 +183,7 @@ async def perform_chat_turn(
     attachments: Optional[Iterable[Any]] = None,
     voice_input: Optional[Dict[str, Any]] = None,
     speak_response: bool = False,
-    voice_prefer_local: bool = False,
+    voice_prefer_local: bool = True,
     voice_expressive: bool = False,
 ) -> ChatTurnResult:
     """Execute a chat turn with optional attachments and return the API payload."""

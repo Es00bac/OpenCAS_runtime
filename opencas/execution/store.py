@@ -10,7 +10,7 @@ from typing import Any, List, Optional
 import aiosqlite
 import sqlite3
 
-from .models import ExecutionStage, RepairResult, RepairTask, TaskTransitionRecord
+from .models import AttemptSalvagePacket, ExecutionStage, RepairResult, RepairTask, TaskTransitionRecord
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS tasks (
@@ -66,6 +66,26 @@ CREATE TABLE IF NOT EXISTS task_lifecycle_transitions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_lifecycle_task_id ON task_lifecycle_transitions(task_id);
+
+CREATE TABLE IF NOT EXISTS attempt_salvage_packets (
+    packet_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    attempt INTEGER NOT NULL,
+    project_id TEXT,
+    project_signature TEXT,
+    outcome TEXT NOT NULL,
+    divergence_signature TEXT NOT NULL,
+    canonical_artifact_path TEXT,
+    recommended_mode TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_salvage_task_created
+    ON attempt_salvage_packets(task_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_salvage_project_created
+    ON attempt_salvage_packets(project_signature, created_at DESC);
 """
 
 _MIGRATIONS: List[str] = [
@@ -85,8 +105,9 @@ class TaskStore:
         self._db = await aiosqlite.connect(str(self.path))
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
-        await self._db.commit()
         await self._migrate()
+        await self._ensure_salvage_packet_uniqueness()
+        await self._db.commit()
         return self
 
     async def _migrate(self) -> None:
@@ -97,6 +118,38 @@ class TaskStore:
                 await self._db.commit()
             except sqlite3.OperationalError:
                 pass
+
+    async def _ensure_salvage_packet_uniqueness(self) -> None:
+        """Collapse legacy duplicate salvage rows before enforcing uniqueness."""
+        assert self._db is not None
+        cursor = await self._db.execute(
+            """
+            SELECT rowid, task_id, attempt
+            FROM attempt_salvage_packets
+            ORDER BY task_id ASC, attempt ASC, created_at DESC, packet_id DESC
+            """
+        )
+        rows = await cursor.fetchall()
+        seen: set[tuple[str, int]] = set()
+        duplicate_rowids: list[int] = []
+        for row in rows:
+            key = (row["task_id"], row["attempt"])
+            if key in seen:
+                duplicate_rowids.append(row["rowid"])
+                continue
+            seen.add(key)
+        if duplicate_rowids:
+            placeholders = ", ".join("?" for _ in duplicate_rowids)
+            await self._db.execute(
+                f"DELETE FROM attempt_salvage_packets WHERE rowid IN ({placeholders})",
+                duplicate_rowids,
+            )
+        await self._db.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_salvage_task_attempt
+            ON attempt_salvage_packets(task_id, attempt)
+            """
+        )
 
     async def close(self) -> None:
         if self._db:
@@ -369,6 +422,115 @@ class TaskStore:
             }
             for r in rows
         ]
+
+    async def list_provenance_events(
+        self,
+        task_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Return canonical provenance events attached to a task, oldest first."""
+        task = await self.get(task_id)
+        if task is None:
+            return []
+        events = task.meta.get("provenance_events", [])
+        if not isinstance(events, list):
+            return []
+        window = events[offset : offset + limit]
+        return [dict(item) for item in window if isinstance(item, dict)]
+
+    async def save_salvage_packet(self, packet: AttemptSalvagePacket) -> None:
+        """Persist a deterministic salvage packet for later retry decisions."""
+        assert self._db is not None
+        await self._db.execute(
+            """
+            INSERT INTO attempt_salvage_packets (
+                packet_id, task_id, attempt, project_id, project_signature,
+                outcome, divergence_signature, canonical_artifact_path,
+                recommended_mode, created_at, payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(task_id, attempt) DO UPDATE SET
+                packet_id = excluded.packet_id,
+                project_id = excluded.project_id,
+                project_signature = excluded.project_signature,
+                outcome = excluded.outcome,
+                divergence_signature = excluded.divergence_signature,
+                canonical_artifact_path = excluded.canonical_artifact_path,
+                recommended_mode = excluded.recommended_mode,
+                created_at = excluded.created_at,
+                payload = excluded.payload
+            """,
+            (
+                str(packet.packet_id),
+                str(packet.task_id),
+                packet.attempt,
+                packet.project_id,
+                packet.project_signature,
+                packet.outcome.value,
+                packet.divergence_signature,
+                packet.canonical_artifact_path,
+                packet.recommended_mode.value,
+                packet.created_at.isoformat(),
+                packet.model_dump_json(),
+            ),
+        )
+        await self._db.commit()
+
+    async def get_latest_salvage_packet(self, task_id: str) -> Optional[AttemptSalvagePacket]:
+        """Return the newest salvage packet recorded for a task."""
+        assert self._db is not None
+        cursor = await self._db.execute(
+            """
+            SELECT payload
+            FROM attempt_salvage_packets
+            WHERE task_id = ?
+            ORDER BY attempt DESC, created_at DESC, packet_id DESC
+            LIMIT 1
+            """,
+            (str(task_id),),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return AttemptSalvagePacket.model_validate_json(row["payload"])
+
+    async def list_salvage_packets(
+        self, task_id: str, *, limit: int = 20
+    ) -> list[AttemptSalvagePacket]:
+        """Return salvage packets for a task ordered by attempt ascending."""
+        assert self._db is not None
+        cursor = await self._db.execute(
+            """
+            SELECT payload
+            FROM attempt_salvage_packets
+            WHERE task_id = ?
+            ORDER BY attempt ASC, created_at ASC
+            LIMIT ?
+            """,
+            (str(task_id), limit),
+        )
+        rows = await cursor.fetchall()
+        return [AttemptSalvagePacket.model_validate_json(r["payload"]) for r in rows]
+
+    async def get_latest_salvage_packet_for_signature(
+        self, project_signature: str
+    ) -> Optional[AttemptSalvagePacket]:
+        """Return the newest salvage packet recorded for a project signature."""
+        assert self._db is not None
+        cursor = await self._db.execute(
+            """
+            SELECT payload
+            FROM attempt_salvage_packets
+            WHERE project_signature = ?
+            ORDER BY created_at DESC, packet_id DESC
+            LIMIT 1
+            """,
+            (project_signature,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return AttemptSalvagePacket.model_validate_json(row["payload"])
 
     @staticmethod
     def _row_to_transition(row: aiosqlite.Row) -> TaskTransitionRecord:

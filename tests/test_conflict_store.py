@@ -1,6 +1,7 @@
 """Tests for ConflictStore and DaydreamStore."""
 
 from pathlib import Path
+
 import pytest
 import pytest_asyncio
 
@@ -80,12 +81,57 @@ async def test_save_and_list_reflections(daydream_store: DaydreamStore) -> None:
     reflection = DaydreamReflection(
         spark_content="A bright idea",
         synthesis="forward motion",
+        experience_context={
+            "trigger": "background_daydream",
+            "somatic": {"somatic_tag": "curious", "tension": 0.2},
+        },
     )
     await daydream_store.save_reflection(reflection)
     recent = await daydream_store.list_recent(limit=1)
     assert len(recent) == 1
     assert recent[0].spark_content == "A bright idea"
     assert recent[0].synthesis == "forward motion"
+    assert recent[0].experience_context["trigger"] == "background_daydream"
+    assert recent[0].experience_context["somatic"]["somatic_tag"] == "curious"
+
+
+@pytest.mark.asyncio
+async def test_daydream_store_migrates_experience_context_column(tmp_path: Path) -> None:
+    import sqlite3
+
+    db_path = tmp_path / "legacy-daydreams.db"
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """
+        CREATE TABLE daydream_reflections (
+            reflection_id TEXT PRIMARY KEY,
+            created_at TEXT NOT NULL,
+            spark_content TEXT NOT NULL,
+            recollection TEXT NOT NULL DEFAULT '',
+            interpretation TEXT NOT NULL DEFAULT '',
+            synthesis TEXT NOT NULL DEFAULT '',
+            open_question TEXT,
+            changed_self_view TEXT NOT NULL DEFAULT '',
+            tension_hints TEXT NOT NULL DEFAULT '[]',
+            alignment_score REAL NOT NULL DEFAULT 0.0,
+            novelty_score REAL NOT NULL DEFAULT 0.0,
+            keeper INTEGER NOT NULL DEFAULT 0
+        )
+        """
+    )
+    conn.commit()
+    conn.close()
+
+    store = DaydreamStore(db_path)
+    await store.connect()
+    try:
+        columns = [
+            row["name"]
+            for row in await (await store.db.execute("PRAGMA table_info(daydream_reflections)")).fetchall()
+        ]
+        assert "experience_context" in columns
+    finally:
+        await store.close()
 
 
 @pytest.mark.asyncio

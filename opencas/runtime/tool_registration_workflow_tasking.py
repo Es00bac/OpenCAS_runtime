@@ -59,7 +59,7 @@ def register_workflow_tasking_tools(runtime: Any) -> None:
             ),
             ToolRegistrationSpec(
                 name="workflow_create_schedule",
-                description="Create a scheduled task or calendar event. Use ISO-8601 start_at; supports none, interval_hours, daily, weekly, and weekdays recurrence.",
+                description="Create a durable calendar item for the agent: a scheduled task, self-reminder, future intention, or event. This is OpenCAS's own calendar, separate from OS cron. Use a future ISO-8601 start_at; supports none, interval_hours, daily, weekly, and weekdays recurrence.",
                 risk_tier=ActionRiskTier.WORKSPACE_WRITE,
                 schema={
                     "type": "object",
@@ -80,6 +80,11 @@ def register_workflow_tasking_tools(runtime: Any) -> None:
                         "tags": {"type": "array", "items": {"type": "string"}},
                         "commitment_id": {"type": "string"},
                         "plan_id": {"type": "string"},
+                        "delay_reason": {
+                            "type": "string",
+                            "description": "Required when intentionally deferring an active unfinished project return by more than about two weeks.",
+                        },
+                        "meta": {"type": "object"},
                     },
                     "required": ["title", "start_at"],
                 },
@@ -104,7 +109,7 @@ def register_workflow_tasking_tools(runtime: Any) -> None:
             ),
             ToolRegistrationSpec(
                 name="workflow_list_schedules",
-                description="List scheduled tasks and events.",
+                description="List the agent's durable calendar items: scheduled tasks, reminders, future intentions, and events.",
                 risk_tier=ActionRiskTier.READONLY,
                 schema={
                     "type": "object",

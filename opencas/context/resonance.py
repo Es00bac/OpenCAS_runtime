@@ -1,6 +1,7 @@
 """Pure scoring helpers for emotionally-aware memory retrieval.
 
-These functions implement multi-signal scoring for emotionally-aware retrieval.
+These functions are ported and adapted from OpenBulma-v4's MemoryFabric
+multi-signal fusion engine.
 """
 
 from __future__ import annotations

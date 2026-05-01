@@ -114,6 +114,12 @@ class TaskEntry(BaseModel):
     commitment_id: Optional[str] = None
     updated_at: Optional[str] = None
     duplicate_objective_count: int = 1
+    retry_blocked: bool = False
+    loop_stop_cause: Optional[str] = None
+    latest_meaningful_signal: Optional[str] = None
+    latest_artifact: Optional[str] = None
+    latest_evidence: Optional[str] = None
+    latest_blocker: Optional[str] = None
 
 
 class TaskListResponse(BaseModel):

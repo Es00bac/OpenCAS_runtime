@@ -7,6 +7,7 @@ import pytest
 import pytest_asyncio
 
 from opencas.context.retriever import MemoryRetriever
+from opencas.affective import AffectiveExaminationService, AffectiveExaminationStore
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.memory import Episode, EpisodeEdge, EpisodeKind, Memory, MemoryStore
 from opencas.memory.fabric.graph import EpisodeGraph
@@ -204,3 +205,44 @@ async def test_retrieve_emotional_resonance_ranking(base_stores, retriever: Memo
     assert match_result is not None
     assert mismatch_result is not None
     assert match_result.score > mismatch_result.score
+
+
+@pytest.mark.asyncio
+async def test_retrieve_records_and_reuses_durable_affective_pressure(base_stores, tmp_path: Path) -> None:
+    mem_store, embed_service = base_stores
+    affective_store = AffectiveExaminationStore(tmp_path / "affective.db")
+    await affective_store.connect()
+    service = AffectiveExaminationService(affective_store)
+    retriever = MemoryRetriever(
+        memory=mem_store,
+        embeddings=embed_service,
+        affective_examinations=service,
+    )
+    episode = Episode(
+        kind=EpisodeKind.OBSERVATION,
+        content="I promised to resume the dashboard verification work.",
+        affect=AffectState(
+            primary_emotion=PrimaryEmotion.CONCERNED,
+            valence=-0.3,
+            arousal=0.6,
+            intensity=0.8,
+            certainty=0.8,
+        ),
+    )
+    await mem_store.save_episode(episode)
+
+    await retriever.retrieve("dashboard verification", session_id="s1", limit=5, min_confidence=0.1)
+    inspection = await retriever.inspect(
+        "dashboard verification",
+        session_id="s1",
+        limit=5,
+        min_confidence=0.1,
+    )
+    await affective_store.close()
+
+    candidate = next(
+        item for item in inspection["candidates"]
+        if item["source_id"] == str(episode.episode_id)
+    )
+    assert candidate["affective_pressure_score"] > 0.0
+    assert candidate["affective_action_pressure"] == "resume_commitment"

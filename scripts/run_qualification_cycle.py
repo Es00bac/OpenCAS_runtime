@@ -230,7 +230,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--embedding-model",
-        default="google/gemini-embedding-2-preview",
+        default="google/embeddinggemma-300m",
         help="Embedding model passed through to the live validation harness.",
     )
     parser.add_argument(

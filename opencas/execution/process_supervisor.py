@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
@@ -16,6 +17,8 @@ from uuid import UUID, uuid4
 logger = logging.getLogger(__name__)
 
 _SHELL_META_CHARS = set("|&;<>()$`*?[]{}~\n")
+_MAX_PROCESS_STREAM_LINES = 200
+_MAX_PROCESS_STREAM_LINE_CHARS = 2048
 
 
 @dataclass
@@ -26,8 +29,12 @@ class _ManagedProcess:
     cwd: str
     metadata: Dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
-    stdout_buffer: List[str] = field(default_factory=list)
-    stderr_buffer: List[str] = field(default_factory=list)
+    stdout_buffer: deque[str] = field(
+        default_factory=lambda: deque(maxlen=_MAX_PROCESS_STREAM_LINES),
+    )
+    stderr_buffer: deque[str] = field(
+        default_factory=lambda: deque(maxlen=_MAX_PROCESS_STREAM_LINES),
+    )
     last_stdout: str = ""
     last_stderr: str = ""
     last_polled_at: float = 0.0
@@ -280,12 +287,20 @@ class ProcessSupervisor:
                     break
                 with self._lock:
                     managed = self._processes.get(process_id)
-                if managed is None:
-                    break
-                if stream_name == "stdout":
-                    managed.stdout_buffer.append(line)
-                else:
-                    managed.stderr_buffer.append(line)
+                    if managed is None:
+                        break
+                    if stream_name == "stdout":
+                        self._append_output_line(
+                            managed.stdout_buffer,
+                            line,
+                            _MAX_PROCESS_STREAM_LINE_CHARS,
+                        )
+                    else:
+                        self._append_output_line(
+                            managed.stderr_buffer,
+                            line,
+                            _MAX_PROCESS_STREAM_LINE_CHARS,
+                        )
         except Exception:
             pass
         finally:
@@ -293,6 +308,16 @@ class ProcessSupervisor:
                 stream.close()
             except Exception:
                 pass
+
+    @staticmethod
+    def _append_output_line(
+        buffer: deque[str],
+        line: str,
+        max_line_chars: int,
+    ) -> None:
+        if max_line_chars > 0 and len(line) > max_line_chars:
+            line = line[-max_line_chars:]
+        buffer.append(line)
 
     def shutdown(self) -> None:
         """Kill all processes and stop reader threads."""

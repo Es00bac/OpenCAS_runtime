@@ -132,12 +132,22 @@ async def test_run_autonomous_runtime_sequences_start_and_shutdown(monkeypatch: 
     async def _fake_shutdown_runtime_resources(fake_runtime: _FakeRuntime) -> None:
         fake_runtime._shutdown_called = True
 
-    monkeypatch.setattr("opencas.runtime.lifecycle.AgentScheduler", _FakeScheduler)
+    def _fake_scheduler(**kwargs):
+        runtime._scheduler_kwargs = kwargs
+        return _FakeScheduler(**kwargs)
+
+    monkeypatch.setattr("opencas.runtime.lifecycle.AgentScheduler", _fake_scheduler)
     monkeypatch.setattr("opencas.runtime.lifecycle.install_runtime_signal_handlers", lambda runtime, event: None)
     monkeypatch.setattr("opencas.runtime.lifecycle.asyncio.Event", _ImmediateEvent)
     monkeypatch.setattr("opencas.runtime.lifecycle.shutdown_runtime_resources", _fake_shutdown_runtime_resources)
 
-    await run_autonomous_runtime(runtime, cycle_interval=12, consolidation_interval=34)
+    await run_autonomous_runtime(
+        runtime,
+        cycle_interval=12,
+        consolidation_interval=34,
+        baa_heartbeat_interval=56,
+        daydream_interval=78,
+    )
 
     assert runtime._continuity_check_called is True
     assert runtime._telegram_started is True
@@ -147,6 +157,15 @@ async def test_run_autonomous_runtime_sequences_start_and_shutdown(monkeypatch: 
     assert ("shutdown", "signal_received") in runtime.readiness.events
     assert any(event == "autonomous_start" for event, _ in runtime.traces)
     assert any(event == "autonomous_shutdown" for event, _ in runtime.traces)
+    assert runtime._scheduler_kwargs == {
+        "runtime": runtime,
+        "cycle_interval": 12,
+        "consolidation_interval": 34,
+        "baa_heartbeat_interval": 56,
+        "daydream_interval": 78,
+        "readiness": runtime.readiness,
+        "tracer": runtime.tracer,
+    }
 
 
 @pytest.mark.asyncio
@@ -176,7 +195,11 @@ async def test_run_autonomous_with_server_runtime_sequences_server_shutdown(
     async def _fake_shutdown_runtime_resources(fake_runtime: _FakeRuntime) -> None:
         fake_runtime._shutdown_called = True
 
-    monkeypatch.setattr("opencas.runtime.lifecycle.AgentScheduler", _FakeScheduler)
+    def _fake_scheduler(**kwargs):
+        runtime._scheduler_kwargs = kwargs
+        return _FakeScheduler(**kwargs)
+
+    monkeypatch.setattr("opencas.runtime.lifecycle.AgentScheduler", _fake_scheduler)
     monkeypatch.setattr("opencas.runtime.lifecycle.create_app", lambda runtime: {"app": "fake"})
     monkeypatch.setattr("opencas.runtime.lifecycle.uvicorn.Config", _FakeConfig)
     monkeypatch.setattr("opencas.runtime.lifecycle.uvicorn.Server", _FakeServer)
@@ -190,6 +213,8 @@ async def test_run_autonomous_with_server_runtime_sequences_server_shutdown(
         port=20020,
         cycle_interval=15,
         consolidation_interval=45,
+        baa_heartbeat_interval=90,
+        daydream_interval=150,
     )
 
     server = created_server["server"]
@@ -203,3 +228,12 @@ async def test_run_autonomous_with_server_runtime_sequences_server_shutdown(
     assert any(event == "autonomous_with_server_shutdown" for event, _ in runtime.traces)
     assert getattr(server, "serve_called", False) is True
     assert getattr(server, "should_exit", False) is True
+    assert runtime._scheduler_kwargs == {
+        "runtime": runtime,
+        "cycle_interval": 15,
+        "consolidation_interval": 45,
+        "baa_heartbeat_interval": 90,
+        "daydream_interval": 150,
+        "readiness": runtime.readiness,
+        "tracer": runtime.tracer,
+    }

@@ -4,7 +4,11 @@ import time
 
 import pytest
 
-from opencas.execution.process_supervisor import ProcessSupervisor
+from opencas.execution.process_supervisor import (
+    _MAX_PROCESS_STREAM_LINE_CHARS,
+    _MAX_PROCESS_STREAM_LINES,
+    ProcessSupervisor,
+)
 from opencas.tools.adapters.process import ProcessToolAdapter
 
 
@@ -98,6 +102,32 @@ class TestProcessSupervisor:
         finally:
             supervisor.remove("scope_a", pid)
             supervisor.shutdown()
+
+    def test_process_output_is_bounded(self):
+        # Long-running command output should be capped to avoid unbounded growth.
+        supervisor = ProcessSupervisor()
+        pid = supervisor.start(
+            "default",
+            "python -u -c \"import sys; "
+            "print('x' * 64); "
+            "[sys.stdout.write('y' * 4096 + '\\\\n') or sys.stdout.flush() for _ in range(500)]\"",
+        )
+        result = {"stdout": "", "running": True}
+        for _ in range(20):
+            time.sleep(0.05)
+            result = supervisor.poll("default", pid)
+            if not result["running"]:
+                break
+        if result["running"]:
+            supervisor.kill("default", pid)
+            result = supervisor.poll("default", pid)
+        assert result["found"] is True
+        lines = (result["stdout"] or "").splitlines()
+        assert len(lines) <= _MAX_PROCESS_STREAM_LINES
+        if lines:
+            assert max(len(line) for line in lines) <= _MAX_PROCESS_STREAM_LINE_CHARS
+        assert supervisor.remove("default", pid) is True
+        supervisor.shutdown()
 
 
 class TestProcessToolAdapter:

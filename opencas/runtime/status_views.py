@@ -9,6 +9,8 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from opencas.autonomy.commitment import CommitmentStatus, commitment_operator_snapshot
+from opencas.runtime.consolidation_state import load_consolidation_runtime_state
+from opencas.runtime.consolidation_worker import load_consolidation_worker_status
 
 if TYPE_CHECKING:
     from .agent_loop import AgentRuntime
@@ -64,7 +66,31 @@ def build_consolidation_status(runtime: "AgentRuntime") -> Dict[str, Any]:
     """Return the latest known nightly consolidation summary."""
     result = runtime._last_consolidation_result
     if not result:
-        return {"available": False}
+        config = getattr(getattr(runtime, "ctx", None), "config", None)
+        state_dir = getattr(config, "state_dir", None)
+        if state_dir is None:
+            return {"available": False}
+        persisted = load_consolidation_runtime_state(state_dir)
+        worker_status = load_consolidation_worker_status(state_dir)
+        last_run_at = persisted.get("last_run_at")
+        if not last_run_at:
+            return {"available": False, "worker": worker_status or None}
+        return {
+            "available": True,
+            "timestamp": last_run_at,
+            "result_id": persisted.get("last_result_id"),
+            "clusters_formed": 0,
+            "memories_created": 0,
+            "commitments_consolidated": 0,
+            "commitment_clusters_formed": 0,
+            "commitment_work_objects_created": 0,
+            "commitments_extracted_from_chat": 0,
+            "episodes_pruned": 0,
+            "persisted_only": True,
+            "worker": worker_status or None,
+        }
+    state_dir = getattr(getattr(getattr(runtime, "ctx", None), "config", None), "state_dir", None)
+    worker_status = load_consolidation_worker_status(state_dir) if state_dir is not None else {}
     return {
         "available": True,
         "timestamp": result.get("timestamp"),
@@ -76,6 +102,8 @@ def build_consolidation_status(runtime: "AgentRuntime") -> Dict[str, Any]:
         "commitment_work_objects_created": result.get("commitment_work_objects_created", 0),
         "commitments_extracted_from_chat": result.get("commitments_extracted_from_chat", 0),
         "episodes_pruned": result.get("episodes_pruned", 0),
+        "persisted_only": False,
+        "worker": result.get("worker") or worker_status or None,
     }
 
 
@@ -129,6 +157,13 @@ async def build_workflow_status(
             project_id=project_id
         )
 
+    project_ledger = []
+    if getattr(runtime, "project_resume", None) is not None:
+        project_ledger = await runtime.project_resume.list_projects(
+            limit=limit,
+            project_id=project_id,
+        )
+
     plan_entries = []
     for plan in active_plans[:limit]:
         actions = await runtime.ctx.plan_store.get_actions(plan.plan_id, limit=5)
@@ -155,14 +190,39 @@ async def build_workflow_status(
             seen_projects.add(item.project_id)
             active_projects.append(item.project_id)
 
+    executive = runtime.executive
+    if hasattr(executive, "queue_summary"):
+        queue_summary = executive.queue_summary()
+    else:
+        queue_metadata = executive.queue_metadata()
+        queue_summary = {
+            "counts": {
+                "total": len(queue_metadata),
+                "active": sum(1 for item in queue_metadata if item.get("state") == "active"),
+                "held": sum(1 for item in queue_metadata if item.get("state") == "held"),
+                "ready": sum(1 for item in queue_metadata if item.get("bearing") == "ready"),
+                "queued": sum(1 for item in queue_metadata if item.get("bearing") == "queued"),
+                "waiting": sum(1 for item in queue_metadata if item.get("bearing") == "waiting"),
+            },
+            "items": queue_metadata,
+        }
+
     return {
         "agent_profile": runtime.agent_profile.model_dump(mode="json"),
         "executive": {
             "intention": runtime.executive.intention,
             "active_goals": list(runtime.executive.active_goals),
-            "queued_work_count": len(runtime.executive.task_queue),
+            "parked_goal_count": len(list(getattr(runtime.executive, "parked_goals", []) or [])),
+            "parked_goals": list(getattr(runtime.executive, "parked_goals", []) or []),
+            "parked_goal_metadata": dict(getattr(runtime.executive, "parked_goal_metadata", {}) or {}),
+            "queued_work_count": queue_summary["counts"]["total"],
+            "weighted_load": getattr(runtime.executive, "weighted_queue_load", lambda: 0.0)(),
             "capacity_remaining": runtime.executive.capacity_remaining,
             "recommend_pause": runtime.executive.recommend_pause(),
+            "queue": {
+                "counts": queue_summary["counts"],
+                "items": queue_summary["items"],
+            },
         },
         "commitments": {
             "active_count": commitment_count,
@@ -198,6 +258,30 @@ async def build_workflow_status(
         "plans": {
             "active_count": active_plan_count,
             "items": plan_entries,
+        },
+        "project_ledger": {
+            "count": len(project_ledger),
+            "items": [
+                {
+                    "signature": item.signature,
+                    "display_name": item.display_name,
+                    "canonical_artifact_path": item.canonical_artifact_path,
+                    "supporting_artifact_paths": item.supporting_artifact_paths,
+                    "synopsis": item.synopsis,
+                    "source_surfaces": item.source_surfaces,
+                    "active_work_count": item.active_work_count,
+                    "active_plan_count": item.active_plan_count,
+                    "primary_loop_id": item.primary_loop_id,
+                    "duplicate_loop_ids": item.duplicate_loop_ids,
+                    "matched_project_ids": item.matched_project_ids,
+                    "has_live_workstream": item.has_live_workstream,
+                    "retry_state": item.retry_state,
+                    "best_next_step": item.best_next_step,
+                    "latest_salvage_packet_id": item.latest_salvage_packet_id,
+                    "last_salvage_outcome": item.last_salvage_outcome,
+                }
+                for item in project_ledger
+            ],
         },
         "receipts": {
             "recent_count": len(recent_receipts),

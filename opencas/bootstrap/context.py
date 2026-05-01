@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from open_llm_auth.auth.manager import ProviderManager
 
     from opencas.api import LLMClient
+    from opencas.affective import AffectiveExaminationService
     from opencas.autonomy.commitment_store import CommitmentStore
     from opencas.autonomy.executive import ExecutiveState
     from opencas.autonomy.portfolio import PortfolioStore
@@ -23,6 +24,7 @@ if TYPE_CHECKING:
     from opencas.execution import TaskStore
     from opencas.execution.receipt_store import ExecutionReceiptStore
     from opencas.governance import ApprovalLedger
+    from opencas.governance import ShadowRegistry
     from opencas.governance import PluginTrustService, WebTrustService
     from opencas.harness import AgenticHarness
     from opencas.identity import IdentityManager, SelfKnowledgeRegistry
@@ -63,6 +65,7 @@ class BootstrapContext:
     hook_bus: HookBus
     typed_hook_registry: TypedHookRegistry
     ledger: ApprovalLedger
+    shadow_registry: ShadowRegistry
     web_trust: WebTrustService
     plugin_trust: PluginTrustService
     skill_registry: SkillRegistry
@@ -91,6 +94,7 @@ class BootstrapContext:
     plan_store: PlanStore
     schedule_store: ScheduleStore
     schedule_service: ScheduleService
+    affective_examinations: Optional[AffectiveExaminationService] = None
     mcp_registry: Optional[Any] = None
     background_tasks: tuple[asyncio.Task[Any], ...] = ()
 

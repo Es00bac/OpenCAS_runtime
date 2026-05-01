@@ -94,6 +94,18 @@ class MemoryStore:
 
     # Episodes
 
+    async def update_episode_embedding(self, episode_id: str, embedding_id: str) -> None:
+        from .store_episodes import update_episode_embedding as update_episode_embedding_impl
+        await update_episode_embedding_impl(self, episode_id, embedding_id)
+
+    async def update_memory_embedding(self, memory_id: str, embedding_id: str) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE memories SET embedding_id = ? WHERE memory_id = ?",
+            (embedding_id, memory_id),
+        )
+        await self._db.commit()
+
     async def save_episodes_batch(self, episodes: List[Episode]) -> None:
         await save_episodes_batch_impl(self, episodes)
 
@@ -227,8 +239,9 @@ class MemoryStore:
             """
             INSERT INTO memories (
                 memory_id, created_at, updated_at, content, embedding_id,
-                source_episode_ids, tags, salience, access_count, last_accessed
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_episode_ids, tags, salience, access_count, last_accessed,
+                identity_mutagen, confidence_score
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(memory_id) DO UPDATE SET
                 updated_at = excluded.updated_at,
                 content = excluded.content,
@@ -237,7 +250,9 @@ class MemoryStore:
                 tags = excluded.tags,
                 salience = excluded.salience,
                 access_count = excluded.access_count,
-                last_accessed = excluded.last_accessed
+                last_accessed = excluded.last_accessed,
+                identity_mutagen = excluded.identity_mutagen,
+                confidence_score = excluded.confidence_score
             """,
             memory_db_params(memory),
         )
@@ -300,14 +315,56 @@ class MemoryStore:
         cursor = await self._execute(
             """
             SELECT * FROM memories
-            WHERE tags LIKE ?
+            WHERE EXISTS (
+                SELECT 1 FROM json_each(tags)
+                WHERE json_each.value = ?
+            )
             ORDER BY salience DESC, updated_at DESC
             LIMIT ? OFFSET ?
             """,
-            (f'%"{tag}"%', limit, offset),
+            (tag, limit, offset),
         )
         rows = await cursor.fetchall()
         return [self._row_to_memory(r) for r in rows]
+
+    async def search_memories_by_content(
+        self,
+        query: str,
+        limit: int = 20,
+    ) -> List[Memory]:
+        """Return memory summaries whose content or tags mention *query*."""
+        needle = query.strip().lower()
+        if not needle:
+            return []
+        cursor = await self._execute(
+            "SELECT * FROM memories WHERE LOWER(content) LIKE ?",
+            (f"%{needle}%",),
+        )
+        rows = await cursor.fetchall()
+
+        tokens = [
+            token
+            for token in needle.replace("_", " ").split()
+            if len(token) >= 2
+        ]
+        scored: list[tuple[float, Memory]] = []
+        for row in rows:
+            memory = self._row_to_memory(row)
+            content = memory.content.lower()
+            tags = " ".join(memory.tags).lower()
+            exact_hits = int(needle in content) + int(needle in tags)
+            token_hits = sum(1 for token in tokens if token in content or token in tags)
+            if exact_hits == 0 and token_hits == 0:
+                continue
+            score = (exact_hits * 3.0) + (token_hits / max(1, len(tokens)))
+            score += min(memory.salience / 10.0, 0.2)
+            scored.append((score, memory))
+
+        scored.sort(
+            key=lambda item: (item[0], item[1].updated_at, item[1].created_at),
+            reverse=True,
+        )
+        return [memory for _, memory in scored[:limit]]
 
     async def list_non_compacted_episodes(
         self,

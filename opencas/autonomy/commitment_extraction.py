@@ -20,11 +20,13 @@ _LEADING_CONTEXT_RE = re.compile(
     r"the\s+main\s+thing\s+left\s+is\s+|"
     r"the\s+next\s+step\s+is\s+|"
     r"what'?s\s+left\s+is\s+|"
+    r"i'?m\s+logging\s+this\s+as\s+a\s+future\s+capability\s+you\s+want\s+to\s+build\s+for\s+me[:,]?\s*|"
     r"i\s+(?:need|still\s+need|want|should|plan)\s+to\s+|"
     r"we\s+need\s+to\s+"
     r")",
     re.IGNORECASE,
 )
+_TRAILING_RATIONALE_RE = re.compile(r"\s*,?\s+so\s+.+$", re.IGNORECASE)
 _VERB_PREFIX_RE = re.compile(
     r"^(?:fix|finish|write|review|ship|debug|continue|return\s+to|follow\s+up\s+on|resume|work\s+on|build|implement|draft|refactor|investigate|test)\b",
     re.IGNORECASE,
@@ -48,6 +50,7 @@ class _CommitmentPattern:
     action: str
     template: str
     pattern: re.Pattern[str]
+    prefer_context: bool = False
 
 
 _COMMITMENT_PATTERNS: tuple[_CommitmentPattern, ...] = (
@@ -75,6 +78,24 @@ _COMMITMENT_PATTERNS: tuple[_CommitmentPattern, ...] = (
             re.IGNORECASE,
         ),
     ),
+    _CommitmentPattern(
+        action="remind",
+        template="Remind user about {target}",
+        pattern=re.compile(
+            r"(?:^[-*]\s*)?\b(?:i will|i'll)\s+(?P<trigger>remind\s+you)\s+(?P<object>.+)",
+            re.IGNORECASE,
+        ),
+        prefer_context=True,
+    ),
+    _CommitmentPattern(
+        action="support",
+        template="Support {target}",
+        pattern=re.compile(
+            r"(?:^[-*]\s*)?\b(?:i will|i'll)\s+(?P<trigger>hold|watch|chime\s+in|support|body\s+double)\b(?P<object>.*)",
+            re.IGNORECASE,
+        ),
+        prefer_context=True,
+    ),
 )
 
 
@@ -100,15 +121,21 @@ def _extract_from_sentence(
         raw_object = _strip_temporal_tail(match.group("object"))
         if not _has_deferral_cue(sentence):
             continue
-        if not raw_object:
-            continue
 
-        normalized_target = _normalize_direct_target(raw_object)
+        context_target = _normalize_context_target(previous_sentence)
+        normalized_target: Optional[str] = None
         normalization_source = "direct_object"
         confidence = 0.9
 
+        if rule.prefer_context and context_target:
+            normalized_target = context_target
+            normalization_source = "prior_sentence_context"
+            confidence = 0.72
+        elif raw_object:
+            normalized_target = _normalize_direct_target(raw_object)
+
         if normalized_target is None:
-            normalized_target = _normalize_context_target(previous_sentence)
+            normalized_target = context_target
             normalization_source = "prior_sentence_context"
             confidence = 0.72
 
@@ -150,15 +177,32 @@ def _normalize_context_target(previous_sentence: Optional[str]) -> Optional[str]
     candidate = previous_sentence.strip(" .,!?:;")
     if not candidate:
         return None
+    came_from_bullet = bool(re.match(r"^[-*]\s*", candidate))
+    candidate = re.sub(r"^[-*]\s*", "", candidate).strip(" .,!?:;")
+    candidate = candidate.strip("*_` ")
+    if re.fullmatch(r"(?:today|tomorrow|tonight)?\s*\d{1,2}(?::\d{2})?\s*(?:am|pm)?", candidate, flags=re.IGNORECASE):
+        return None
     candidate = _LEADING_CONTEXT_RE.sub("", candidate).strip(" .,!?:;")
+    candidate = _TRAILING_RATIONALE_RE.sub("", candidate).strip(" .,!?:;")
     if not candidate:
         return None
+    if came_from_bullet:
+        candidate = _lowercase_bullet_label(candidate)
     return candidate
 
 
 def _clean_commitment_content(value: str) -> str:
     cleaned = re.sub(r"\s+", " ", value).strip(" .")
     return _capitalize_first(cleaned)
+
+
+def _lowercase_bullet_label(value: str) -> str:
+    if not re.match(r"^[A-Z][a-z]+(?:\s|$)", value):
+        return value
+    first_word = value.split(maxsplit=1)[0]
+    if first_word in {"OpenCAS", "Edge", "Owner"}:
+        return value
+    return value[0].lower() + value[1:]
 
 
 def _capitalize_first(value: str) -> str:
@@ -171,5 +215,5 @@ def _has_deferral_cue(sentence: str) -> bool:
     lowered = sentence.lower()
     return any(
         cue in lowered
-        for cue in ("later", "soon", "tomorrow", "tonight", "after ", "when ", "once ", "in a while")
+        for cue in ("later", "soon", "tomorrow", "tonight", "after ", "when ", "once ", "if ", "in a while")
     )

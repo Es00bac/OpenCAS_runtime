@@ -43,9 +43,11 @@ class InterventionPolicy:
         held_count: int = 0,
         somatic_recommends_pause: bool = False,
         live_work_orders: Optional[List[Dict[str, Any]]] = None,
+        affective_pressures: Optional[List[Dict[str, Any]]] = None,
     ) -> InterventionDecision:
         """Decide what the executive layer should do next."""
         live_orders = live_work_orders or []
+        pressure = InterventionPolicy._strongest_affective_pressure(affective_pressures or [])
 
         # 1. Surface blocked work orders
         for order in live_orders:
@@ -68,6 +70,33 @@ class InterventionPolicy:
                 kind=InterventionKind.NO_INTERVENTION,
                 reason="Workspace is empty",
             )
+
+        if pressure:
+            action = str(pressure.get("action_pressure") or "")
+            if action == "rest":
+                return InterventionDecision(
+                    kind=InterventionKind.RETIRE_OR_DEFER_FOCUS,
+                    target_item_id=str(focus.item_id),
+                    reason="Affective pressure recommends narrowing or pausing work",
+                    payload={"affective_pressure": pressure},
+                )
+            if action == "verify" and focus.meta.get("verified") is not True:
+                return InterventionDecision(
+                    kind=InterventionKind.VERIFY_COMPLETED_WORK,
+                    target_item_id=str(focus.item_id),
+                    reason="Affective pressure recommends verification before relying on current focus",
+                    payload={"affective_pressure": pressure},
+                )
+            if action in {"resume_commitment", "repair_trust"} and (
+                focus.kind.value == "commitment"
+                or focus.affinity.value in {"operator", "personal"}
+            ):
+                return InterventionDecision(
+                    kind=InterventionKind.RECLAIM_TO_FOREGROUND,
+                    target_item_id=str(focus.item_id),
+                    reason="Affective pressure recommends returning relevant commitment or repair work to foreground",
+                    payload={"affective_pressure": pressure},
+                )
 
         # 2. Verify completed but unverified work
         if focus.meta.get("verified") is False:
@@ -106,4 +135,21 @@ class InterventionPolicy:
             kind=InterventionKind.NO_INTERVENTION,
             target_item_id=str(focus.item_id),
             reason="No intervention required at this time",
+        )
+
+    @staticmethod
+    def _strongest_affective_pressure(pressures: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+        actionable = [
+            pressure
+            for pressure in pressures
+            if str(pressure.get("action_pressure") or "") not in {"", "continue", "archive_only"}
+        ]
+        if not actionable:
+            return None
+        return max(
+            actionable,
+            key=lambda pressure: (
+                float(pressure.get("intensity") or 0.0),
+                float(pressure.get("confidence") or 0.0),
+            ),
         )

@@ -14,9 +14,16 @@ router = APIRouter(tags=["executive"])
 class ExecutiveSnapshotResponse(BaseModel):
     intention: Optional[str]
     active_goals: List[str]
+    parked_goal_count: int = 0
+    parked_goals: List[str] = []
+    parked_goal_metadata: Dict[str, Dict[str, Any]] = {}
+    archived_parked_goal_count: int = 0
+    archived_parked_goals: List[str] = []
+    weighted_load: float = 0.0
     capacity_remaining: int
     queue_size: int
     queue_stages: List[str]
+    queue_metadata: List[Dict[str, Any]]
     recommend_pause: bool
     timestamp: str
 
@@ -49,6 +56,13 @@ class ExecutiveSummaryResponse(BaseModel):
     snapshot: ExecutiveSnapshotResponse
     commitments: List[CommitmentResponse]
     plans: List[PlanResponse]
+
+
+class ParkGoalRequest(BaseModel):
+    goal: str
+    reason: str = "evidence_deferred"
+    wake_trigger: Optional[str] = None
+    source_artifact: Optional[str] = None
 
 
 def _commitment_to_dict(c: Any) -> Dict[str, Any]:
@@ -97,9 +111,16 @@ def build_executive_router(runtime: Any) -> APIRouter:
             snapshot=ExecutiveSnapshotResponse(
                 intention=snapshot.get("intention"),
                 active_goals=snapshot.get("active_goals", []),
+                parked_goal_count=snapshot.get("parked_goal_count", 0),
+                parked_goals=snapshot.get("parked_goals", []),
+                parked_goal_metadata=snapshot.get("parked_goal_metadata", {}),
+                archived_parked_goal_count=snapshot.get("archived_parked_goal_count", 0),
+                archived_parked_goals=snapshot.get("archived_parked_goals", []),
+                weighted_load=snapshot.get("weighted_load", 0.0),
                 capacity_remaining=snapshot.get("capacity_remaining", 0),
                 queue_size=snapshot.get("queue_size", 0),
                 queue_stages=snapshot.get("queue_stages", []),
+                queue_metadata=snapshot.get("queue_metadata", []),
                 recommend_pause=snapshot.get("recommend_pause", False),
                 timestamp=snapshot.get("timestamp", ""),
             ),
@@ -113,9 +134,42 @@ def build_executive_router(runtime: Any) -> APIRouter:
         return ExecutiveSnapshotResponse(
             intention=snapshot.get("intention"),
             active_goals=snapshot.get("active_goals", []),
+            parked_goal_count=snapshot.get("parked_goal_count", 0),
+            parked_goals=snapshot.get("parked_goals", []),
+            parked_goal_metadata=snapshot.get("parked_goal_metadata", {}),
+            archived_parked_goal_count=snapshot.get("archived_parked_goal_count", 0),
+            archived_parked_goals=snapshot.get("archived_parked_goals", []),
+            weighted_load=snapshot.get("weighted_load", 0.0),
             capacity_remaining=snapshot.get("capacity_remaining", 0),
             queue_size=snapshot.get("queue_size", 0),
             queue_stages=snapshot.get("queue_stages", []),
+            queue_metadata=snapshot.get("queue_metadata", []),
+            recommend_pause=snapshot.get("recommend_pause", False),
+            timestamp=snapshot.get("timestamp", ""),
+        )
+
+    @r.post("/park-goal", response_model=ExecutiveSnapshotResponse)
+    async def park_goal(req: ParkGoalRequest) -> ExecutiveSnapshotResponse:
+        runtime.ctx.executive.park_goal(
+            req.goal,
+            reason=req.reason,
+            wake_trigger=req.wake_trigger,
+            source_artifact=req.source_artifact,
+        )
+        snapshot = runtime.ctx.executive.snapshot()
+        return ExecutiveSnapshotResponse(
+            intention=snapshot.get("intention"),
+            active_goals=snapshot.get("active_goals", []),
+            parked_goal_count=snapshot.get("parked_goal_count", 0),
+            parked_goals=snapshot.get("parked_goals", []),
+            parked_goal_metadata=snapshot.get("parked_goal_metadata", {}),
+            archived_parked_goal_count=snapshot.get("archived_parked_goal_count", 0),
+            archived_parked_goals=snapshot.get("archived_parked_goals", []),
+            weighted_load=snapshot.get("weighted_load", 0.0),
+            capacity_remaining=snapshot.get("capacity_remaining", 0),
+            queue_size=snapshot.get("queue_size", 0),
+            queue_stages=snapshot.get("queue_stages", []),
+            queue_metadata=snapshot.get("queue_metadata", []),
             recommend_pause=snapshot.get("recommend_pause", False),
             timestamp=snapshot.get("timestamp", ""),
         )
@@ -146,5 +200,27 @@ def build_executive_router(runtime: Any) -> APIRouter:
         except Exception:
             return []
         return [PlanResponse(**_plan_to_dict(p)) for p in items]
+
+    @r.get("/events/summary")
+    async def get_bulma_event_summary() -> Dict[str, Any]:
+        from opencas.legacy.executive_event_index import load_executive_event_summary
+
+        return load_executive_event_summary(runtime.ctx.config.state_dir)
+
+    @r.get("/events/search")
+    async def search_bulma_events(
+        event_type: Optional[str] = None,
+        query: Optional[str] = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        from opencas.legacy.executive_event_index import search_executive_events
+
+        items = search_executive_events(
+            runtime.ctx.config.state_dir,
+            event_type=event_type,
+            query=query,
+            limit=limit,
+        )
+        return {"count": len(items), "items": items}
 
     return r

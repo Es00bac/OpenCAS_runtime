@@ -61,6 +61,28 @@ async def test_parse_structured_markdown_json(daydream: DaydreamGenerator) -> No
 
 
 @pytest.mark.asyncio
+async def test_parse_structured_sanitizes_fixation_terms(daydream: DaydreamGenerator) -> None:
+    raw = (
+        '{"sparks": ["returning to returning thread drifted"], '
+        '"recollection": "A returning concern drifted toward thread", '
+        '"interpretation": "thread returns to the same returning spot", '
+        '"synthesis": "drifted and returning", '
+        '"open_question": "why did returning happen here?", '
+        '"changed_self_view": "less returning, more drifted", '
+        '"tension_hints": ["returning to thread", "drifted and returning"]}'
+    )
+    parsed = daydream._parse_structured(raw)
+    assert len(parsed) == 1
+    reflection = parsed[0]
+    assert "revisiting" in reflection.spark_content
+    assert "path" in reflection.recollection
+    assert "shifted" in reflection.synthesis
+    assert reflection.open_question is not None and "revisiting" in reflection.open_question
+    assert "revisiting" in reflection.changed_self_view
+    assert "path" in reflection.tension_hints[0]
+
+
+@pytest.mark.asyncio
 async def test_parse_structured_fallback_text(daydream: DaydreamGenerator) -> None:
     raw = "just a plain text spark"
     parsed = daydream._parse_structured(raw)

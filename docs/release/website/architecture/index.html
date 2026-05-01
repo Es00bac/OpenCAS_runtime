@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCAS Architecture</title>
+  <meta name="description" content="OpenCAS runtime architecture: bootstrap, memory, embeddings, autonomy, schedule, dashboard, platform, phone, API, and persistence.">
+  <link rel="icon" href="../favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="../styles.css">
+  <link rel="stylesheet" href="../media-player.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-shell">
+      <a class="brand" href="../index.html">
+        <span class="brand-mark mono">O</span>
+        <span>OpenCAS Release</span>
+      </a>
+      <nav class="nav-links">
+        <a href="../index.html">Home</a>
+        <a href="../installation.html">Installation</a>
+        <a href="../usage.html">Usage</a>
+        <a href="../features.html">Features</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="site-shell">
+    <section class="page-hero">
+      <span class="eyebrow">Architecture</span>
+      <h1>Explicit subsystems instead of one opaque agent blob.</h1>
+      <p class="section-lead">OpenCAS is organized around runtime concerns: bootstrap, memory, embeddings, autonomy, scheduling, telemetry, platform trust, phone, control plane, and channel integration.</p>
+    </section>
+
+    <div class="content-stack">
+      <section class="page-card">
+        <h3>Primary subsystems</h3>
+        <div class="grid cols-3">
+          <article class="content-card"><h3>bootstrap/</h3><p>Configuration resolution, store wiring, provider material, and runtime assembly.</p></article>
+          <article class="content-card"><h3>runtime/</h3><p>Conversational loop, scheduler, creative cycles, Telegram lifecycle, and phone lifecycle.</p></article>
+          <article class="content-card"><h3>memory/</h3><p>Episodic storage, distilled memories, graph edges, and artifact-backed memory ingestion.</p></article>
+          <article class="content-card"><h3>context/</h3><p>Session context, retrieval fusion, resonance signals, and memory-backed prompt assembly.</p></article>
+          <article class="content-card"><h3>somatic/</h3><p>Arousal, fatigue, tension, valence, focus, energy, certainty, and modulation logic.</p></article>
+          <article class="content-card"><h3>autonomy/</h3><p>Self-approval, creative ladder, work store, commitments, and executive state.</p></article>
+          <article class="content-card"><h3>scheduling/</h3><p>Durable schedules, calendar views, and run history.</p></article>
+          <article class="content-card"><h3>desktop_context/</h3><p>Explicit opt-in desktop capture and context packaging.</p></article>
+          <article class="content-card"><h3>platform/</h3><p>Capability inventory, extension descriptors, and trust control surfaces.</p></article>
+          <article class="content-card"><h3>telemetry/</h3><p>Append-only runtime events and query helpers for the Logs view.</p></article>
+          <article class="content-card"><h3>daydream/</h3><p>Reflection storage, conflict storage, keeper flow, and promotion lineage.</p></article>
+          <article class="content-card"><h3>api/</h3><p>FastAPI server plus config, chat, memory, operations, usage, identity, executive, platform, phone, schedule, telemetry, and Telegram routes.</p></article>
+          <article class="content-card"><h3>dashboard/</h3><p>Single-page operator UI for inspection, control, and configuration.</p></article>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>Runtime loops</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Loop</th>
+                <th>Role</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Conversation</td><td>Handles user input, retrieval, tool use, and response persistence.</td></tr>
+              <tr><td>Voice</td><td>Transcribes microphone input and synthesizes spoken replies when enabled.</td></tr>
+              <tr><td>Creative / background</td><td>Checks idle opportunities, evaluates the creative ladder, and generates daydream sparks.</td></tr>
+              <tr><td>Project return</td><td>Preserves unfinished work, blocked state, canonical artifacts, and next steps for later resumption.</td></tr>
+              <tr><td>Scheduling</td><td>Drives durable task and reminder schedules on a fixed cadence.</td></tr>
+              <tr><td>Consolidation</td><td>Reweights memory and continuity state over time.</td></tr>
+              <tr><td>Telemetry</td><td>Appends events, aggregates usage, and feeds the Logs tab.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>Persistence</h3>
+        <p>The state directory is configurable. Under the current CLI, the default is <code>./.opencas</code>.</p>
+        <ul class="list">
+          <li><code>memory.db</code> for episodes, memories, and graph relationships</li>
+          <li><code>context.db</code> for session context and message history</li>
+          <li><code>tasks.db</code> and <code>work.db</code> for background execution state</li>
+          <li><code>plans.db</code> for commitment and planning state</li>
+          <li><code>tool_use_memory.db</code> for compact records of which tools worked for similar tasks</li>
+          <li><code>daydream.db</code> for reflection and conflict tracking</li>
+          <li><code>tom.db</code> for belief and intention state</li>
+          <li><code>telemetry/</code> for event and usage logs</li>
+          <li><code>provider_material/config.json</code> and <code>provider_material/.env</code> for gateway credentials</li>
+        </ul>
+      </section>
+
+      <section class="page-card">
+        <h3>API and dashboard</h3>
+        <div class="grid cols-2">
+          <article class="content-card">
+            <h3>API route groups</h3>
+            <p>Config, monitor, chat, daydream, memory, operations, usage, identity, executive, platform, phone, schedule, telemetry, and Telegram.</p>
+          </article>
+          <article class="content-card">
+            <h3>Dashboard tabs</h3>
+            <p>Overview, Health, Chat, Operations, Schedule, Usage, Daydream, Memory, Identity, Executive, Platform, System, and Logs.</p>
+          </article>
+          <article class="content-card">
+            <h3>Tool selection</h3>
+            <p>Tool manifests, semantic routing, compact tool-use memory, and objective contracts keep the active toolbox small and task-specific.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>Architectural truths</h3>
+        <ul class="list">
+          <li>The repo currently has a strong operator surface and broad internal observability.</li>
+          <li>The repo is documented here as an editable source checkout, not a package-manager install.</li>
+          <li>The release docs should not describe the system as cloud-free unless the configured model lanes are truly local.</li>
+          <li>Phone, voice, schedule, platform, and telemetry are first-class runtime surfaces, not side experiments.</li>
+        </ul>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="site-shell">
+      <div><a href="../../architecture/README.md">Markdown source</a></div>
+      <div><a href="../index.html">Back to release index</a></div>
+    </div>
+  </footer>
+  <script src="../media-player.js"></script>
+</body>
+</html>

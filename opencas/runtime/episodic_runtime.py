@@ -18,8 +18,15 @@ from opencas.autonomy.commitment_extraction import (
     extract_self_commitments,
 )
 from opencas.memory import EdgeKind, Episode, EpisodeEdge, EpisodeKind
+from opencas.somatic.models import AffectState
 from opencas.somatic import AppraisalEventType
 from opencas.tom import BeliefSubject
+
+from .continuity_breadcrumbs import (
+    build_runtime_burst_breadcrumb,
+    is_recoverable_burst_breadcrumb,
+    recover_burst_continuity_context,
+)
 
 if TYPE_CHECKING:
     from .agent_loop import AgentRuntime
@@ -32,22 +39,46 @@ def extract_runtime_goal_directives(text: str) -> tuple[List[str], Optional[str]
     intention: Optional[str] = None
     drops: List[str] = []
 
+    def _directive_segments(source: str) -> List[str]:
+        segments = re.split(r"(?:\n+|(?<=[.!?])\s+)", source)
+        cleaned: List[str] = []
+        for segment in segments:
+            candidate = segment.strip().strip("\"'`")
+            while True:
+                narrowed = re.sub(
+                    r"^(?:and|then|so|well|okay|ok|please|for now|from now on|right now|at the moment)\s+",
+                    "",
+                    candidate,
+                ).strip()
+                if narrowed == candidate:
+                    break
+                candidate = narrowed
+            if candidate:
+                cleaned.append(candidate)
+        return cleaned
+
     goal_patterns = [
-        r"(?:your goal is|you should|i want you to|focus on|make it your goal to|prioritize)\s+(.*?)(?:[.]|$)",
+        r"^(?:your goal is|you should|i want you to|make it your goal to|prioritize)\s+(.*?)(?:[.]|$)",
+        r"^focus on\s+(.*?)(?:[.]|$)",
     ]
-    for pattern in goal_patterns:
-        for match in re.finditer(pattern, text_lower):
-            clause = match.group(1).strip()
-            if clause:
-                goals.append(clause)
+    for segment in _directive_segments(text_lower):
+        for pattern in goal_patterns:
+            match = re.match(pattern, segment)
+            if match:
+                clause = match.group(1).strip()
+                if clause:
+                    goals.append(clause)
 
     intention_patterns = [
-        r"(?:current task is|work on|start on|intention is)\s+(.*?)(?:[.]|$)",
+        r"^(?:your current task is|current task is|work on|start on|your intention is|intention is)\s+(.*?)(?:[.]|$)",
     ]
-    for pattern in intention_patterns:
-        match = re.search(pattern, text_lower)
-        if match:
-            intention = match.group(1).strip()
+    for segment in _directive_segments(text_lower):
+        for pattern in intention_patterns:
+            match = re.match(pattern, segment)
+            if match:
+                intention = match.group(1).strip()
+                break
+        if intention:
             break
 
     drop_phrases = ["done with that", "drop the goal", "forget about", "stop working on"]
@@ -61,6 +92,49 @@ def extract_runtime_goal_directives(text: str) -> tuple[List[str], Optional[str]
 def extract_runtime_self_commitments(text: str) -> List[SelfCommitmentCandidate]:
     """Extract normalized future-action self-commitments from assistant text."""
     return extract_self_commitments(text)
+
+
+async def _recover_latest_burst_breadcrumb(
+    runtime: "AgentRuntime",
+    continuity: Any,
+) -> tuple[Optional[str], str, Optional[str]]:
+    """Return the most recent recoverable burst breadcrumb, its source, and note."""
+    relational = getattr(getattr(runtime, "ctx", None), "relational", None)
+    if relational is not None:
+        try:
+            state = getattr(relational, "state", None)
+            state_breadcrumb = getattr(state, "continuity_breadcrumb", None)
+            if is_recoverable_burst_breadcrumb(state_breadcrumb, None):
+                return state_breadcrumb, "musubi_state", None
+        except Exception:
+            pass
+
+    recent_breadcrumbs = list(getattr(continuity, "continuity_breadcrumbs", []) or [])
+    if recent_breadcrumbs:
+        latest = recent_breadcrumbs[-1]
+        if is_recoverable_burst_breadcrumb(latest, None):
+            return latest, "identity", None
+
+    if relational is not None and hasattr(relational, "list_recent_burst_records"):
+        try:
+            candidate_records = await relational.list_recent_burst_records(limit=5)
+        except Exception:
+            candidate_records = []
+        for record in candidate_records:
+            breadcrumb = getattr(record, "continuity_breadcrumb", "") or ""
+            note = getattr(record, "note", None)
+            if is_recoverable_burst_breadcrumb(breadcrumb, None, note=note):
+                return breadcrumb, "musubi_history", note
+
+    if relational is not None and hasattr(relational, "list_recent_continuity_breadcrumbs"):
+        try:
+            candidate_breadcrumbs = await relational.list_recent_continuity_breadcrumbs(limit=5)
+        except Exception:
+            candidate_breadcrumbs = []
+        for candidate in candidate_breadcrumbs:
+            if is_recoverable_burst_breadcrumb(candidate, None):
+                return candidate, "musubi_history", None
+    return None, "identity", None
 
 
 async def capture_runtime_self_commitments(
@@ -145,6 +219,7 @@ async def record_runtime_episode(
     *,
     session_id: Optional[str] = None,
     role: Optional[str] = None,
+    affect: Optional[AffectState] = None,
 ) -> Episode:
     """Persist one episode with current somatic/relational salience adjustments."""
     episode = Episode(
@@ -152,7 +227,7 @@ async def record_runtime_episode(
         session_id=session_id or runtime.ctx.config.session_id,
         content=content,
         somatic_tag=runtime.ctx.somatic.state.somatic_tag,
-        affect=None,
+        affect=affect,
         payload={"role": role} if role else {},
     )
     salience = 1.0
@@ -167,6 +242,29 @@ async def record_runtime_episode(
             has_user_collab_tag=has_collab_tag
         )
     episode.salience = round(max(0.0, min(10.0, salience)), 3)
+    embeddings = getattr(runtime.ctx, "embeddings", None)
+    if embeddings is not None and content:
+        try:
+            record = await embeddings.embed(
+                content,
+                task_type=f"episode_{kind.value}",
+                meta={
+                    "episode_kind": kind.value,
+                    "session_id": episode.session_id,
+                    **({"role": role} if role else {}),
+                },
+            )
+            episode.embedding_id = record.source_hash
+        except Exception as exc:
+            runtime._trace(
+                "episode_embedding_failed",
+                {
+                    "episode_id": str(episode.episode_id),
+                    "kind": kind.value,
+                    "session_id": episode.session_id,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
     await runtime.memory.save_episode(episode)
 
     await link_runtime_episode_to_previous(runtime, episode)
@@ -266,6 +364,45 @@ async def run_runtime_continuity_check(runtime: "AgentRuntime") -> None:
             f"I am still me. The thread is unbroken. "
             f"Continuity score: {new_score:.2f} (was {pre_decay_score:.2f})."
         )
+        try:
+            recent_breadcrumbs = list(
+                getattr(continuity, "continuity_breadcrumbs", []) or []
+            )
+            latest_breadcrumb, breadcrumb_source, recovered_note = await _recover_latest_burst_breadcrumb(
+                runtime,
+                continuity,
+            )
+            if latest_breadcrumb:
+                current_musubi = None
+                relational = getattr(getattr(runtime, "ctx", None), "relational", None)
+                state = getattr(relational, "state", None)
+                if state is not None:
+                    current_musubi = getattr(state, "musubi", None)
+                recovered_burst = recover_burst_continuity_context(
+                    latest_breadcrumb,
+                    current_musubi=(
+                        current_musubi if isinstance(current_musubi, (int, float)) else None
+                    ),
+                    note=recovered_note,
+                )
+                if recovered_burst:
+                    monologue = f"{monologue} Most recent work-burst breadcrumb: {recovered_burst}."
+                else:
+                    monologue = f"{monologue} Most recent continuity breadcrumb: {latest_breadcrumb}."
+            runtime._trace(
+                "continuity_resume_view",
+                {
+                    "session_id": runtime.ctx.config.session_id,
+                    "breadcrumb_source": breadcrumb_source,
+                    "latest_breadcrumbs": list(reversed(recent_breadcrumbs[-5:]))
+                    if recent_breadcrumbs
+                    else [],
+                    "sleep_hours": round(sleep_hours, 2),
+                },
+            )
+        except Exception:
+            pass
+
         identity.set_continuity_monologue(monologue)
 
         try:
@@ -277,6 +414,33 @@ async def run_runtime_continuity_check(runtime: "AgentRuntime") -> None:
             )
         except Exception:
             pass
+
+        try:
+            if continuity is not None and hasattr(identity, "record_continuity_breadcrumb"):
+                decision = "continuity score decayed and wake-up monologue recorded"
+                next_step = "continue normal workflow with refreshed context"
+                if new_score < 0.3:
+                    decision = "continuity score dropped below threshold, recovery mode suggested"
+                    next_step = "prioritize recovery checks before high-risk actions"
+                resumed_breadcrumb = build_runtime_burst_breadcrumb(
+                    runtime,
+                    phase="resume",
+                    intent=f"resume context after {sleep_display}",
+                    focus=f"resume context after {sleep_display}",
+                    next_step=next_step,
+                    note=f"resume after {sleep_display}",
+                )
+                identity.record_continuity_breadcrumb(
+                    intent=f"resume context after {sleep_display}",
+                    decision=decision,
+                    note=resumed_breadcrumb.note,
+                    next_step=next_step,
+                )
+        except Exception:
+            runtime._trace(
+                "continuity_breadcrumb_resume_error",
+                {"session_id": runtime.ctx.config.session_id},
+            )
 
         if new_score < 0.3:
             try:

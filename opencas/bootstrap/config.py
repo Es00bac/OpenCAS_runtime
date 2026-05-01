@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from opencas.model_routing import ModelRoutingConfig
 from opencas.sandbox import SandboxConfig
@@ -37,12 +37,17 @@ class BootstrapConfig(BaseModel):
     managed_workspace_root: Optional[Path] = None
 
     # Embedding model override
-    embedding_model_id: Optional[str] = "google/gemini-embedding-2-preview"
+    embedding_model_id: Optional[str] = "google/embeddinggemma-300m"
 
     # Optional Qdrant vector backend
     qdrant_url: Optional[str] = None
     qdrant_api_key: Optional[str] = None
     qdrant_collection: Optional[str] = "opencas_embeddings"
+    qdrant_auto_start: bool = True
+    qdrant_required: bool = True
+    qdrant_container_name: str = "opencas_qdrant"
+    qdrant_image: str = "qdrant/qdrant:v1.17.0"
+    qdrant_start_timeout_seconds: float = 30.0
 
     # Local HNSW vector backend tuning
     hnsw_enabled: bool = True
@@ -53,12 +58,18 @@ class BootstrapConfig(BaseModel):
     plans_db: Optional[Path] = None
     schedules_db: Optional[Path] = None
 
+    # Background runtime cadence
+    cycle_interval: int = 600
+    daydream_interval: int = 720
+    baa_heartbeat_interval: int = 120
+    consolidation_worker_enabled: bool = True
+
     # On-demand MCP servers
     mcp_servers: Optional[List[Dict[str, Any]]] = Field(default_factory=list)
     mcp_auto_register: bool = False
 
-    # LLM gateway default model
-    default_llm_model: Optional[str] = "anthropic/claude-sonnet-4-6"
+    # LLM gateway default model (None = use open_llm_auth configured default)
+    default_llm_model: Optional[str] = None
     model_routing: ModelRoutingConfig = Field(default_factory=ModelRoutingConfig)
 
     # Per-project OpenLLMAuth configuration
@@ -81,11 +92,22 @@ class BootstrapConfig(BaseModel):
     # Sandbox configuration
     sandbox: Optional[SandboxConfig] = None
 
+    # Approval routing mode: "default" or "auto_review".
+    approval_mode: str = "default"
+
     # First-boot identity seeding
     clean_boot: bool = False
     persona_name: Optional[str] = None
     user_bio: Optional[str] = None
     user_name: Optional[str] = None
+
+    @field_validator("approval_mode", mode="before")
+    @classmethod
+    def _normalize_approval_mode(cls, value: Any) -> str:
+        cleaned = str(value or "default").strip().lower().replace("-", "_")
+        if cleaned not in {"default", "auto_review"}:
+            raise ValueError("approval_mode must be 'default' or 'auto_review'")
+        return cleaned
 
     def resolve_paths(self) -> "BootstrapConfig":
         """Ensure all derived paths are resolved relative to state_dir."""

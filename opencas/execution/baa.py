@@ -4,9 +4,14 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from opencas.api.provenance_store import (
+    ProvenanceTransitionKind,
+    record_provenance_transition,
+)
 from opencas.api import LLMClient
+from opencas.provenance_events_adapter import ProvenanceEventType, emit_provenance_event
 from opencas.embeddings import EmbeddingService
 from opencas.infra import BaaCompletedEvent, BaaProgressEvent, EventBus
 from opencas.memory import EpisodeKind, MemoryStore
@@ -45,6 +50,9 @@ class BoundedAssistantAgent:
     persisted durably and pending tasks are auto-resumed on start.
     """
 
+    _DUPLICATE_SUCCESS_COOLDOWN_SECONDS = 6 * 60 * 60
+    _DUPLICATE_FAILURE_COOLDOWN_SECONDS = 45 * 60
+
     def __init__(
         self,
         tools: ToolRegistry,
@@ -58,7 +66,13 @@ class BoundedAssistantAgent:
         memory: Optional[MemoryStore] = None,
         embeddings: Optional[EmbeddingService] = None,
     ) -> None:
-        self.executor = RepairExecutor(tools=tools, llm=llm, tracer=tracer, runtime=runtime)
+        self.executor = RepairExecutor(
+            tools=tools,
+            llm=llm,
+            tracer=tracer,
+            runtime=runtime,
+            store=store,
+        )
         self.tracer = tracer
         self.store = store
         self.event_bus = event_bus
@@ -78,6 +92,9 @@ class BoundedAssistantAgent:
         self._results: Dict[str, RepairResult] = {}
         self._futures: Dict[str, asyncio.Future[RepairResult]] = {}
         self._held: Dict[str, RepairTask] = {}
+        self._live_tasks: Dict[str, RepairTask] = {}
+        self._duplicate_aliases: Dict[str, List[asyncio.Future[RepairResult]]] = {}
+        self._recent_terminal: Dict[Tuple[str, str, str], Tuple[RepairTask, RepairResult]] = {}
         self._running = False
 
     async def submit(
@@ -86,6 +103,10 @@ class BoundedAssistantAgent:
         lane: Optional[CommandLane] = None,
     ) -> asyncio.Future[RepairResult]:
         """Enqueue *task* into *lane* and return a future for its result."""
+        duplicate_future = self._duplicate_future(task)
+        if duplicate_future is not None:
+            return duplicate_future
+
         future: asyncio.Future[RepairResult] = asyncio.get_running_loop().create_future()
         task_id = str(task.task_id)
         self._futures[task_id] = future
@@ -94,10 +115,25 @@ class BoundedAssistantAgent:
         if lane is not None and task.lane is None:
             task.lane = resolved_lane.value
 
+        self.executor.record_task_boundary(
+            task,
+            boundary="task_accepted",
+            workflow_phase="start",
+            artifact="repair-task|default|accepted",
+            why=f"task accepted into {resolved_lane.value}",
+            action="COMMIT",
+            risk="LOW",
+            source_trace={
+                "lane": resolved_lane.value,
+                "depends_on": list(task.depends_on),
+            },
+        )
+
         if task.depends_on:
             ready = await self._dependencies_ready(task.depends_on)
             if not ready:
                 self._held[task_id] = task
+                self._live_tasks[task_id] = task
                 if self.store:
                     await self.store.save(task)
                 self._trace("task_held", {"task_id": task_id, "depends_on": task.depends_on, "lane": resolved_lane.value})
@@ -105,6 +141,7 @@ class BoundedAssistantAgent:
 
         if self.store:
             await self.store.save(task)
+        self._live_tasks[task_id] = task
         self._lanes.submit(resolved_lane, task)
         self._trace("task_submitted", {"task_id": task_id, "objective": task.objective, "lane": resolved_lane.value})
         return future
@@ -146,6 +183,13 @@ class BoundedAssistantAgent:
         released: List[str] = []
         for task_id, task in list(self._held.items()):
             if await self._dependencies_ready(task.depends_on):
+                self._record_session_resume(
+                    task,
+                    reason=f"dependencies resolved for {task_id}",
+                    source_trace={"task_id": task_id, "source": "dependency"},
+                )
+                if self.store:
+                    await self.store.save(task)
                 self._lanes.submit(_resolve_lane(task), task)
                 released.append(task_id)
                 self._trace("task_released", {"task_id": task_id, "objective": task.objective, "lane": task.lane or CommandLane.BAA.value})
@@ -157,10 +201,13 @@ class BoundedAssistantAgent:
         if self._running:
             return
         self._running = True
+        await self._hydrate_duplicate_state_from_store()
         if self.store:
             pending = await self.store.list_pending()
             for task in pending:
                 task_id = str(task.task_id)
+                if task_id in self._futures or task_id in self._results:
+                    continue
                 if task_id not in self._futures:
                     future = asyncio.get_running_loop().create_future()
                     self._futures[task_id] = future
@@ -170,9 +217,18 @@ class BoundedAssistantAgent:
                     ready = await self._dependencies_ready(task.depends_on)
                     if not ready:
                         self._held[task_id] = task
+                        self._live_tasks[task_id] = task
                         await self.store.save(task)
                         continue
                 await self.store.save(task)
+                self._live_tasks[task_id] = task
+                self._record_session_resume(
+                    task,
+                    reason="pending task restored on start",
+                    source_trace={"lane": _resolve_lane(task).value, "source": "store"},
+                )
+                if self.store:
+                    await self.store.save(task)
                 self._lanes.submit(_resolve_lane(task), task)
         self._lanes.start(worker_factory=self._worker_loop)
 
@@ -184,6 +240,14 @@ class BoundedAssistantAgent:
         await self._transition_task(
             task, LifecycleStage.QUEUED, f"hold resolved for {task_id}"
         )
+        self._record_session_resume(
+            task,
+            reason=f"hold resolved for {task_id}",
+            source_trace={"task_id": task_id, "source": "operator"},
+        )
+        if self.store:
+            await self.store.save(task)
+        self._live_tasks[str(task.task_id)] = task
         self._lanes.submit(_resolve_lane(task), task)
         self._trace("hold_resolved", {"task_id": task_id, "lane": task.lane or CommandLane.BAA.value})
         return True
@@ -215,7 +279,7 @@ class BoundedAssistantAgent:
             except Exception as exc:
                 self._trace("worker_exception", {"error": str(exc), "lane": lane.value})
             finally:
-                pass  # task_done is called inside _run_bounded
+                self._lanes.task_done(lane)
 
     async def _transition_task(
         self,
@@ -285,6 +349,23 @@ class BoundedAssistantAgent:
             await self.store.save(task)
         # Auto-pause tasks that require operator input
         if to_stage in (LifecycleStage.NEEDS_APPROVAL, LifecycleStage.NEEDS_CLARIFICATION):
+            self.executor.record_task_boundary(
+                task,
+                boundary="operator_input_requested",
+                workflow_phase="pause",
+                artifact="repair-task|default|operator-input",
+                why=reason or f"operator input requested at {to_stage.value}",
+                action="UPDATE",
+                risk="MEDIUM",
+                source_trace={
+                    "from_stage": from_stage.value,
+                    "to_stage": to_stage.value,
+                    "reason": reason,
+                },
+            )
+            self._record_waiting_provenance(task=task, reason=reason)
+            if self.store:
+                await self.store.save(task)
             task_id = str(task.task_id)
             self._held[task_id] = task
             self._trace(
@@ -297,7 +378,6 @@ class BoundedAssistantAgent:
         await self._transition_task(task, LifecycleStage.PLANNING, "worker started")
         task_id = str(task.task_id)
         if task_id in self._held:
-            self._lanes.task_done(lane)
             return
         if self.event_bus:
             await self.event_bus.emit(
@@ -311,9 +391,11 @@ class BoundedAssistantAgent:
         pre_phases = len(task.phases)
         await self._transition_task(task, LifecycleStage.EXECUTING, "begin execution")
         if task_id in self._held:
-            self._lanes.task_done(lane)
             return
         result = await self.executor.run(task)
+        if self.store:
+            # Persist any provenance or other task meta mutations produced by execution wrappers.
+            await self.store.save(task)
         if self.event_bus:
             for phase_record in task.phases[pre_phases:]:
                 await self.event_bus.emit(
@@ -335,7 +417,7 @@ class BoundedAssistantAgent:
                     to_stage=ExecutionStage.RECOVERING,
                     reason=f"attempt {task.attempt} failed, recovery_count={recovery_count}",
                 )
-            if recovery_count >= 10:
+            if recovery_count >= task.max_attempts:
                 await self._transition_task(
                     task, LifecycleStage.FAILED,
                     f"Recovery cap exceeded after {recovery_count} retries.",
@@ -359,11 +441,11 @@ class BoundedAssistantAgent:
                     "task_requeued",
                     {"task_id": task_id, "recovery_count": recovery_count, "lane": lane.value},
                 )
-                self._lanes.task_done(lane)
                 await self._try_release_held()
                 return
 
         if result.stage in terminal_stages:
+            self._live_tasks.pop(task_id, None)
             if result.stage == ExecutionStage.DONE:
                 await self._transition_task(task, LifecycleStage.DONE, "execution completed successfully")
                 await self._extract_procedural_memory(task, result)
@@ -387,8 +469,11 @@ class BoundedAssistantAgent:
             future = self._futures.pop(task_id, None)
             if future and not future.done():
                 future.set_result(result)
+            for alias in self._duplicate_aliases.pop(task_id, []):
+                if not alias.done():
+                    alias.set_result(result)
+            self._remember_terminal_duplicate(task, result)
         if task_id in self._held:
-            self._lanes.task_done(lane)
             await self._try_release_held()
             return
         await self._try_release_held()
@@ -396,7 +481,357 @@ class BoundedAssistantAgent:
             "task_finished",
             {"task_id": task_id, "success": result.success, "stage": result.stage.value, "lane": lane.value},
         )
-        self._lanes.task_done(lane)
+
+    async def _hydrate_duplicate_state_from_store(self) -> None:
+        """Warm duplicate suppression state from persisted task history."""
+        if self.store is None:
+            return
+        tasks = await self.store.list_all(limit=200)
+        for task in tasks:
+            task_id = str(task.task_id)
+            if task.stage in (ExecutionStage.DONE, ExecutionStage.FAILED):
+                result = await self.store.get_result(task_id)
+                if result is not None:
+                    self._remember_terminal_duplicate(task, result)
+                continue
+            self._live_tasks[task_id] = task
+
+    @staticmethod
+    def _normalize_objective(value: str) -> str:
+        return " ".join(str(value or "").split()).strip().lower()
+
+    def _duplicate_key(self, task: RepairTask) -> Tuple[str, str, str]:
+        return (
+            self._normalize_objective(task.objective),
+            str(task.project_id or "").strip(),
+            str(task.commitment_id or "").strip(),
+        )
+
+    def _remember_terminal_duplicate(
+        self,
+        task: RepairTask,
+        result: RepairResult,
+    ) -> None:
+        key = self._duplicate_key(task)
+        current = self._recent_terminal.get(key)
+        if current is None or current[1].timestamp <= result.timestamp:
+            self._recent_terminal[key] = (task, result)
+
+    def _recent_terminal_duplicate(
+        self,
+        task: RepairTask,
+    ) -> Optional[Tuple[RepairTask, RepairResult]]:
+        key = self._duplicate_key(task)
+        entry = self._recent_terminal.get(key)
+        if entry is None:
+            return None
+        existing_task, result = entry
+        cooldown = (
+            self._DUPLICATE_SUCCESS_COOLDOWN_SECONDS
+            if result.success
+            else self._DUPLICATE_FAILURE_COOLDOWN_SECONDS
+        )
+        age_seconds = (datetime.now(timezone.utc) - result.timestamp).total_seconds()
+        if age_seconds > cooldown:
+            self._recent_terminal.pop(key, None)
+            return None
+        return existing_task, result
+
+    def _duplicate_future(
+        self,
+        task: RepairTask,
+    ) -> Optional[asyncio.Future[RepairResult]]:
+        requested_task_id = str(task.task_id)
+        key = self._duplicate_key(task)
+        if not key[0]:
+            return None
+
+        for existing_id, existing_task in list(self._live_tasks.items()):
+            if existing_id == requested_task_id:
+                continue
+            if self._duplicate_key(existing_task) != key:
+                continue
+            task.task_id = existing_task.task_id
+            future = self._futures.get(existing_id)
+            if future is not None:
+                self._trace(
+                    "task_duplicate_suppressed",
+                    {
+                        "requested_task_id": requested_task_id,
+                        "duplicate_of": existing_id,
+                        "objective": task.objective,
+                        "reason": "live_duplicate",
+                    },
+                )
+                return future
+            alias: asyncio.Future[RepairResult] = asyncio.get_running_loop().create_future()
+            self._duplicate_aliases.setdefault(existing_id, []).append(alias)
+            self._trace(
+                "task_duplicate_suppressed",
+                {
+                    "requested_task_id": requested_task_id,
+                    "duplicate_of": existing_id,
+                    "objective": task.objective,
+                    "reason": "live_duplicate",
+                },
+            )
+            return alias
+
+        recent_duplicate = self._recent_terminal_duplicate(task)
+        if recent_duplicate is None:
+            return None
+        existing_task, result = recent_duplicate
+        task.task_id = existing_task.task_id
+        self._record_duplicate_reframe_state(
+            task,
+            existing_task=existing_task,
+            result=result,
+            requested_task_id=requested_task_id,
+        )
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(result)
+        self._trace(
+            "task_duplicate_suppressed",
+            {
+                "requested_task_id": requested_task_id,
+                "duplicate_of": str(existing_task.task_id),
+                "objective": task.objective,
+                "reason": "recent_terminal_duplicate",
+                "result_stage": result.stage.value,
+            },
+        )
+        return future
+
+    def _record_duplicate_reframe_state(
+        self,
+        task: RepairTask,
+        *,
+        existing_task: RepairTask,
+        result: RepairResult,
+        requested_task_id: str,
+    ) -> None:
+        if result.success:
+            return
+
+        canonical_artifact = (
+            RepairExecutor._canonical_artifact_path(existing_task)
+            or RepairExecutor._canonical_artifact_path(task)
+        )
+        reframe_hint = self._duplicate_reframe_hint(
+            task,
+            existing_task=existing_task,
+            canonical_artifact=canonical_artifact,
+        )
+        failed_framings = list(
+            dict.fromkeys(
+                [
+                    str(existing_task.objective or "").strip(),
+                    str(task.objective or "").strip(),
+                ]
+            )
+        )
+        reason = (
+            "Duplicate low-divergence objective suppressed after an unsuccessful recent result. "
+            "Do not reopen this line without fresh evidence or a materially different framing."
+        )
+        retry_governor = self._duplicate_retry_governor_payload(
+            existing_task,
+            result=result,
+        )
+        resume_project = self._duplicate_resume_project_payload(
+            existing_task,
+            canonical_artifact=canonical_artifact,
+            reframe_hint=reframe_hint,
+        )
+        shadow_registry = self._shadow_registry()
+        capture = getattr(shadow_registry, "capture_retry_blocked", None)
+        if callable(capture):
+            capture(
+                {
+                    "task_id": str(existing_task.task_id),
+                    "target_id": str(existing_task.task_id),
+                    "target_kind": "repair_task",
+                    "objective": existing_task.objective,
+                    "attempt": existing_task.attempt,
+                    "artifact": canonical_artifact,
+                    "canonical_artifact_path": canonical_artifact,
+                    "retry_mode": "duplicate_suppressed",
+                    "governor_mode": "reframe_required",
+                    "retry_governor": retry_governor,
+                    "resume_project": resume_project,
+                    "reason": reason,
+                    "best_next_step": reframe_hint,
+                    "reframe_hint": reframe_hint,
+                    "failed_framings": failed_framings,
+                    "suppression_reason": "recent_terminal_duplicate",
+                    "capture_source": "baa_duplicate_suppression",
+                    "duplicate_context": {
+                        "duplicate_of_task_id": str(existing_task.task_id),
+                        "requested_task_id": requested_task_id,
+                        "result_stage": result.stage.value,
+                    },
+                }
+            )
+
+        executive = self._executive_state()
+        if executive is not None:
+            executive.park_goal(
+                existing_task.objective,
+                reason="low_divergence_reframe",
+                wake_trigger=(
+                    "fresh evidence, relevant artifact change, materially different framing, "
+                    "or direct user request"
+                ),
+                source_artifact=canonical_artifact,
+                details={
+                    "blocked_reason": reason,
+                    "reframe_hint": reframe_hint,
+                    "failed_framings": failed_framings,
+                    "duplicate_of_task_id": str(existing_task.task_id),
+                    "last_result_stage": result.stage.value,
+                    "last_requested_task_id": requested_task_id,
+                    "reframe_rule": (
+                        "Do not retry this line with cosmetic rewording. "
+                        "Wake it only with fresh evidence or a materially different plan."
+                    ),
+                },
+            )
+        self._trace(
+            "task_duplicate_reframe_recorded",
+            {
+                "task_id": str(existing_task.task_id),
+                "requested_task_id": requested_task_id,
+                "result_stage": result.stage.value,
+                "artifact": canonical_artifact,
+            },
+        )
+
+    @staticmethod
+    def _duplicate_reframe_hint(
+        task: RepairTask,
+        *,
+        existing_task: RepairTask,
+        canonical_artifact: Optional[str],
+    ) -> str:
+        existing_meta = existing_task.meta if isinstance(existing_task.meta, dict) else {}
+        resume_project = existing_meta.get("resume_project")
+        if isinstance(resume_project, dict):
+            best_next_step = str(resume_project.get("best_next_step", "") or "").strip()
+            if best_next_step:
+                return best_next_step
+        retry_governor = existing_meta.get("retry_governor")
+        if isinstance(retry_governor, dict):
+            mode = str(retry_governor.get("mode", "") or "").strip().lower()
+            if mode == "resume_existing_artifact" and canonical_artifact:
+                return f"Resume from {canonical_artifact} with one narrow edit, then rerun verification."
+        if canonical_artifact:
+            return f"Inspect {canonical_artifact}, repair the smallest verified gap, then rerun verification."
+        objective = str(task.objective or existing_task.objective or "").strip() or "this line"
+        return f"Gather fresh evidence or choose a materially different framing before retrying {objective}."
+
+    @staticmethod
+    def _duplicate_retry_governor_payload(
+        existing_task: RepairTask,
+        *,
+        result: RepairResult,
+    ) -> Dict[str, Any]:
+        task_meta = existing_task.meta if isinstance(existing_task.meta, dict) else {}
+        prior = task_meta.get("retry_governor")
+        payload = dict(prior) if isinstance(prior, dict) else {}
+        payload.update(
+            {
+                "allowed": False,
+                "reason": "recent failed duplicate requires reframe",
+                "mode": "reframe_required",
+                "result_stage": result.stage.value,
+            }
+        )
+        return payload
+
+    @staticmethod
+    def _duplicate_resume_project_payload(
+        existing_task: RepairTask,
+        *,
+        canonical_artifact: Optional[str],
+        reframe_hint: str,
+    ) -> Dict[str, Any]:
+        task_meta = existing_task.meta if isinstance(existing_task.meta, dict) else {}
+        resume_project = task_meta.get("resume_project")
+        payload = dict(resume_project) if isinstance(resume_project, dict) else {}
+        if canonical_artifact and not payload.get("canonical_artifact_path"):
+            payload["canonical_artifact_path"] = canonical_artifact
+        if reframe_hint and not payload.get("best_next_step"):
+            payload["best_next_step"] = reframe_hint
+        return payload
+
+    def _shadow_registry(self):
+        return getattr(getattr(self.runtime, "ctx", None), "shadow_registry", None)
+
+    def _executive_state(self):
+        return getattr(getattr(self.runtime, "ctx", None), "executive", None)
+
+    def _record_session_resume(
+        self,
+        task: RepairTask,
+        *,
+        reason: str,
+        source_trace: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        """Record a durable boundary when a held or persisted task resumes."""
+        self.executor.record_task_boundary(
+            task,
+            boundary="session_resumed",
+            workflow_phase="resume",
+            artifact="repair-task|default|resumed",
+            why=reason,
+            action="COMMIT",
+            risk="LOW",
+            source_trace=source_trace,
+        )
+
+    def _record_waiting_provenance(self, *, task: RepairTask, reason: Optional[str]) -> None:
+        """Persist provenance for tasks paused on operator input."""
+        runtime = self.runtime
+        config = getattr(getattr(runtime, "ctx", None), "config", None) if runtime is not None else None
+        state_dir = getattr(config, "state_dir", None) if config is not None else None
+        if state_dir is None:
+            return
+
+        task_id = str(task.task_id)
+        raw_session_id = getattr(config, "session_id", None) if config is not None else None
+        session_id = raw_session_id.strip() if isinstance(raw_session_id, str) and raw_session_id.strip() else task_id
+        record_provenance_transition(
+            state_dir=state_dir,
+            kind=ProvenanceTransitionKind.WAITING,
+            session_id=session_id,
+            entity_id=task_id,
+            status="blocked",
+            trigger_artifact=f"repair|baa|{task_id}",
+            source_artifact=f"repair|baa|{task_id}",
+            trigger_action="baa.transition_task",
+            target_entity=task_id,
+            origin_action_id=task_id,
+            details={
+                "reason": reason,
+                "stage": task.stage.value,
+            },
+        )
+        meta = task.meta if isinstance(getattr(task, "meta", None), dict) else {}
+        emit_provenance_event(
+            meta,
+            event_type=ProvenanceEventType.BLOCKED,
+            triggering_artifact=f"repair-task|default|{task_id}",
+            triggering_action="WAIT",
+            parent_link_id=task_id,
+            linked_link_ids=[task_id, session_id],
+            details={
+                "reason": reason,
+                "stage": task.stage.value,
+                "session_id": session_id,
+            },
+        )
+        if isinstance(getattr(task, "meta", None), dict):
+            task.meta = meta
 
     def list_results(self) -> List[RepairResult]:
         """Return all completed results in submission order (best effort)."""

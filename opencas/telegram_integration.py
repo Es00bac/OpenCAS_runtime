@@ -3,19 +3,30 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import mimetypes
+import re
 import secrets
 import time
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import httpx
 from pydantic import BaseModel, Field
 
+from opencas.api.chat_service import (
+    chat_upload_dir,
+    resolve_uploaded_attachment,
+    store_uploaded_file,
+)
+from opencas.telegram_commands import BOT_COMMAND_MENU, TelegramCommandRouter
 from opencas.telemetry import EventKind, Tracer
 
-
 TELEGRAM_TEXT_LIMIT = 4096
+TELEGRAM_ATTACHMENT_MAX_BYTES = 20_000_000
+TELEGRAM_VISION_MAX_BYTES = 5_000_000
 
 
 class TelegramPairingRequest(BaseModel):
@@ -172,6 +183,7 @@ class TelegramApiClient:
     ) -> None:
         self.token = token
         self.base_url = f"{base_url.rstrip('/')}/bot{token}"
+        self.file_base_url = f"{base_url.rstrip('/')}/file/bot{token}"
         self._client = httpx.AsyncClient(timeout=timeout, transport=transport)
 
     async def close(self) -> None:
@@ -207,6 +219,18 @@ class TelegramApiClient:
             "sendChatAction",
             json_payload={"chat_id": chat_id, "action": action},
         )
+
+    async def set_my_commands(self, commands: List[Dict[str, str]]) -> Dict[str, Any]:
+        return await self._request("setMyCommands", json_payload={"commands": commands})
+
+    async def get_file(self, file_id: str) -> Dict[str, Any]:
+        result = await self._request("getFile", json_payload={"file_id": file_id})
+        return result if isinstance(result, dict) else {}
+
+    async def download_file(self, file_path: str) -> bytes:
+        response = await self._client.get(f"{self.file_base_url}/{file_path.lstrip('/')}")
+        response.raise_for_status()
+        return response.content
 
     async def _request(self, method: str, *, json_payload: Optional[Dict[str, Any]] = None) -> Any:
         response = await self._client.post(f"{self.base_url}/{method}", json=json_payload or {})
@@ -255,6 +279,10 @@ class TelegramBotService:
         self._last_error: Optional[str] = None
         self._bot_info: Optional[Dict[str, Any]] = None
         self._chat_locks: Dict[int, asyncio.Lock] = {}
+        self.commands = TelegramCommandRouter(
+            runtime,
+            state_path=telegram_state_dir / "command_sessions.json",
+        )
 
     @property
     def configured(self) -> bool:
@@ -270,6 +298,17 @@ class TelegramBotService:
             self._last_error = str(exc)
             self._trace("telegram_start_failed", {"error": str(exc)}, kind=EventKind.ERROR)
             raise
+        try:
+            await self.client.set_my_commands(
+                [{"command": name, "description": desc} for name, desc in BOT_COMMAND_MENU]
+            )
+        except Exception as exc:
+            self._last_error = str(exc)
+            self._trace(
+                "telegram_set_commands_failed",
+                {"error": str(exc)},
+                kind=EventKind.ERROR,
+            )
         self._task = asyncio.create_task(self._poll_loop())
         self._trace("telegram_started", {"bot_username": self._bot_info.get("username")})
 
@@ -320,9 +359,69 @@ class TelegramBotService:
             )
         except Exception as exc:
             self._last_error = str(exc)
-            self._trace("telegram_pairing_notify_failed", {"error": str(exc), "user_id": request.user_id}, kind=EventKind.ERROR)
+            self._trace(
+                "telegram_pairing_notify_failed",
+                {"error": str(exc), "user_id": request.user_id},
+                kind=EventKind.ERROR,
+            )
         self._trace("telegram_pairing_approved", {"user_id": request.user_id, "code": request.code})
         return request
+
+    async def notify_owner(
+        self,
+        text: str,
+        *,
+        reason: str = "",
+        urgency: str = "normal",
+        source: str = "runtime",
+        document_path: Optional[Path] = None,
+        document_filename: Optional[str] = None,
+        document_caption: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Send an owner-directed proactive notification to approved private chats."""
+        del document_path, document_filename, document_caption
+        chat_ids = await self._owner_chat_ids()
+        if not chat_ids:
+            self._trace(
+                "telegram_owner_notify_skipped",
+                {"reason": "no_owner_chat", "source": source, "urgency": urgency},
+            )
+            return {"sent": 0, "chat_ids": [], "failed": [], "reason": "no_owner_chat"}
+
+        sent: list[str] = []
+        failed: list[Dict[str, str]] = []
+        for raw_chat_id in chat_ids:
+            try:
+                chat_id = int(raw_chat_id)
+                chunks = _chunk_telegram_text(text)
+                for chunk in chunks:
+                    await self.client.send_message(chat_id, chunk)
+                sent.append(str(raw_chat_id))
+            except Exception as exc:
+                self._last_error = str(exc)
+                failed.append({"chat_id": str(raw_chat_id), "error": str(exc)})
+        self._trace(
+            "telegram_owner_notified",
+            {
+                "sent": len(sent),
+                "failed": len(failed),
+                "reason": reason,
+                "urgency": urgency,
+                "source": source,
+            },
+            kind=EventKind.TOOL_CALL if sent else EventKind.ERROR,
+        )
+        return {"sent": len(sent), "chat_ids": sent, "failed": failed}
+
+    async def _owner_chat_ids(self) -> list[str]:
+        snapshot = await self.pairing_store.snapshot()
+        approved = {
+            str(item).strip()
+            for item in snapshot.get("approved_user_ids", [])
+            if str(item).strip()
+        }
+        allowed = {str(item).strip() for item in self.allow_from if str(item).strip()}
+        return sorted(allowed | approved)
 
     async def handle_update(self, update: Dict[str, Any]) -> None:
         message = update.get("message") or update.get("edited_message")
@@ -337,15 +436,9 @@ class TelegramBotService:
         if sender.get("is_bot"):
             return
 
-        text = message.get("text") or message.get("caption")
-        if not isinstance(text, str) or not text.strip():
-            if chat.get("type") == "private":
-                await self.client.send_message(
-                    chat_id,
-                    "Telegram media and non-text messages are not supported yet in OpenCAS.",
-                    reply_to_message_id=message.get("message_id"),
-                )
-            return
+        text = message.get("text") or message.get("caption") or ""
+        if not isinstance(text, str):
+            text = ""
 
         authorized = await self._is_authorized(chat.get("type"), str(user_id))
         if not authorized:
@@ -369,7 +462,60 @@ class TelegramBotService:
         lock = self._chat_locks.setdefault(chat_id, asyncio.Lock())
         async with lock:
             reply_to_message_id = message.get("message_id")
-            session_id = f"telegram:{chat.get('type', 'chat')}:{chat_id}"
+            try:
+                attachments = await self._materialize_telegram_attachments(message)
+            except Exception as exc:
+                self._last_error = str(exc)
+                self._trace(
+                    "telegram_media_download_failed",
+                    {
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "message_id": message.get("message_id"),
+                        "error": str(exc),
+                    },
+                    kind=EventKind.ERROR,
+                )
+                if chat.get("type") == "private":
+                    await self.client.send_message(
+                        chat_id,
+                        f"I received Telegram media, but could not download it: {exc}",
+                        reply_to_message_id=reply_to_message_id,
+                    )
+                return
+            if not text.strip() and not attachments:
+                if chat.get("type") == "private":
+                    await self.client.send_message(
+                        chat_id,
+                        "I received that Telegram message, but it did not include "
+                        "supported text or downloadable media.",
+                        reply_to_message_id=reply_to_message_id,
+                    )
+                return
+
+            if text.strip() and self.commands.is_command(text):
+                bot_username = self._bot_info.get("username") if self._bot_info else None
+                command_reply = await self.commands.dispatch(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    text=text,
+                    bot_username=bot_username,
+                )
+                if command_reply is not None:
+                    self._trace(
+                        "telegram_command_dispatched",
+                        {"chat_id": chat_id, "user_id": user_id, "command": text.split()[0]},
+                    )
+                    await self._deliver_response(
+                        chat_id,
+                        command_reply,
+                        reply_to_message_id=reply_to_message_id,
+                        placeholder_message_id=None,
+                    )
+                    return
+
+            session_id = self.commands.session_id_for(chat.get("type", "chat"), chat_id)
+            conversation_text = text.strip() or "Please review the attached Telegram media."
             stop_typing = asyncio.Event()
             try:
                 await self.client.send_chat_action(chat_id, "typing")
@@ -387,9 +533,24 @@ class TelegramBotService:
             try:
                 self._trace(
                     "telegram_message_received",
-                    {"chat_id": chat_id, "user_id": user_id, "session_id": session_id},
+                    {
+                        "chat_id": chat_id,
+                        "user_id": user_id,
+                        "session_id": session_id,
+                        "attachment_count": len(attachments),
+                    },
                 )
-                response = await self.runtime.converse(text.strip(), session_id=session_id)
+                if attachments:
+                    response = await self.runtime.converse(
+                        conversation_text,
+                        session_id=session_id,
+                        user_meta={"attachments": attachments},
+                    )
+                else:
+                    response = await self.runtime.converse(
+                        conversation_text,
+                        session_id=session_id,
+                    )
             except Exception as exc:
                 response = f"[Error: {exc}]"
                 self._last_error = str(exc)
@@ -421,6 +582,206 @@ class TelegramBotService:
                 reply_to_message_id=reply_to_message_id,
                 placeholder_message_id=placeholder_message_id,
             )
+
+    async def _materialize_telegram_attachments(self, message: Dict[str, Any]) -> List[Dict[str, Any]]:
+        specs = self._telegram_attachment_specs(message)
+        if not specs:
+            return []
+        upload_dir = chat_upload_dir(self.runtime)
+        attachments: List[Dict[str, Any]] = []
+        for spec in specs:
+            file_id = str(spec.get("file_id") or "").strip()
+            if not file_id:
+                continue
+            file_info = await self.client.get_file(file_id)
+            file_path = str(file_info.get("file_path") or "").strip()
+            if not file_path:
+                raise RuntimeError(f"Telegram did not return a file path for {spec.get('kind')}")
+            declared_size = int(file_info.get("file_size") or spec.get("file_size") or 0)
+            if declared_size > TELEGRAM_ATTACHMENT_MAX_BYTES:
+                raise RuntimeError(
+                    f"Telegram {spec.get('kind')} is too large "
+                    f"({declared_size} bytes > {TELEGRAM_ATTACHMENT_MAX_BYTES})"
+                )
+            content = await self.client.download_file(file_path)
+            if len(content) > TELEGRAM_ATTACHMENT_MAX_BYTES:
+                raise RuntimeError(
+                    f"Telegram {spec.get('kind')} is too large "
+                    f"({len(content)} bytes > {TELEGRAM_ATTACHMENT_MAX_BYTES})"
+                )
+            filename = _safe_telegram_filename(
+                str(spec.get("filename") or Path(file_path).name or "telegram_attachment")
+            )
+            media_type = str(spec.get("media_type") or "").strip()
+            if not media_type:
+                media_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+            stored = store_uploaded_file(
+                upload_dir,
+                filename=filename,
+                content_type=media_type,
+                fileobj=BytesIO(content),
+            )
+            resolved = resolve_uploaded_attachment(upload_dir, stored)
+            resolved["telegram"] = {
+                "kind": spec.get("kind"),
+                "message_id": message.get("message_id"),
+                "file_id": file_id,
+                "file_unique_id": spec.get("file_unique_id"),
+                "file_path": file_path,
+                "declared_size_bytes": declared_size or None,
+            }
+            for key in ("width", "height", "duration", "performer", "title"):
+                if spec.get(key) is not None:
+                    resolved["telegram"][key] = spec.get(key)
+            await self._attach_image_analysis(resolved)
+            attachments.append(resolved)
+        return attachments
+
+    async def _attach_image_analysis(self, attachment: Dict[str, Any]) -> None:
+        media_type = str(attachment.get("media_type") or "")
+        if not media_type.startswith("image/"):
+            return
+        path = Path(str(attachment.get("path") or ""))
+        try:
+            image_bytes = path.read_bytes()
+        except OSError:
+            return
+        if not image_bytes or len(image_bytes) > TELEGRAM_VISION_MAX_BYTES:
+            telegram_meta = attachment.setdefault("telegram", {})
+            if isinstance(telegram_meta, dict):
+                telegram_meta["image_analysis"] = "skipped_size"
+            return
+        llm = getattr(self.runtime, "llm", None)
+        if llm is None or not hasattr(llm, "chat_completion"):
+            telegram_meta = attachment.setdefault("telegram", {})
+            if isinstance(telegram_meta, dict):
+                telegram_meta["image_analysis"] = "unavailable"
+            return
+
+        image_uri = "data:{media_type};base64,{payload}".format(
+            media_type=media_type,
+            payload=base64.b64encode(image_bytes).decode("ascii"),
+        )
+        prompt = (
+            "Describe this Telegram image attachment for the OpenCAS agent's chat context. "
+            "Be factual and concise. If it is a screenshot or document-like image, "
+            "summarize visible text and layout without inventing missing details."
+        )
+        try:
+            response = await llm.chat_completion(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You analyze user-provided Telegram images so the agent can respond "
+                            "from grounded visual evidence. Do not infer private facts not visible "
+                            "in the image."
+                        ),
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {"url": image_uri}},
+                        ],
+                    },
+                ],
+                complexity="light",
+                payload={"temperature": 0.1, "max_tokens": 400},
+                source="telegram_media_image_analysis",
+            )
+            description = self._extract_llm_response_text(response)
+        except Exception as exc:
+            telegram_meta = attachment.setdefault("telegram", {})
+            if isinstance(telegram_meta, dict):
+                telegram_meta["image_analysis"] = "failed"
+                telegram_meta["image_analysis_error"] = str(exc)[:160]
+            return
+
+        if not description:
+            return
+        attachment["text_content"] = (
+            "Image analysis from Telegram media:\n"
+            + self._truncate_attachment_description(description)
+        )
+        attachment["text_truncated"] = len(description) > 4000
+        attachment["language_hint"] = "image-description"
+        telegram_meta = attachment.setdefault("telegram", {})
+        if isinstance(telegram_meta, dict):
+            telegram_meta["image_analysis"] = "vision"
+
+    @staticmethod
+    def _telegram_attachment_specs(message: Dict[str, Any]) -> List[Dict[str, Any]]:
+        specs: List[Dict[str, Any]] = []
+        photos = message.get("photo")
+        if isinstance(photos, list) and photos:
+            photo_items = [item for item in photos if isinstance(item, dict) and item.get("file_id")]
+            if photo_items:
+                best = max(
+                    photo_items,
+                    key=lambda item: (
+                        int(item.get("file_size") or 0),
+                        int(item.get("width") or 0) * int(item.get("height") or 0),
+                    ),
+                )
+                specs.append(
+                    {
+                        "kind": "photo",
+                        "file_id": best.get("file_id"),
+                        "file_unique_id": best.get("file_unique_id"),
+                        "file_size": best.get("file_size"),
+                        "width": best.get("width"),
+                        "height": best.get("height"),
+                        "filename": f"telegram_{message.get('message_id') or 'message'}_photo.jpg",
+                        "media_type": "image/jpeg",
+                    }
+                )
+
+        media_fields = {
+            "document": ("document", "telegram_document", "application/octet-stream"),
+            "video": ("video", "telegram_video.mp4", "video/mp4"),
+            "animation": ("animation", "telegram_animation.mp4", "video/mp4"),
+            "audio": ("audio", "telegram_audio.mp3", "audio/mpeg"),
+            "voice": ("voice", "telegram_voice.oga", "audio/ogg"),
+            "video_note": ("video_note", "telegram_video_note.mp4", "video/mp4"),
+            "sticker": ("sticker", "telegram_sticker.webp", "image/webp"),
+        }
+        for field, (kind, default_name, default_media_type) in media_fields.items():
+            item = message.get(field)
+            if not isinstance(item, dict) or not item.get("file_id"):
+                continue
+            filename = str(item.get("file_name") or default_name)
+            specs.append(
+                {
+                    "kind": kind,
+                    "file_id": item.get("file_id"),
+                    "file_unique_id": item.get("file_unique_id"),
+                    "file_size": item.get("file_size"),
+                    "width": item.get("width"),
+                    "height": item.get("height"),
+                    "duration": item.get("duration"),
+                    "performer": item.get("performer"),
+                    "title": item.get("title"),
+                    "filename": filename,
+                    "media_type": item.get("mime_type") or default_media_type,
+                }
+            )
+        return specs
+
+    @staticmethod
+    def _extract_llm_response_text(response: Dict[str, Any]) -> str:
+        choices = response.get("choices", []) if isinstance(response, dict) else []
+        if not choices:
+            return ""
+        message = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
+        return str(message.get("content") or "").strip()
+
+    @staticmethod
+    def _truncate_attachment_description(text: str, limit: int = 4000) -> str:
+        normalized = str(text or "").strip()
+        if len(normalized) <= limit:
+            return normalized
+        return normalized[: max(0, limit - 3)].rstrip() + "..."
 
     async def _poll_loop(self) -> None:
         while not self._stop_event.is_set():
@@ -551,3 +912,11 @@ def _chunk_telegram_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> List[st
             chunks.append(chunk)
         remaining = remaining[split_at:].lstrip()
     return chunks
+
+
+def _safe_telegram_filename(filename: str) -> str:
+    raw = Path(str(filename or "telegram_attachment")).name.strip()
+    if not raw:
+        raw = "telegram_attachment"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", raw)
+    return safe.strip("._") or "telegram_attachment"

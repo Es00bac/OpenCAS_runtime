@@ -1,8 +1,11 @@
 """Tests for the embeddings module."""
 
+from datetime import datetime, timezone
+from pathlib import Path
+
 import pytest
 import pytest_asyncio
-from pathlib import Path
+
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.embeddings.backfill import EmbeddingBackfill
 from opencas.memory import MemoryStore
@@ -96,6 +99,25 @@ async def test_health_ready_ratio(embedding_cache: EmbeddingCache, memory_store)
 
 
 @pytest.mark.asyncio
+async def test_health_reports_per_item_embedding_latency(
+    embedding_cache: EmbeddingCache,
+) -> None:
+    svc = EmbeddingService(embedding_cache)
+    svc._embed_history.append(
+        {
+            "timestamp": datetime.now(timezone.utc),
+            "latency_ms": 1000.0,
+            "batch_size": 10,
+            "task_type": "test",
+        }
+    )
+
+    health = await svc.health()
+
+    assert health.avg_embed_latency_ms_1h == 100.0
+
+
+@pytest.mark.asyncio
 async def test_backfill_missing_embeddings(embedding_cache: EmbeddingCache, memory_store) -> None:
     svc = EmbeddingService(embedding_cache, store=memory_store)
     ep1 = Episode(content="hello world", kind=EpisodeKind.OBSERVATION)
@@ -116,6 +138,40 @@ async def test_backfill_missing_embeddings(embedding_cache: EmbeddingCache, memo
     # Re-running should backfill nothing
     count2 = await backfill.backfill_missing_embeddings([ep1, ep2])
     assert count2 == 0
+
+
+@pytest.mark.asyncio
+async def test_backfill_refreshes_same_model_wrong_dimension(
+    embedding_cache: EmbeddingCache, memory_store
+) -> None:
+    stale = EmbeddingService(
+        embedding_cache,
+        embed_batch_fn=lambda _texts: _fixed_batch(3072),
+        model_id="google/embeddinggemma-300m",
+        expected_dimension=3072,
+    )
+    stale_record = await stale.embed("same model wrong dimension", task_type="memory_episode")
+    ep = Episode(
+        kind=EpisodeKind.OBSERVATION,
+        content="same model wrong dimension",
+        embedding_id=stale_record.source_hash,
+    )
+    await memory_store.save_episode(ep)
+
+    fresh = EmbeddingService(
+        embedding_cache,
+        embed_batch_fn=lambda _texts: _fixed_batch(768),
+        model_id="google/embeddinggemma-300m",
+        expected_dimension=768,
+    )
+    backfill = EmbeddingBackfill(fresh, memory_store)
+
+    count = await backfill.align_episode_embeddings([ep])
+
+    assert count == 1
+    refreshed = await embedding_cache.get(stale_record.source_hash)
+    assert refreshed is not None
+    assert refreshed.dimension == 768
 
 
 @pytest.mark.asyncio
@@ -178,5 +234,141 @@ async def test_search_similar_skips_dimension_mismatch_records(
     assert all(record.dimension == query_record.dimension for record, _ in results)
 
 
+@pytest.mark.asyncio
+async def test_model_id_label_on_fallback(embedding_cache: EmbeddingCache) -> None:
+    """Fallback embed must record model_id='local-fallback', not the requested model."""
+
+    async def _boom(_text: str):
+        raise RuntimeError("no creds")
+
+    svc = EmbeddingService(
+        embedding_cache,
+        embed_fn=_boom,
+        model_id="google/gemini-embedding-2-preview",
+    )
+    record = await svc.embed("degraded input")
+
+    assert record.model_id == "local-fallback"
+    assert record.dimension == 256
+    assert record.meta["embedding_degraded"] is True
+    assert record.meta["requested_model_id"] == "google/gemini-embedding-2-preview"
+
+
+@pytest.mark.asyncio
+async def test_model_id_label_on_success(embedding_cache: EmbeddingCache) -> None:
+    """Successful embed must record the real model_id and correct dimension."""
+
+    async def _fake_embed(_text: str):
+        return [0.1] * 768
+
+    svc = EmbeddingService(
+        embedding_cache,
+        embed_fn=_fake_embed,
+        model_id="google/gemini-embedding-2-preview",
+    )
+    record = await svc.embed("good input")
+
+    assert record.model_id == "google/gemini-embedding-2-preview"
+    assert record.dimension == 768
+    assert record.meta.get("embedding_degraded") is None
+    assert record.meta.get("requested_model_id") is None
+
+
+@pytest.mark.asyncio
+async def test_expected_dimension_rejects_uncoercible_vectors(
+    embedding_cache: EmbeddingCache,
+) -> None:
+    async def _fake_embed_batch(_texts: list[str]):
+        return [[0.1] * 768]
+
+    svc = EmbeddingService(
+        embedding_cache,
+        embed_batch_fn=_fake_embed_batch,
+        model_id="other-embedding-model",
+        expected_dimension=3072,
+    )
+
+    with pytest.raises(ValueError, match="expected 3072, got 768"):
+        await svc.embed("wrong sized gemma vector")
+
+    assert await embedding_cache.get(
+        svc._build_source_hash("wrong sized gemma vector", task_type="general")
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_embeddinggemma_stores_768_native_vectors_without_padding(
+    embedding_cache: EmbeddingCache,
+) -> None:
+    svc = EmbeddingService(
+        embedding_cache,
+        embed_batch_fn=lambda _texts: _fixed_batch(768),
+        model_id="google/embeddinggemma-300m",
+        expected_dimension=768,
+    )
+
+    record = await svc.embed("native gemma vector")
+
+    assert record.dimension == 768
+    assert record.vector == [1.0 / 768] * 768
+    assert "embedding_dimension_coercion" not in record.meta
+
+
+@pytest.mark.asyncio
+async def test_embeddinggemma_hash_fallback_uses_768_store_dimension(
+    embedding_cache: EmbeddingCache,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _no_local_gemma(_self):
+        return False
+
+    monkeypatch.setattr(EmbeddingService, "_get_local_gemma", _no_local_gemma)
+    svc = EmbeddingService(
+        embedding_cache,
+        model_id="google/embeddinggemma-300m",
+        expected_dimension=768,
+    )
+
+    record = await svc.embed("gemma unavailable fallback")
+
+    assert record.model_id == "local-fallback"
+    assert record.dimension == 768
+    assert record.meta["requested_model_id"] == "google/embeddinggemma-300m"
+    assert record.meta["embedding_degraded"] is True
+    assert "embedding_dimension_coercion" not in record.meta
+
+
+@pytest.mark.asyncio
+async def test_expected_dimension_refreshes_stale_cached_vectors_to_768(
+    embedding_cache: EmbeddingCache,
+) -> None:
+    stale = EmbeddingService(
+        embedding_cache,
+        embed_batch_fn=lambda _texts: _fixed_batch(768),
+        model_id="google/embeddinggemma-300m",
+    )
+    stale_record = await stale.embed("stale gemma vector")
+    assert stale_record.dimension == 768
+
+    fresh = EmbeddingService(
+        embedding_cache,
+        embed_batch_fn=lambda _texts: _fixed_batch(768),
+        model_id="google/embeddinggemma-300m",
+        expected_dimension=768,
+    )
+    refreshed = await fresh.embed("stale gemma vector")
+
+    assert refreshed.source_hash == stale_record.source_hash
+    assert refreshed.dimension == 768
+    assert fresh._hit_count == 1
+    cached = await embedding_cache.get(refreshed.source_hash)
+    assert cached is not None
+    assert cached.dimension == 768
+
+
 async def _fixed_vector(size: int) -> list[float]:
     return [1.0 / size] * size
+
+
+async def _fixed_batch(size: int) -> list[list[float]]:
+    return [[1.0 / size] * size]

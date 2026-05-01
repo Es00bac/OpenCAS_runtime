@@ -2,6 +2,22 @@
 
 from .ledger import ApprovalLedger
 from .models import ApprovalLedgerEntry
+from .auto_review import (
+    AutoReviewerSubagent,
+    AutoReviewMode,
+    AutoReviewOutcome,
+    AutoReviewPolicy,
+    normalize_auto_review_mode,
+)
+from .shadow_models import (
+    BlockReason,
+    BlockedIntention,
+    ClusterTriageStatus,
+    DecompositionStage,
+    ShadowClusterTriageState,
+)
+from .shadow_registry import ShadowRegistry
+from .shadow_store import ShadowRegistryStore
 from .plugin_trust import (
     PluginTrustAssessment,
     PluginTrustLevel,
@@ -33,6 +49,15 @@ __all__ = [
     "ApprovalLedger",
     "ApprovalLedgerEntry",
     "ApprovalLedgerStore",
+    "AutoReviewerSubagent",
+    "AutoReviewMode",
+    "AutoReviewOutcome",
+    "AutoReviewPolicy",
+    "normalize_auto_review_mode",
+    "BlockReason",
+    "BlockedIntention",
+    "ClusterTriageStatus",
+    "DecompositionStage",
     "PluginTrustAssessment",
     "PluginTrustLevel",
     "PluginTrustPolicy",
@@ -54,4 +79,7 @@ __all__ = [
     "normalize_plugin_publisher",
     "normalize_plugin_signer_id",
     "normalize_web_domain",
+    "ShadowRegistry",
+    "ShadowClusterTriageState",
+    "ShadowRegistryStore",
 ]

@@ -231,13 +231,49 @@ class TokenTelemetry:
         async with self._lock:
             await self._flush_unlocked()
 
+    async def prune_old_events(self, max_age_days: int = 30) -> int:
+        """Prune token-events older than *max_age_days* and return removed events."""
+        max_age_days = int(max_age_days)
+        if max_age_days < 0:
+            return 0
+        cutoff_ms = _now_ms() - (max_age_days * 24 * 60 * 60 * 1000)
+        if not self.events_file.exists():
+            return 0
+
+        async with self._lock:
+            # Preserve buffered events first, then prune persisted rows.
+            await self._flush_unlocked()
+            kept: List[str] = []
+            removed = 0
+            with open(self.events_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        data = json.loads(stripped)
+                    except (json.JSONDecodeError, TypeError):
+                        removed += 1
+                        continue
+                    ts = _norm_int(data.get("ts", 0), 0)
+                    if ts >= cutoff_ms:
+                        kept.append(stripped)
+                    else:
+                        removed += 1
+
+            if removed:
+                text = "\n".join(kept)
+                if kept:
+                    text += "\n"
+                with open(self.events_file, "w", encoding="utf-8") as f:
+                    f.write(text)
+            return removed
+
     async def _flush_unlocked(self) -> None:
         if not self._buffer:
             return
         lines = "\n".join(json.dumps(e.to_dict()) for e in self._buffer) + "\n"
-        # Write in a thread to avoid blocking the event loop
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, _append_to_file, self.events_file, lines)
+        _append_to_file(self.events_file, lines)
         self._buffer.clear()
 
     def get_events(self, start_time: int, end_time: int) -> List[TokenUsageEvent]:

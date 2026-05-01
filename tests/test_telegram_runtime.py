@@ -111,6 +111,8 @@ async def test_configure_runtime_telegram_rebuilds_and_restarts(monkeypatch: pyt
     assert isinstance(runtime._telegram, _FakeTelegramService)
     assert runtime._telegram.started is True
     assert status["saved"] is True
+    assert status["provenance_events"][0]["event_type"] == "MUTATION"
+    assert status["provenance_events"][0]["triggering_artifact"] == "setting|telegram|runtime"
     assert ("telegram_started", {}) in runtime.events
 
 

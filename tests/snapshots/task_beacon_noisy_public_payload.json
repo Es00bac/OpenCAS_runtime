@@ -1,0 +1,81 @@
+{
+  "available": true,
+  "bucket_signature": "now:3:stable_id=TASK-103|task_id=TASK-103|title=Build/test now active gamma|next:5:stable_id=TASK-201|task_id=TASK-201|title=Build/test next blocked alpha|later:3:stable_id=TASK-303|task_id=TASK-303|title=Build/test later archived gamma",
+  "counts": {
+    "later": 3,
+    "matched": 11,
+    "next": 5,
+    "now": 3,
+    "total": 11
+  },
+  "headline": "now 3 \u2022 next 5 \u2022 later 3",
+  "matched_only": true,
+  "model": {
+    "mapping_rules": [
+      {
+        "state": "now",
+        "when": [
+          "fragment text matches build/test tokens",
+          "status is active, executing, in progress, planning, recovering, running, or verifying",
+          "section is In Progress"
+        ]
+      },
+      {
+        "state": "next",
+        "when": [
+          "fragment text matches build/test tokens",
+          "status is blocked, deferred, pending, waiting, needs approval, or needs clarification",
+          "section is Next Up / Backlog or another actionable live section",
+          "text says blocked by, blocked on, waiting on, waiting for, on hold, or stalled"
+        ]
+      },
+      {
+        "state": "later",
+        "when": [
+          "fragment text matches build/test tokens",
+          "status is queued, completed, abandoned, done, or failed",
+          "section is Recently Completed or another historical section",
+          "section is Background Context, which is context-only unless the task also has a live actionable duplicate"
+        ]
+      }
+    ],
+    "priority_order": [
+      "now",
+      "next",
+      "later"
+    ],
+    "states": [
+      "now",
+      "next",
+      "later"
+    ]
+  },
+  "rules": [
+    "build/test fragments only are eligible for the quiet task beacon",
+    "now = explicit active fragments that remain consistent after duplicate reconciliation",
+    "next = blocked, pending, waiting, or conflicting fragments that still need attention",
+    "later = queued, completed, archived, stale, unknown, historical, or background-context-only fragments",
+    "one authoritative fragment per task id wins the merge",
+    "live sections outrank background and historical duplicates before recency breaks ties",
+    "unknown and stale fragments never promote themselves into now",
+    "conflicting actionable live states demote to next instead of leaking a false active signal",
+    "blocked fragments outrank less severe live duplicates before recency breaks ties",
+    "recency = newer duplicate fragments win ties and appear first inside each bucket"
+  ],
+  "view_model": {
+    "buckets": [
+      {
+        "count": 3,
+        "state": "now"
+      },
+      {
+        "count": 5,
+        "state": "next"
+      },
+      {
+        "count": 3,
+        "state": "later"
+      }
+    ]
+  }
+}

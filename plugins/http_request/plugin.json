@@ -1,0 +1,25 @@
+{
+  "manifest_version": 1,
+  "id": "http_request",
+  "name": "HTTP Request",
+  "description": "Full HTTP client (GET/POST/PUT/PATCH/DELETE/HEAD) with custom headers, body, and basic auth. Complements web_fetch for write/API workflows.",
+  "version": "1.0.0",
+  "entrypoint": "main.py",
+  "config_schema": {
+    "type": "object",
+    "properties": {
+      "timeout_seconds": {"type": "number"},
+      "max_bytes": {"type": "integer"}
+    }
+  },
+  "default_config": {"timeout_seconds": 30, "max_bytes": 524288},
+  "capabilities": [
+    {
+      "capability_id": "plugin:http_request.main",
+      "display_name": "HTTP Request",
+      "kind": "tool",
+      "description": "Authenticated HTTP requests with method/headers/body.",
+      "tool_names": ["http_request"]
+    }
+  ]
+}

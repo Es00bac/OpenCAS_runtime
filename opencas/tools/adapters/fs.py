@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -47,7 +48,11 @@ class FileSystemToolAdapter:
         path = self._resolve_path(args.get("file_path", ""))
         content = str(args.get("content", ""))
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
+        temp = path.with_suffix(".tmp")
+        temp.write_text(content, encoding="utf-8")
+        with temp.open("rb") as handle:
+            os.fsync(handle.fileno())
+        temp.replace(path)
         return ToolResult(
             success=True,
             output=json.dumps({"ok": True, "bytes_written": len(content)}),

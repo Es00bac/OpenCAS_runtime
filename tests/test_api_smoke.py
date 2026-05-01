@@ -14,14 +14,19 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from fastapi import HTTPException
 from starlette.requests import Request
+from starlette.datastructures import Headers, UploadFile
 
 from opencas.api.routes.chat import ChatAttachmentInput, ChatSendRequest, build_chat_router
+from opencas.api.chat_service import chat_upload_dir
 from opencas.api.routes.monitor import build_monitor_router
 from opencas.api.routes.phone import (
     PhoneAutoconfigureRequest,
     PhoneCallOwnerRequest,
     PhoneConfigUpdateRequest,
+    PhoneMenuConfigUpdateRequest,
+    PhoneSessionProfilesUpdateRequest,
     _external_base_url,
     _external_request_url,
     build_phone_router,
@@ -47,6 +52,7 @@ class AttachmentAwareRuntime(FakeRuntime):
     def __init__(self, state_dir: Path):
         super().__init__()
         self.ctx.config.state_dir = str(state_dir)
+        self.ctx.config.agent_workspace_root = lambda: str(state_dir.parent / "workspace")
         self.last_converse = None
 
     async def converse(self, text, session_id=None, user_meta=None):
@@ -69,17 +75,6 @@ class SessionListingStore:
     async def search_sessions(self, query, status="active", limit=20):
         self.calls.append(("search", query, status, limit))
         return [{"session_id": "archived-1", "status": status, "name": "Archived Session", "message_count": 2}]
-
-
-class InMemoryUploadFile:
-    def __init__(self, *, filename: str, content: bytes, content_type: str) -> None:
-        self.filename = filename
-        self.content_type = content_type
-        self._content = content
-        self.file = io.BytesIO(content)
-
-    async def read(self) -> bytes:
-        return self._content
 
 
 @pytest.mark.asyncio
@@ -122,34 +117,79 @@ async def test_phone_routes_direct_invocation() -> None:
     router = build_phone_router(runtime)
 
     status_endpoint = _route_endpoint(router, "/api/phone/status")
+    recent_calls_endpoint = _route_endpoint(router, "/api/phone/recent-calls")
+    call_detail_endpoint = _route_endpoint(router, "/api/phone/recent-calls/{call_sid}")
     config_endpoint = _route_endpoint(router, "/api/phone/config")
+    session_profiles_endpoint = _route_endpoint(router, "/api/phone/session-profiles")
+    menu_config_endpoint = _route_endpoint(router, "/api/phone/menu-config")
     autoconfigure_endpoint = _route_endpoint(router, "/api/phone/autoconfigure")
     call_endpoint = _route_endpoint(router, "/api/phone/call-owner")
 
     status = await status_endpoint()
-    assert status["twilio_from_number"] == "+15557654321"
-    assert status["owner"]["phone_number"] == "+15551234567"
+    assert status["twilio_from_number"] == "+14846736227"
+    assert status["owner"]["phone_number"] == "+17203340532"
+    assert status["recent_calls"][0]["call_sid"] == "CA123"
+
+    recent_calls = await recent_calls_endpoint()
+    assert recent_calls["calls"][0]["call_sid"] == "CA123"
+
+    call_detail = await call_detail_endpoint("CA123")
+    assert call_detail["found"] is True
+    assert call_detail["call"]["call_sid"] == "CA123"
 
     updated = await config_endpoint(
         PhoneConfigUpdateRequest(
             enabled=True,
             public_base_url="https://opencas.example.com",
             webhook_signature_required=True,
-            twilio_from_number="+15557654321",
-            owner_phone_number="+15551234567",
-            owner_display_name="Operator",
+            twilio_from_number="+14846736227",
+            owner_phone_number="+17203340532",
+            owner_display_name="Cabew",
             owner_workspace_subdir="phone/owner",
             contacts=[],
         )
     )
     assert updated["saved"] is True
 
+    session_profiles = await session_profiles_endpoint(
+        PhoneSessionProfilesUpdateRequest(
+            owner_entry_prompt="Press 1 for the owner.",
+            owner_entry_reprompt="Press 1 for the owner again.",
+            owner_pin_prompt="Enter owner pin.",
+            owner_pin_retry_prompt="Try the pin again.",
+            owner_pin_success_message="Verified.",
+            owner_pin_failure_message="Denied.",
+            public_prompt="Potential employers press 1.",
+            public_reprompt="Press 1 for employer mode.",
+            employer_enabled=True,
+            employer_greeting="Employer greeting.",
+            reject_enabled=True,
+            reject_message="Not for this line.",
+        )
+    )
+    assert session_profiles["saved"] is True
+
+    menu_config = await menu_config_endpoint(
+        PhoneMenuConfigUpdateRequest(
+            config={
+                "default_menu_key": "public_main",
+                "owner_menu_key": "owner_entry",
+                "menus": [
+                    {"key": "owner_entry", "prompt": "Press 1 for the owner.", "options": []},
+                    {"key": "public_main", "prompt": "Potential employers press 1.", "options": []},
+                ],
+            }
+        )
+    )
+    assert menu_config["saved"] is True
+    assert menu_config["menu_config_saved"] is True
+
     autoconfigured = await autoconfigure_endpoint(
         PhoneAutoconfigureRequest(
             enabled=True,
             public_base_url="https://opencas.example.com",
-            owner_phone_number="+15551234567",
-            owner_display_name="Operator",
+            owner_phone_number="+17203340532",
+            owner_display_name="Cabew",
         )
     )
     assert autoconfigured["autoconfigured"] is True
@@ -164,8 +204,8 @@ def test_phone_route_external_url_prefers_configured_public_base_url() -> None:
         phone_settings=PhoneRuntimeConfig(
             enabled=True,
             public_base_url="https://opencas.example.com",
-            twilio_from_number="+15557654321",
-            owner_phone_number="+15551234567",
+            twilio_from_number="+14846736227",
+            owner_phone_number="+17203340532",
         )
     )
     request = Request(
@@ -193,8 +233,8 @@ def test_phone_route_external_url_also_supports_callable_phone_settings() -> Non
         phone_settings=lambda: PhoneRuntimeConfig(
             enabled=True,
             public_base_url="https://opencas.example.com",
-            twilio_from_number="+15557654321",
-            owner_phone_number="+15551234567",
+            twilio_from_number="+14846736227",
+            owner_phone_number="+17203340532",
         )
     )
     request = Request(
@@ -304,7 +344,11 @@ def test_main_app_registers_operations_routes() -> None:
     assert "/api/chat/context-summary" in paths
     assert "/api/monitor/runtime" in paths
     assert "/api/phone/status" in paths
+    assert "/api/phone/recent-calls" in paths
+    assert "/api/phone/recent-calls/{call_sid}" in paths
+    assert "/api/phone/menu-config" in paths
     assert "/api/phone/autoconfigure" in paths
+    assert "/api/phone/session-profiles" in paths
     assert "/api/phone/twilio/voice" in paths
 
 
@@ -330,10 +374,10 @@ async def test_chat_send_materializes_text_attachment_for_runtime(tmp_path: Path
     router = build_chat_router(runtime)
 
     upload_endpoint = _route_endpoint(router, "/api/chat/upload")
-    upload = InMemoryUploadFile(
+    upload = UploadFile(
         filename="resume.md",
-        content=b"# Resume\n- Built Python automation\n",
-        content_type="text/markdown",
+        file=io.BytesIO(b"# Resume\n- Built Python automation\n"),
+        headers=Headers({"content-type": "text/markdown"}),
     )
     uploaded = await upload_endpoint(file=upload)
 
@@ -408,16 +452,24 @@ async def test_chat_voice_status_route_reports_provider_availability() -> None:
     assert response.local_voice_resolved == "en-US-AriaNeural"
 
 
+def test_chat_upload_dir_uses_managed_workspace(tmp_path: Path) -> None:
+    runtime = AttachmentAwareRuntime(tmp_path / "state" / "context.db")
+
+    upload_dir = chat_upload_dir(runtime)
+
+    assert upload_dir == tmp_path / "state" / "workspace" / "chat_uploads"
+
+
 @pytest.mark.asyncio
 async def test_chat_voice_transcribe_route_returns_voice_input_metadata(tmp_path: Path) -> None:
     runtime = AttachmentAwareRuntime(tmp_path / "state" / "context.db")
     router = build_chat_router(runtime)
     endpoint = _route_endpoint(router, "/api/chat/voice/transcribe")
 
-    upload = InMemoryUploadFile(
+    upload = UploadFile(
         filename="voice.webm",
-        content=b"fake-audio",
-        content_type="audio/webm",
+        file=io.BytesIO(b"fake-audio"),
+        headers=Headers({"content-type": "audio/webm"}),
     )
 
     with patch("opencas.api.routes.chat.transcribe_audio") as transcribe_mock:
@@ -442,6 +494,32 @@ async def test_chat_voice_transcribe_route_returns_voice_input_metadata(tmp_path
     assert response.transcript == "hello from voice"
     assert response.voice_input.provider == "elevenlabs"
     assert response.voice_input.audio["url"] == "/api/chat/uploads/voice.webm"
+
+
+@pytest.mark.asyncio
+async def test_chat_voice_transcribe_route_reports_no_speech_detected(tmp_path: Path) -> None:
+    runtime = AttachmentAwareRuntime(tmp_path / "state" / "context.db")
+    router = build_chat_router(runtime)
+    endpoint = _route_endpoint(router, "/api/chat/voice/transcribe")
+
+    upload = UploadFile(
+        filename="voice.webm",
+        file=io.BytesIO(b"fake-audio"),
+        headers=Headers({"content-type": "audio/webm"}),
+    )
+
+    with patch(
+        "opencas.api.routes.chat.transcribe_audio",
+        side_effect=HTTPException(
+            status_code=422,
+            detail="No speech was detected in the recording. Try again with a clearer utterance or higher microphone volume.",
+        ),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await endpoint(file=upload, prefer_local=True, language_code="en")
+
+    assert exc_info.value.status_code == 422
+    assert "No speech was detected" in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio
@@ -496,13 +574,51 @@ def test_dashboard_static_contains_operations_surface() -> None:
     body = dashboard_path.read_text(encoding="utf-8")
 
     assert "Operations" in body
-    assert "/dashboard/static/js/http_helpers.js" in body
-    assert "/dashboard/static/js/operations_helpers.js" in body
+    assert "dashboard/static/js/http_helpers.js" in body
+    assert "dashboard/static/js/operations_helpers.js" in body
     assert "/api/operations/sessions" in body
     assert "/api/operations/qualification" in body
     assert "/api/operations/validation-runs?limit=10" in body
     assert 'data-panel="operations-sessions"' in body
     assert 'data-panel="operations-qualification"' in body
+
+
+def test_dashboard_static_uses_mounted_assets() -> None:
+    dashboard_path = Path("opencas/dashboard/static/index.html")
+    favicon_path = Path("opencas/dashboard/static/favicon.svg")
+    body = dashboard_path.read_text(encoding="utf-8")
+
+    assert 'href="dashboard/static/favicon.svg"' in body
+    assert favicon_path.exists()
+    assert 'src="images/logo-mark.png"' not in body
+
+
+def test_dashboard_polling_components_clear_refresh_timers_on_destroy() -> None:
+    dashboard_path = Path("opencas/dashboard/static/index.html")
+    body = dashboard_path.read_text(encoding="utf-8")
+    usage_section = body.split("window.usageApp = function()", 1)[1].split("window.overviewCharts = function()", 1)[0]
+    overview_section = body.split("window.overviewCharts = function()", 1)[1]
+
+    assert "destroy()" in usage_section
+    assert "clearInterval(this._refreshTimer)" in usage_section
+    assert "destroy()" in overview_section
+    assert "clearInterval(this._refreshTimer)" in overview_section
+
+
+def test_dashboard_charts_disable_animation_for_tab_teardown() -> None:
+    dashboard_path = Path("opencas/dashboard/static/index.html")
+    body = dashboard_path.read_text(encoding="utf-8")
+
+    assert "Chart.defaults.animation = false" in body
+
+
+def test_dashboard_log_viewer_closes_stream_on_destroy() -> None:
+    dashboard_path = Path("opencas/dashboard/static/index.html")
+    body = dashboard_path.read_text(encoding="utf-8")
+    log_section = body.split("function logViewer()", 1)[1].split("kindColor(kind)", 1)[0]
+
+    assert "destroy() {" in log_section
+    assert "this.stopStreaming()" in log_section
 
 
 def test_dashboard_static_contains_memory_module() -> None:
@@ -516,6 +632,14 @@ def test_dashboard_static_contains_memory_module() -> None:
     assert "/api/memory/retrieval-inspect" in module_body
 
 
+def test_dashboard_memory_atlas_css_is_not_globally_capped() -> None:
+    css_body = Path("opencas/dashboard/static/css/app.css").read_text(encoding="utf-8")
+
+    assert ".memory-atlas-wrap canvas" in css_body
+    assert "height: clamp(420px, calc(100vh - 360px), 760px) !important;" in css_body
+    assert "canvas {\n  max-height: 280px !important;\n}" not in css_body
+
+
 def test_dashboard_static_contains_voice_chat_controls() -> None:
     dashboard_path = Path("opencas/dashboard/static/index.html")
     body = dashboard_path.read_text(encoding="utf-8")
@@ -527,3 +651,25 @@ def test_dashboard_static_contains_voice_chat_controls() -> None:
     assert "Auto-speak replies" in body
     assert "webkitAudioContext" in body
     assert "audio/wav" in body
+
+
+def test_dashboard_static_keeps_chat_compose_outside_message_template() -> None:
+    dashboard_path = Path("opencas/dashboard/static/index.html")
+    body = dashboard_path.read_text(encoding="utf-8")
+
+    template_start = body.index('<template x-for="m in filteredMessages()"')
+    template_end = body.index("</template>", template_start)
+    compose_index = body.index('class="chat-compose"')
+
+    assert compose_index > template_end
+    assert body.count('class="chat-compose"') == 1
+
+
+def test_dashboard_static_contains_shadow_registry_triage_controls() -> None:
+    dashboard_path = Path("opencas/dashboard/static/index.html")
+    body = dashboard_path.read_text(encoding="utf-8")
+
+    assert "/api/monitor/shadow-registry/cluster/triage" in body
+    assert "Dismiss Cluster" in body
+    assert "Restore Cluster" in body
+    assert "Save Note" in body

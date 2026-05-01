@@ -1,19 +1,15 @@
-import sys
-
 import pytest
+import httpx
 from fastapi.testclient import TestClient
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
+from pathlib import Path
 
 from opencas.api.server import create_app
+from opencas.api.config_overview import build_config_overview_payload
 from opencas.bootstrap import BootstrapConfig
 from opencas.governance import build_plugin_trust_feed_signature_payload
 from opencas.model_routing import ModelRoutingConfig
-
-pytestmark = pytest.mark.skipif(
-    sys.version_info >= (3, 14),
-    reason="FastAPI TestClient hangs under the current Python 3.14 stack; direct route smoke tests cover this surface.",
-)
 
 
 class FakeStore:
@@ -135,6 +131,13 @@ class FakeTaskStore:
             FakeTask("task-2", "Could documentation become relational? A changelog that records not just what shipped, but what we learned together."),
             FakeTask("task-3", "Investigate failing browser validation", stage="executing", status="running", source="manual"),
         ]
+        self._items[2].meta["retry_governor"] = {
+            "allowed": False,
+            "reason": "RetryGovernor blocked a broad retry with no new evidence.",
+            "mode": "deterministic_review",
+            "attempt": 2,
+            "packet_id": "packet-retry-blocked",
+        }
 
     async def list_all(self, limit=100, offset=0):
         return self._items[offset:offset + limit]
@@ -174,6 +177,63 @@ class FakeTaskStore:
             }
         ]
 
+    async def get_latest_salvage_packet(self, task_id):
+        from datetime import datetime, timezone
+        from uuid import UUID
+        from opencas.execution.models import AttemptOutcome, AttemptSalvagePacket, RetryMode
+
+        if task_id == "task-1":
+            return AttemptSalvagePacket(
+                packet_id=UUID("11111111-2222-3333-4444-555555555555"),
+                task_id=UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"),
+                attempt=1,
+                project_signature="docs-relational",
+                project_id=None,
+                objective="Could documentation become relational?",
+                canonical_artifact_path="workspace/notes/relational-docs.md",
+                artifact_paths_touched=["workspace/notes/relational-docs.md"],
+                plan_digest="plan",
+                execution_digest="exec",
+                verification_digest="verify",
+                tool_signature="tool",
+                divergence_signature="div-artifact",
+                outcome=AttemptOutcome.VERIFY_FAILED,
+                partial_value="Draft artifact exists and needs verification.",
+                discovered_constraints=[],
+                unresolved_questions=[],
+                best_next_step="Verify workspace/notes/relational-docs.md.",
+                recommended_mode=RetryMode.RESUME_EXISTING_ARTIFACT,
+                meaningful_progress_signal="artifact",
+                llm_spend_class="broad",
+                created_at=datetime(2026, 4, 20, 1, 15, tzinfo=timezone.utc),
+            )
+        if task_id == "task-3":
+            return AttemptSalvagePacket(
+                packet_id=UUID("22222222-3333-4444-5555-666666666666"),
+                task_id=UUID("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"),
+                attempt=2,
+                project_signature="browser-validation",
+                project_id=None,
+                objective="Investigate failing browser validation",
+                canonical_artifact_path=None,
+                artifact_paths_touched=[],
+                plan_digest="plan",
+                execution_digest="exec",
+                verification_digest=None,
+                tool_signature="tool",
+                divergence_signature="div-no-progress",
+                outcome=AttemptOutcome.VERIFY_FAILED,
+                partial_value="",
+                discovered_constraints=["no meaningful progress"],
+                unresolved_questions=[],
+                best_next_step="No meaningful progress: stop broad retry and change the next attempt frame.",
+                recommended_mode=RetryMode.DETERMINISTIC_REVIEW,
+                meaningful_progress_signal="no_meaningful_progress",
+                llm_spend_class="deterministic_review",
+                created_at=datetime(2026, 4, 20, 1, 20, tzinfo=timezone.utc),
+            )
+        return None
+
 
 class FakeEpisodeGraph:
     async def get_neighbors(self, episode_id, **kwargs):
@@ -185,6 +245,7 @@ class FakeEmbeddings:
         async def _get(*_args, **_kwargs):
             return None
         self.cache = cache or type("C", (), {"get": staticmethod(_get)})()
+        self.model_id = "google/gemini-embedding-2-preview"
 
     async def health(self):
         class H:
@@ -197,6 +258,47 @@ class FakeEmbeddings:
             vector = [0.1, 0.2, 0.3]
             source_hash = "abc"
         return R()
+
+    async def recent_records(self, limit=10):
+        from datetime import datetime, timedelta, timezone
+        from uuid import UUID
+
+        now = datetime.now(timezone.utc)
+        samples = [
+            type(
+                "EmbeddingRecordLike",
+                (),
+                {
+                    "embedding_id": UUID("11111111-1111-1111-1111-111111111111"),
+                    "model_id": self.model_id,
+                    "created_at": now - timedelta(minutes=3),
+                    "updated_at": now - timedelta(minutes=1),
+                    "meta": {
+                        "task_type": "memory_episode",
+                        "source": "episode:ep-123",
+                        "text": "the OpenCAS agent summarized the latest dashboard continuity probe and noted stable voice routing.",
+                        "embedding_degraded": False,
+                    },
+                },
+            )(),
+            type(
+                "EmbeddingRecordLike",
+                (),
+                {
+                    "embedding_id": UUID("22222222-2222-2222-2222-222222222222"),
+                    "model_id": self.model_id,
+                    "created_at": now - timedelta(minutes=6),
+                    "updated_at": now - timedelta(minutes=5),
+                    "meta": {
+                        "task_type": "retrieval_query",
+                        "source": "query",
+                        "text": "How are the recent embeddings doing?",
+                        "embedding_degraded": True,
+                    },
+                },
+            )(),
+        ]
+        return samples[:limit]
 
 
 class FakeReadiness:
@@ -457,6 +559,64 @@ class FakeConflictStore:
         return items[:limit]
 
 
+class FakeAffectiveExaminationStore:
+    async def list_recent(
+        self,
+        *,
+        limit=50,
+        session_id=None,
+        source_type=None,
+        primary_emotion=None,
+        action_pressure=None,
+        consumed_by=None,
+        decay_state=None,
+    ):
+        records = await self.list_unresolved_pressures(session_id=session_id, limit=limit)
+        if source_type:
+            records = [r for r in records if getattr(r.source_type, "value", r.source_type) == source_type]
+        if primary_emotion:
+            records = [
+                r for r in records
+                if getattr(r.affect.primary_emotion, "value", r.affect.primary_emotion) == primary_emotion
+            ]
+        if action_pressure:
+            records = [
+                r for r in records
+                if getattr(r.action_pressure, "value", r.action_pressure) == action_pressure
+            ]
+        if consumed_by:
+            records = [r for r in records if getattr(r.consumed_by, "value", r.consumed_by) == consumed_by]
+        return records[:limit]
+
+    async def list_unresolved_pressures(self, *, session_id=None, limit=50):
+        from datetime import datetime, timezone
+        from opencas.affective.models import (
+            AffectiveActionPressure,
+            AffectiveExamination,
+            AffectiveSourceType,
+            AffectiveTarget,
+        )
+        from opencas.somatic.models import AffectState, PrimaryEmotion
+
+        return [
+            AffectiveExamination(
+                created_at=datetime(2026, 4, 20, 1, 21, tzinfo=timezone.utc),
+                session_id=session_id or "default",
+                source_type=AffectiveSourceType.TOOL_RESULT,
+                source_id="tool-result-1",
+                source_excerpt="Same browser validation output appeared again without a new artifact.",
+                source_hash="affective-hash",
+                target=AffectiveTarget.SYSTEM,
+                affect=AffectState(primary_emotion=PrimaryEmotion.CONCERNED),
+                intensity=0.62,
+                confidence=0.74,
+                action_pressure=AffectiveActionPressure.ASK_CLARIFYING_QUESTION,
+                bounded_reason="already recognized repeated tool pressure; ask, block, or park instead of retrying",
+                meta={"already_recognized": True},
+            )
+        ][:limit]
+
+
 class FakeWorkStore:
     async def list_by_origin(self, origin, limit=100, offset=0):
         from datetime import datetime, timezone
@@ -506,6 +666,127 @@ class FakeDaydreamMemoryStore(FakeMemoryStore):
         ][offset:offset + limit]
 
 
+class FakeShadowRegistry:
+    def summary(self, limit=10, cluster_limit=5):
+        return {
+            "total_entries": 3,
+            "active_clusters": 1,
+            "dismissed_clusters": 1,
+            "reason_counts": {
+                "retry_blocked": 2,
+                "tool_loop_guard_blocked": 1,
+            },
+            "recent_entries": [
+                {
+                    "id": "shadow-2",
+                    "captured_at": "2026-04-20T01:15:00+00:00",
+                    "tool_name": "repair_retry",
+                    "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+                    "block_reason": "retry_blocked",
+                    "block_context": "RetryGovernor blocked a broad retry with no new evidence.",
+                    "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+                    "capture_source": "repair_executor",
+                },
+                {
+                    "id": "shadow-1",
+                    "captured_at": "2026-04-20T01:10:00+00:00",
+                    "tool_name": "tool_loop_guard",
+                    "intent_summary": "guard:write_note",
+                    "block_reason": "tool_loop_guard_blocked",
+                    "block_context": "Tool loop circuit breaker: exceeded 24 consecutive tool calls.",
+                    "artifact": None,
+                    "capture_source": "tool_use_loop",
+                },
+            ][:limit],
+            "top_clusters": [
+                {
+                    "fingerprint": "cluster-chronicle",
+                    "count": 2,
+                    "triage_status": "active",
+                    "annotation": None,
+                    "block_reason": "retry_blocked",
+                    "tool_name": "repair_retry",
+                    "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+                    "latest_captured_at": "2026-04-20T01:15:00+00:00",
+                }
+            ][:cluster_limit],
+        }
+
+    def inspect_cluster(self, fingerprint, limit=25):
+        if fingerprint != "cluster-chronicle":
+            return {"available": False, "fingerprint": fingerprint, "entries": []}
+        return {
+            "available": True,
+            "fingerprint": fingerprint,
+            "count": 2,
+            "block_reason": "retry_blocked",
+            "tool_name": "repair_retry",
+            "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+            "latest_captured_at": "2026-04-20T01:15:00+00:00",
+            "triage_status": "active",
+            "annotation": None,
+            "triaged_at": None,
+            "dismissed_at": None,
+            "entries": [
+                {
+                    "id": "shadow-2",
+                    "captured_at": "2026-04-20T01:15:00+00:00",
+                    "tool_name": "repair_retry",
+                    "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+                    "block_reason": "retry_blocked",
+                    "block_context": "RetryGovernor blocked a broad retry with no new evidence.",
+                    "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+                    "capture_source": "repair_executor",
+                    "target_kind": "repair_task",
+                    "target_id": "task-chronicle-1",
+                },
+                {
+                    "id": "shadow-3",
+                    "captured_at": "2026-04-20T01:12:00+00:00",
+                    "tool_name": "repair_retry",
+                    "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+                    "block_reason": "retry_blocked",
+                    "block_context": "RetryGovernor blocked another broad retry with no new evidence.",
+                    "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+                    "capture_source": "repair_executor",
+                    "target_kind": "repair_task",
+                    "target_id": "task-chronicle-1",
+                },
+            ][:limit],
+        }
+
+    def triage_cluster(self, fingerprint, annotation=None, dismissed=None):
+        if fingerprint != "cluster-chronicle":
+            return {"available": False, "fingerprint": fingerprint, "entries": []}
+        return {
+            "available": True,
+            "fingerprint": fingerprint,
+            "count": 2,
+            "block_reason": "retry_blocked",
+            "tool_name": "repair_retry",
+            "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+            "latest_captured_at": "2026-04-20T01:15:00+00:00",
+            "triage_status": "dismissed" if dismissed else "active",
+            "annotation": annotation,
+            "triaged_at": "2026-04-21T07:15:00+00:00",
+            "dismissed_at": "2026-04-21T07:15:00+00:00" if dismissed else None,
+            "entries": [
+                {
+                    "id": "shadow-2",
+                    "captured_at": "2026-04-20T01:15:00+00:00",
+                    "tool_name": "repair_retry",
+                    "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+                    "block_reason": "retry_blocked",
+                    "block_context": "RetryGovernor blocked a broad retry with no new evidence.",
+                    "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+                    "capture_source": "repair_executor",
+                    "target_kind": "repair_task",
+                    "target_id": "task-chronicle-1",
+                }
+            ],
+        }
+
+
 class FakeCtx:
     config = type("C", (), {
         "state_dir": "/tmp/opencas",
@@ -528,6 +809,8 @@ class FakeCtx:
     daydream_store = FakeDaydreamStore()
     conflict_store = FakeConflictStore()
     work_store = FakeWorkStore()
+    shadow_registry = FakeShadowRegistry()
+    affective_examinations = FakeAffectiveExaminationStore()
     llm = type("L", (), {"manager": type("M", (), {"_config": None})()})()
     sandbox = type("S", (), {"allowed_roots": [], "report_isolation": lambda self: {"mode": "workspace-only", "container_detected": False, "allowed_roots": [], "fallback": True}})()
 
@@ -618,10 +901,10 @@ class FakeRuntime:
             "enabled": True,
             "public_base_url": "https://opencas.example.com",
             "webhook_signature_required": True,
-            "twilio_from_number": "+15557654321",
+            "twilio_from_number": "+14846736227",
             "owner": {
-                "display_name": "Operator",
-                "phone_number": "+15551234567",
+                "display_name": "Cabew",
+                "phone_number": "+17203340532",
                 "workspace_subdir": "phone/owner",
                 "configured": True,
             },
@@ -641,6 +924,99 @@ class FakeRuntime:
                 "gather": "https://opencas.example.com/api/phone/twilio/gather",
             },
             "contact_count": 1,
+            "menu_config_source": {
+                "path": "operator_seed/phone/menu.json",
+                "editable_path": "/tmp/state/phone/dashboard_menu.json",
+                "using_override": False,
+            },
+            "menu_config": {
+                "default_menu_key": "public_main",
+                "owner_menu_key": "owner_entry",
+                "owner_pin_prompt": "Enter owner pin.",
+                "owner_pin_retry_prompt": "Retry pin.",
+                "owner_pin_success_message": "Verified.",
+                "owner_pin_failure_message": "Denied.",
+                "menus": [
+                    {
+                        "key": "owner_entry",
+                        "prompt": "Press 1 for the owner.",
+                        "reprompt": "Press 1 to continue.",
+                        "options": [
+                            {"key": "owner_continue", "digit": "1", "action": "owner_conversation", "label": "Continue as owner"},
+                            {"key": "owner_main_menu", "digit": "2", "action": "submenu", "label": "Main menu", "target_menu": "public_main"},
+                        ],
+                    },
+                    {
+                        "key": "public_main",
+                        "prompt": "Potential employers, press 1.",
+                        "reprompt": "Please press 1 for employer mode.",
+                        "options": [
+                            {"key": "employer", "digit": "1", "action": "workspace_assistant", "label": "Potential employer"},
+                            {"key": "reject", "digit": "2", "action": "say_then_hangup", "label": "Not for this line"},
+                        ],
+                    },
+                ],
+            },
+            "recent_calls": [
+                {
+                    "call_sid": "CA123",
+                    "caller_number": "+15550001111",
+                    "mode": "workspace_assistant",
+                    "last_at": "2026-04-17T12:00:00+00:00",
+                    "last_event": "phone_stream_closed",
+                    "last_summary": "twilio_stop",
+                    "event_count": 4,
+                    "issue_count": 0,
+                    "hangup_reason": "twilio_stop",
+                }
+            ],
+            "recent_events": [
+                {
+                    "timestamp": "2026-04-17T12:00:00+00:00",
+                    "event": "phone_stream_closed",
+                    "label": "stream closed",
+                    "summary": "twilio_stop",
+                    "call_sid": "CA123",
+                    "caller_number": "+15550001111",
+                    "mode": "workspace_assistant",
+                }
+            ],
+            "session_profiles": {
+                "owner_entry": {
+                    "prompt": "Press 1 for the owner.",
+                    "reprompt": "Press 1 to continue.",
+                    "continue_digit": "1",
+                    "fallback_digit": "2",
+                },
+                "public_main": {
+                    "prompt": "Potential employers, press 1.",
+                    "reprompt": "Please press 1 for employer mode.",
+                },
+                "owner_pin": {
+                    "prompt": "Enter owner pin.",
+                    "retry_prompt": "Retry pin.",
+                    "success_message": "Verified.",
+                    "failure_message": "Denied.",
+                },
+                "employer": {
+                    "enabled": True,
+                    "digit": "1",
+                    "label": "Potential employer",
+                    "phrases": ["employer", "hiring"],
+                    "greeting": "Employer greeting.",
+                    "prompt_profile": "worksafe_owner",
+                    "allowed_actions": ["leave_message", "knowledge_qa"],
+                    "shared_workspace_subdir": "phone/employer_shared",
+                    "caller_workspace_subdir": "phone/employers/{phone_digits}",
+                },
+                "reject": {
+                    "enabled": True,
+                    "digit": "2",
+                    "label": "Not for this line",
+                    "phrases": ["other"],
+                    "message": "Sorry, this service is not for you.",
+                },
+            },
         }
 
     async def configure_phone(self, _settings):
@@ -652,21 +1028,74 @@ class FakeRuntime:
         status = await self.phone_status()
         status["saved"] = True
         status["autoconfigured"] = True
-        status["selected_number"] = {"sid": "PN123", "phone_number": "+15557654321"}
-        status["twilio_number_candidates"] = [{"sid": "PN123", "phone_number": "+15557654321"}]
+        status["selected_number"] = {"sid": "PN123", "phone_number": "+14846736227"}
+        status["twilio_number_candidates"] = [{"sid": "PN123", "phone_number": "+14846736227"}]
         status["webhook_update"] = {
             "voice_url": "https://opencas.example.com/api/phone/twilio/voice",
             "voice_method": "POST",
         }
         return status
 
+    async def configure_phone_session_profiles(self, _payload):
+        status = await self.phone_status()
+        status["saved"] = True
+        status["session_profiles_saved"] = True
+        return status
+
+    async def configure_phone_menu_config(self, payload):
+        status = await self.phone_status()
+        status["saved"] = True
+        status["menu_config_saved"] = True
+        status["menu_config"] = payload
+        return status
+
+    async def recent_phone_calls(self, *, limit=10):
+        status = await self.phone_status()
+        return {
+            "calls": list((status.get("recent_calls") or []))[:limit],
+            "events": status.get("recent_events") or [],
+        }
+
+    async def phone_call_detail(self, call_sid):
+        status = await self.phone_status()
+        call = next((item for item in status.get("recent_calls") or [] if item.get("call_sid") == call_sid), None)
+        if call is None:
+            return {"found": False, "call_sid": call_sid, "events": [], "phase_durations": {}}
+        return {
+            "found": True,
+            "call_sid": call_sid,
+            "call": call,
+            "phase_durations": {
+                "time_to_transcription_seconds": 1.25,
+                "workspace_reply_seconds": 2.75,
+                "time_to_first_tts_seconds": 3.0,
+                "total_call_seconds": 8.4,
+            },
+            "events": [
+                {
+                    "timestamp": "2026-04-17T11:59:58+00:00",
+                    "event": "phone_stream_started",
+                    "label": "stream started",
+                    "summary": "",
+                    "payload": {"call_sid": call_sid},
+                },
+                {
+                    "timestamp": "2026-04-17T12:00:00+00:00",
+                    "event": "phone_stream_closed",
+                    "label": "stream closed",
+                    "summary": "twilio_stop",
+                    "payload": {"call_sid": call_sid, "reason": "twilio_stop"},
+                },
+            ],
+        }
+
     async def call_owner_via_phone(self, *, message="", reason=""):
         return {
             "ok": True,
             "call_sid": "CA123",
             "status": "queued",
-            "to": "+15551234567",
-            "from": "+15557654321",
+            "to": "+17203340532",
+            "from": "+14846736227",
             "message": message,
             "reason": reason,
         }
@@ -679,6 +1108,20 @@ class FakeRuntime:
                 "queued_work_count": 2,
                 "capacity_remaining": 3,
                 "recommend_pause": False,
+                "queue": {
+                    "counts": {
+                        "total": 2,
+                        "active": 1,
+                        "held": 1,
+                        "ready": 1,
+                        "queued": 1,
+                        "waiting": 0,
+                    },
+                    "items": [
+                        {"work_id": "work-1", "state": "active", "bearing": "ready"},
+                        {"work_id": "work-2", "state": "held", "bearing": "queued"},
+                    ],
+                },
             },
             "work": {
                 "counts": {"total": 2, "ready": 1, "blocked": 1},
@@ -897,6 +1340,7 @@ class FakeGatewayManager:
         return [
             {"id": "anthropic/claude-sonnet-4-6"},
             {"id": "google/gemini-embedding-2-preview"},
+            {"id": "google/embeddinggemma-300m"},
         ]
 
     def resolve(self, model_ref):
@@ -1144,7 +1588,8 @@ def test_chat_sessions_endpoint():
     assert resp.status_code in (200, 500)
 
 
-def test_chat_context_summary_surfaces_active_lane():
+@pytest.mark.asyncio
+async def test_chat_context_summary_surfaces_active_lane():
     runtime = FakeRuntime()
     runtime.ctx.llm = type(
         "L",
@@ -1156,8 +1601,9 @@ def test_chat_context_summary_surfaces_active_lane():
         },
     )()
     app = create_app(runtime)
-    client = TestClient(app)
-    resp = client.get("/api/chat/context-summary")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/chat/context-summary")
     assert resp.status_code == 200
     data = resp.json()
     assert data["lane"]["model"] == "kimi-coding/k2p5"
@@ -1165,6 +1611,36 @@ def test_chat_context_summary_surfaces_active_lane():
     assert data["lane"]["resolved_model"] == "kimi-coding/k2p5"
     assert data["lane"]["reasoning_supported"] is True
     assert data["lane"]["reasoning_effort"] == "medium"
+
+
+@pytest.mark.asyncio
+async def test_chat_context_summary_separates_configured_lane_from_last_lane():
+    runtime = FakeRuntime()
+    runtime.ctx.llm = type(
+        "L",
+        (),
+        {
+            "manager": FakeGatewayManager(),
+            "default_model": "kimi-coding/k2p5",
+            "current_lane_meta": lambda self: {
+                "model": "codex-cli/gpt-5.4-mini",
+                "provider": "codex-cli",
+                "resolved_model": "codex-cli/gpt-5.4-mini",
+                "complexity": "high",
+                "reasoning_supported": True,
+                "reasoning_effort": "medium",
+            },
+            "resolve_reasoning_effort_for_complexity": lambda self, complexity=None: "medium",
+        },
+    )()
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/chat/context-summary")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["lane"]["model"] == "kimi-coding/k2p5"
+    assert data["last_lane"]["model"] == "codex-cli/gpt-5.4-mini"
 
 
 def test_runtime_status_endpoint():
@@ -1178,10 +1654,12 @@ def test_runtime_status_endpoint():
     assert data["execution"]["browser"]["total_count"] == 0
 
 
-def test_dashboard_contains_operations_surface():
+@pytest.mark.asyncio
+async def test_dashboard_contains_operations_surface():
     app = create_app(FakeRuntime())
-    client = TestClient(app)
-    resp = client.get("/dashboard")
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/dashboard")
     assert resp.status_code == 200
     body = resp.text
     assert "Operations" in body
@@ -1192,6 +1670,7 @@ def test_dashboard_contains_operations_surface():
     assert "Light reasoning" in body
     assert "Apply Routing" in body
     assert "Daydream" in body
+    assert "Task Beacon" in body
     assert "/api/operations/sessions" in body
     assert "/api/operations/qualification" in body
     assert "/api/operations/validation-runs?limit=10" in body
@@ -1215,7 +1694,17 @@ def test_dashboard_contains_operations_surface():
     assert "/api/telegram/status" in body
     assert "Telegram Channel" in body or "telegram-status" in body
     assert "/api/phone/status" in body
-    assert "Phone Bridge" in body or "phone-status" in body
+    assert "the OpenCAS agent Phone Bridge" in body or "phone-status" in body
+    assert "/api/monitor/shadow-registry" in body
+    assert "Shadow Registry" in body
+    assert "/api/monitor/shadow-registry/cluster?fingerprint=" in body
+    assert "Shadow Explorer" in body
+    assert "/api/monitor/meaningful-loop" in body
+    assert "Meaningful Loop" in body
+    assert "/api/monitor/affective-examinations" in body
+    assert "Affective Examinations" in body
+    assert "dashboard/static/js/task_beacon.js" in body
+    assert "/api/monitor/task-beacon" in body
     assert "/api/daydream/summary" in body
     assert "/api/daydream/reflections" in body
     assert "/api/daydream/conflicts" in body
@@ -1225,7 +1714,21 @@ def test_dashboard_contains_operations_surface():
     assert "m.meta?.lane?.resolved_model" in body
     assert "m.meta?.lane?.reasoning_supported" in body
     assert "reasoning ${escapeHtml(lane.reasoning_effort || 'provider default')}" in body
+    assert "Queue states" in body
     assert "legacy / unlabeled" in body
+
+
+@pytest.mark.asyncio
+async def test_dashboard_supports_opencas_prefix_mount():
+    app = create_app(FakeRuntime())
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        page = await client.get("/opencas/")
+
+    assert page.status_code == 200
+    assert 'href="dashboard/static/favicon.svg"' in page.text
+    assert 'src="dashboard/static/js/http_helpers.js"' in page.text
+    assert any(getattr(route, "path", "") == "/opencas/dashboard/static" for route in app.routes)
 
 
 def test_operations_sessions_endpoint_available_from_main_app():
@@ -1305,7 +1808,7 @@ def test_daydream_endpoints_surface_reflections_conflicts_and_promotions():
 def test_usage_overview_endpoint_surfaces_gateway_and_process_data(monkeypatch):
     from opencas.api.routes import usage as usage_routes
 
-    async def fake_gateway_snapshot(window_days, recent_limit):
+    async def fake_gateway_snapshot(runtime, window_days, recent_limit):
         return {
             "available": True,
             "overview": {
@@ -1349,6 +1852,23 @@ def test_usage_overview_endpoint_surfaces_gateway_and_process_data(monkeypatch):
     assert data["process_hygiene"]["duplicate_server_count"] == 1
 
 
+def test_active_gateway_provider_ids_follow_runtime_routing():
+    from opencas.api.routes.usage import _active_gateway_provider_ids
+
+    runtime = FakeRuntime()
+    runtime.ctx.config.default_llm_model = "kimi-coding/k2p5"
+    runtime.ctx.config.embedding_model_id = "google/gemini-embedding-2-preview"
+    runtime.ctx.config.model_routing = ModelRoutingConfig(
+        mode="tiered",
+        standard_model="kimi-coding/k2p5",
+        high_model="kimi-coding/k2p5",
+        extra_high_model="kimi-coding/k2p5",
+    )
+    runtime.ctx.llm = type("L", (), {"default_model": "kimi-coding/k2p5"})()
+
+    assert _active_gateway_provider_ids(runtime) == ["kimi-coding", "google"]
+
+
 def test_telegram_status_and_config_endpoints():
     app = create_app(FakeRuntime())
     client = TestClient(app)
@@ -1377,31 +1897,337 @@ def test_telegram_status_and_config_endpoints():
     assert approve.status_code == 200
 
 
-def test_chat_context_summary_and_task_routes():
-    app = create_app(FakeRuntime())
-    client = TestClient(app)
+@pytest.mark.asyncio
+async def test_chat_context_summary_and_task_routes(tmp_path):
+    runtime = FakeRuntime()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        workspace_root=tmp_path / "repo",
+    ).resolve_paths()
+    runtime.ctx.config.workspace_root.mkdir(parents=True, exist_ok=True)
+    (runtime.ctx.config.workspace_root / "TaskList.md").write_text(
+        "# OpenCAS Task List\n\n"
+        "## In Progress\n\n"
+        "- `TASK-401` Build gate repair\n"
+        "  - owner: Codex\n"
+        "  - status: in progress\n\n"
+        "## Background Context\n\n"
+        "- `TASK-402` Test cleanup\n"
+        "  - owner: Codex\n"
+        "  - status: pending\n\n"
+        "## Next Up / Backlog\n\n"
+        "- `TASK-403` Regression follow-up\n"
+        "  - owner: Codex\n"
+        "  - status: pending\n",
+        encoding="utf-8",
+    )
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        summary = await client.get("/api/chat/context-summary?session_id=s1")
+        assert summary.status_code == 200
+        summary_data = summary.json()
+        assert summary_data["executive"]["intention"] == "Improve the dashboard operator experience"
+        assert summary_data["current_work"]["title"] == "Redesign chat panel layout"
+        assert summary_data["consolidation"]["available"] is True
+        assert summary_data["consolidation"]["commitments_extracted_from_chat"] == 1
+        assert summary_data["tasks"]["counts"]["total"] == 3
+        assert summary_data["task_beacon"]["headline"] == "now 1 • next 1 • later 1"
+        assert summary_data["task_beacon"]["counts"]["now"] == 1
+        assert summary_data["task_beacon"]["counts"]["next"] == 1
+        assert [bucket["state"] for bucket in summary_data["task_beacon"]["view_model"]["buckets"]] == ["now", "next", "later"]
+        assert [bucket["count"] for bucket in summary_data["task_beacon"]["view_model"]["buckets"]] == [1, 1, 1]
+        assert [set(bucket) for bucket in summary_data["task_beacon"]["view_model"]["buckets"]] == [
+            {"state", "count", "item"},
+            {"state", "count", "item"},
+            {"state", "count", "item"},
+        ]
+        assert summary_data["task_beacon"]["view_model"]["buckets"][0]["item"]["task_id"] == "TASK-401"
+        assert summary_data["task_beacon"]["view_model"]["buckets"][1]["item"]["task_id"] == "TASK-403"
+        assert "details" in summary_data["task_beacon"]
+        assert "states" not in summary_data["task_beacon"]
+        assert "summary" not in summary_data["task_beacon"]
+        tasks = await client.get("/api/operations/tasks?limit=10")
+        assert tasks.status_code == 200
+        task_data = tasks.json()
+        assert task_data["counts"]["completed"] == 2
+        assert task_data["counts"]["active"] == 1
+        assert task_data["items"][0]["duplicate_objective_count"] >= 1
 
-    summary = client.get("/api/chat/context-summary?session_id=s1")
+        detail = await client.get("/api/operations/tasks/task-1")
+        assert detail.status_code == 200
+        detail_data = detail.json()
+        assert detail_data["task"]["status"] == "completed"
+        assert detail_data["task"]["source"] == "intervention_launch_background"
+
+
+@pytest.mark.asyncio
+async def test_chat_context_summary_ignores_artifact_stage_for_current_work(tmp_path):
+    class ArtifactFirstRuntime(FakeRuntime):
+        async def workflow_status(self, limit=10, project_id=None):
+            payload = await super().workflow_status(limit=limit, project_id=project_id)
+            payload["work"]["items"] = [
+                {
+                    "work_id": "artifact-1",
+                    "content": "Verify musubi criterion with fresh evidence from an older artifact",
+                    "stage": "artifact",
+                    "project_id": None,
+                    "blocked_by": [],
+                    "meta": {"title": "Verify musubi criterion with fresh evidence"},
+                },
+                {
+                    "work_id": "work-2",
+                    "content": "Repair current-work foreground truth",
+                    "stage": "micro_task",
+                    "project_id": None,
+                    "blocked_by": [],
+                    "meta": {"title": "Repair current-work foreground truth"},
+                },
+            ]
+            return payload
+
+    runtime = ArtifactFirstRuntime()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        workspace_root=tmp_path / "repo",
+    ).resolve_paths()
+    runtime.ctx.config.workspace_root.mkdir(parents=True, exist_ok=True)
+    (runtime.ctx.config.workspace_root / "TaskList.md").write_text("# OpenCAS Task List\n\n", encoding="utf-8")
+
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        summary = await client.get("/api/chat/context-summary?session_id=s1")
+
     assert summary.status_code == 200
     summary_data = summary.json()
-    assert summary_data["executive"]["intention"] == "Improve the dashboard operator experience"
-    assert summary_data["current_work"]["title"] == "Redesign chat panel layout"
-    assert summary_data["consolidation"]["available"] is True
-    assert summary_data["consolidation"]["commitments_extracted_from_chat"] == 1
-    assert summary_data["tasks"]["counts"]["total"] == 3
+    assert summary_data["current_work"]["work_id"] == "work-2"
+    assert summary_data["current_work"]["title"] == "Repair current-work foreground truth"
+    assert summary_data["current_work"]["stage"] == "micro_task"
 
-    tasks = client.get("/api/operations/tasks?limit=10")
-    assert tasks.status_code == 200
-    task_data = tasks.json()
-    assert task_data["counts"]["completed"] == 2
-    assert task_data["counts"]["active"] == 1
-    assert task_data["items"][0]["duplicate_objective_count"] >= 1
 
-    detail = client.get("/api/operations/tasks/task-1")
-    assert detail.status_code == 200
-    detail_data = detail.json()
-    assert detail_data["task"]["status"] == "completed"
-    assert detail_data["task"]["source"] == "intervention_launch_background"
+@pytest.mark.asyncio
+async def test_chat_context_summary_uses_active_queue_when_work_store_is_artifact_only(tmp_path):
+    class ActiveQueueRuntime(FakeRuntime):
+        async def workflow_status(self, limit=10, project_id=None):
+            payload = await super().workflow_status(limit=limit, project_id=project_id)
+            payload["executive"]["intention"] = "Stale anchored dashboard intention"
+            payload["executive"]["queue"]["items"] = [
+                {
+                    "work_id": "queue-work-1",
+                    "title": "Repair foreground truth from active queue",
+                    "stage": "micro_task",
+                    "state": "active",
+                    "bearing": "ready",
+                    "is_active": True,
+                    "project_id": "proj-queue",
+                    "blocked_by": [],
+                }
+            ]
+            payload["work"]["items"] = [
+                {
+                    "work_id": "artifact-1",
+                    "content": "Historical artifact should not own foreground truth",
+                    "stage": "artifact",
+                    "project_id": None,
+                    "blocked_by": [],
+                    "meta": {"title": "Historical artifact should not own foreground truth"},
+                }
+            ]
+            return payload
+
+    runtime = ActiveQueueRuntime()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        workspace_root=tmp_path / "repo",
+    ).resolve_paths()
+    runtime.ctx.config.workspace_root.mkdir(parents=True, exist_ok=True)
+    (runtime.ctx.config.workspace_root / "TaskList.md").write_text("# OpenCAS Task List\n\n", encoding="utf-8")
+
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        summary = await client.get("/api/chat/context-summary?session_id=s1")
+
+    assert summary.status_code == 200
+    summary_data = summary.json()
+    assert summary_data["current_work"]["work_id"] == "queue-work-1"
+    assert summary_data["current_work"]["title"] == "Repair foreground truth from active queue"
+    assert summary_data["executive"]["intention"] == "Repair foreground truth from active queue"
+    assert summary_data["executive"]["intention_source"] == "active_queue"
+
+
+@pytest.mark.asyncio
+async def test_chat_context_summary_returns_no_current_work_for_artifact_only_workflow(tmp_path):
+    class ArtifactOnlyRuntime(FakeRuntime):
+        async def workflow_status(self, limit=10, project_id=None):
+            payload = await super().workflow_status(limit=limit, project_id=project_id)
+            payload["executive"]["queue"]["items"] = []
+            payload["work"]["items"] = [
+                {
+                    "work_id": "artifact-1",
+                    "content": "Completed artifact should not masquerade as current work",
+                    "stage": "artifact",
+                    "project_id": None,
+                    "blocked_by": [],
+                    "meta": {"title": "Completed artifact should not masquerade as current work"},
+                }
+            ]
+            return payload
+
+    runtime = ArtifactOnlyRuntime()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        workspace_root=tmp_path / "repo",
+    ).resolve_paths()
+    runtime.ctx.config.workspace_root.mkdir(parents=True, exist_ok=True)
+    (runtime.ctx.config.workspace_root / "TaskList.md").write_text("# OpenCAS Task List\n\n", encoding="utf-8")
+
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        summary = await client.get("/api/chat/context-summary?session_id=s1")
+
+    assert summary.status_code == 200
+    assert summary.json()["current_work"] is None
+
+
+@pytest.mark.asyncio
+async def test_chat_context_summary_clears_completed_tasklist_intention_without_foreground(tmp_path):
+    class CompletedTasklistRuntime(FakeRuntime):
+        async def workflow_status(self, limit=10, project_id=None):
+            payload = await super().workflow_status(limit=limit, project_id=project_id)
+            payload["executive"]["intention"] = "Finished diagnostic repair"
+            payload["executive"]["queue"]["items"] = []
+            payload["work"]["items"] = [
+                {
+                    "work_id": "artifact-1",
+                    "content": "Completed artifact should not keep an active intention alive",
+                    "stage": "artifact",
+                    "project_id": None,
+                    "blocked_by": [],
+                    "meta": {"title": "Completed artifact should not keep an active intention alive"},
+                }
+            ]
+            return payload
+
+    runtime = CompletedTasklistRuntime()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        workspace_root=tmp_path / "repo",
+    ).resolve_paths()
+    runtime.ctx.config.workspace_root.mkdir(parents=True, exist_ok=True)
+    (runtime.ctx.config.workspace_root / "TaskList.md").write_text(
+        "# OpenCAS Task List\n\n"
+        "## In Progress\n\n"
+        "## Recently Completed\n\n"
+        "- `TASK-499` Finished diagnostic repair\n"
+        "  - owner: Codex\n"
+        "  - status: completed\n",
+        encoding="utf-8",
+    )
+
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        summary = await client.get("/api/chat/context-summary?session_id=s1")
+
+    assert summary.status_code == 200
+    summary_data = summary.json()
+    assert summary_data["current_work"] is None
+    assert summary_data["executive"]["intention"] is None
+    assert summary_data["executive"]["intention_source"] == "stale_tasklist_completed"
+
+
+@pytest.mark.asyncio
+async def test_monitor_task_beacon_endpoint_returns_quiet_public_payload(tmp_path):
+    runtime = FakeRuntime()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        workspace_root=tmp_path / "repo",
+    ).resolve_paths()
+    runtime.ctx.config.workspace_root.mkdir(parents=True, exist_ok=True)
+    (runtime.ctx.config.workspace_root / "TaskList.md").write_text(
+        Path(__file__).with_name("fixtures").joinpath("task_beacon_blocker_first.md").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/monitor/task-beacon")
+        assert response.status_code == 200
+        beacon = response.json()
+        assert beacon["available"] is True
+        assert beacon["matched_only"] is True
+        assert beacon["headline"] == "now 1 • next 2 • later 1"
+        assert beacon["counts"] == {"matched": 4, "now": 1, "next": 2, "later": 1, "total": 4}
+        assert [bucket["state"] for bucket in beacon["view_model"]["buckets"]] == ["now", "next", "later"]
+        assert [bucket["count"] for bucket in beacon["view_model"]["buckets"]] == [1, 2, 1]
+        assert [set(bucket) for bucket in beacon["view_model"]["buckets"]] == [
+            {"state", "count", "item"},
+            {"state", "count", "item"},
+            {"state", "count", "item"},
+        ]
+        assert [bucket["item"]["task_id"] for bucket in beacon["view_model"]["buckets"]] == [
+            "TASK-802",
+            "TASK-801",
+            "TASK-804",
+        ]
+        assert "details" not in beacon
+        assert "states" not in beacon
+        assert "summary" not in beacon
+
+
+@pytest.mark.asyncio
+async def test_identity_tom_endpoint_surfaces_belief_and_intention_counts():
+    from opencas.tom import Belief, BeliefSubject, Intention, IntentionStatus, MetacognitiveResult
+
+    class FakeTom:
+        def __init__(self):
+            self._beliefs = [
+                Belief(subject=BeliefSubject.USER, predicate="prefers patient testing", confidence=0.9),
+                Belief(subject=BeliefSubject.SELF, predicate="is repairing pressure surfaces", confidence=0.8),
+            ]
+            self._intentions = [
+                Intention(actor=BeliefSubject.SELF, content="complete pr-120", status=IntentionStatus.ACTIVE),
+            ]
+
+        def list_beliefs(self, subject=None, predicate=None):
+            items = self._beliefs
+            if subject is not None:
+                items = [item for item in items if item.subject == subject]
+            return items
+
+        def list_intentions(self, actor=None, status=None):
+            items = self._intentions
+            if actor is not None:
+                items = [item for item in items if item.actor == actor]
+            if status is not None:
+                items = [item for item in items if item.status == status]
+            return items
+
+        def check_consistency(self):
+            return MetacognitiveResult(
+                belief_count=len(self._beliefs),
+                intention_count=len(self._intentions),
+            )
+
+    runtime = FakeRuntime()
+    runtime.tom = FakeTom()
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/identity/tom")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["available"] is True
+    assert data["belief_counts"]["by_subject"] == {"self": 1, "user": 1}
+    assert data["intention_counts"]["by_status"] == {"active": 1}
+    assert data["intention_counts"]["active"] == 1
+    assert data["recent_intentions"][0]["content"] == "complete pr-120"
+    assert data["consistency"]["belief_count"] == 2
+    assert data["consistency"]["intention_count"] == 1
 
 
 def test_memory_projection_handles_mixed_embedding_dimensions():
@@ -1424,7 +2250,131 @@ def test_memory_projection_handles_mixed_embedding_dimensions():
     assert len(data["groups"]) >= 2
 
 
-def test_config_overview_endpoint_surfaces_models_profiles_and_material(tmp_path):
+def test_monitor_embeddings_endpoint_surfaces_recent_records():
+    runtime = FakeRuntime()
+    runtime.ctx.embeddings = FakeEmbeddings()
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get("/api/monitor/embeddings")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["total_records"] == 42
+    assert data["model_id"] == "google/gemini-embedding-2-preview"
+    assert len(data["recent_records"]) == 2
+    assert data["recent_records"][0]["task_type"] == "memory_episode"
+    assert data["recent_records"][0]["source"] == "episode:ep-123"
+    assert "the OpenCAS agent summarized the latest dashboard continuity probe" in data["recent_records"][0]["preview"]
+    assert data["recent_records"][1]["degraded"] is True
+
+
+def test_monitor_shadow_registry_endpoint_surfaces_cluster_summary():
+    runtime = FakeRuntime()
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get("/api/monitor/shadow-registry")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["available"] is True
+    assert data["total_entries"] == 3
+    assert data["active_clusters"] == 1
+    assert data["dismissed_clusters"] == 1
+    assert data["reason_counts"]["retry_blocked"] == 2
+    assert data["recent_entries"][0]["tool_name"] == "repair_retry"
+    assert data["top_clusters"][0]["count"] == 2
+    assert data["top_clusters"][0]["triage_status"] == "active"
+
+
+def test_monitor_shadow_registry_cluster_endpoint_surfaces_raw_entries():
+    runtime = FakeRuntime()
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get("/api/monitor/shadow-registry/cluster", params={"fingerprint": "cluster-chronicle"})
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["available"] is True
+    assert data["fingerprint"] == "cluster-chronicle"
+    assert data["count"] == 2
+    assert data["triage_status"] == "active"
+    assert len(data["entries"]) == 2
+    assert data["entries"][0]["tool_name"] == "repair_retry"
+
+
+def test_monitor_shadow_registry_cluster_triage_endpoint_updates_cluster_state():
+    runtime = FakeRuntime()
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/monitor/shadow-registry/cluster/triage",
+        json={
+            "fingerprint": "cluster-chronicle",
+            "annotation": "Known issue; suppress from main list.",
+            "dismissed": True,
+        },
+    )
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["available"] is True
+    assert data["fingerprint"] == "cluster-chronicle"
+    assert data["triage_status"] == "dismissed"
+    assert data["annotation"] == "Known issue; suppress from main list."
+
+
+@pytest.mark.asyncio
+async def test_monitor_meaningful_loop_endpoint_surfaces_output_contract_state():
+    runtime = FakeRuntime()
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/monitor/meaningful-loop")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["available"] is True
+    assert data["stop_counts"]["completion"] == 2
+    assert data["stop_counts"]["retry_governor"] >= 1
+    assert data["stop_counts"]["progress_gate"] >= 1
+    assert data["stop_counts"]["affective_pressure"] >= 1
+    assert data["latest_artifact"]["path"] == "workspace/notes/relational-docs.md"
+    assert data["latest_blocker"]["cause"] in {"progress_gate", "retry_governor", "affective_pressure"}
+    assert "repeated tool pressure" in data["affective_pressures"][0]["bounded_reason"]
+    assert any(item["latest_meaningful_signal"] == "artifact" for item in data["recent_tasks"])
+    assert any(item["loop_stop_cause"] == "retry_governor" for item in data["recent_tasks"])
+
+
+def test_monitor_affective_examinations_endpoint_filters_recent_records():
+    runtime = FakeRuntime()
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get(
+        "/api/monitor/affective-examinations",
+        params={
+            "limit": 10,
+            "session_id": "default",
+            "source_type": "tool_result",
+            "emotion": "concerned",
+            "action_pressure": "ask_clarifying_question",
+            "consumed_by": "none",
+            "decay_state": "active",
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["available"] is True
+    assert data["count"] == 1
+    assert data["counts"]["unconsumed"] == 1
+    assert data["items"][0]["source_type"] == "tool_result"
+    assert data["items"][0]["primary_emotion"] == "concerned"
+    assert data["items"][0]["action_pressure"] == "ask_clarifying_question"
+    assert data["items"][0]["decay_state"] == "active"
+
+
+@pytest.mark.asyncio
+async def test_config_overview_endpoint_surfaces_models_profiles_and_material(tmp_path):
     state_dir = tmp_path / "state"
     provider_material = state_dir / "provider_material"
     provider_material.mkdir(parents=True)
@@ -1432,7 +2382,7 @@ def test_config_overview_endpoint_surfaces_models_profiles_and_material(tmp_path
     (provider_material / ".env").write_text("GOOGLE_API_KEY=test-key\nOPENAI_API_KEY=test-key\n", encoding="utf-8")
     runtime = FakeRuntime()
     runtime.ctx.llm = type("L", (), {"manager": FakeGatewayManager(), "default_model": "anthropic/claude-sonnet-4-6"})()
-    runtime.ctx.embeddings = type("E", (), {"model_id": "google/gemini-embedding-2-preview"})()
+    runtime.ctx.embeddings = type("E", (), {"model_id": "google/embeddinggemma-300m"})()
     runtime.ctx.config = type(
         "Config",
         (),
@@ -1460,24 +2410,21 @@ def test_config_overview_endpoint_surfaces_models_profiles_and_material(tmp_path
             "model_dump": lambda self, **kw: {"state_dir": str(state_dir)},
         },
     )()
-    app = create_app(runtime)
-    client = TestClient(app)
-    resp = client.get("/api/config/overview")
-    assert resp.status_code == 200
-    data = resp.json()["overview"]
+    data = await build_config_overview_payload(runtime)
     assert data["config_mode"] == "copied-local"
     assert "anthropic/claude-sonnet-4-6" in data["available_models"]
     assert data["auth_profiles"][0]["profile_id"] == "anthropic-main"
     assert data["providers"][0]["provider_id"] == "anthropic"
     assert data["current"]["default_llm_model"] == "anthropic/claude-sonnet-4-6"
-    assert data["current"]["embedding_model_id"] == "google/gemini-embedding-2-preview"
+    assert data["current"]["embedding_model_id"] == "google/embeddinggemma-300m"
+    assert "google/embeddinggemma-300m" in data["available_embedding_models"]
+    assert "google/gemini-embedding-2-preview" not in data["available_embedding_models"]
     assert data["current"]["model_routing"]["mode"] == "tiered"
     assert data["current"]["model_routing"]["effective_reasoning"]["high"] == "high"
     assert "claude-sonnet-4-6" in data["providers"][0]["effective_model_ids"]
     assert data["credential_copy"]["profile_ids"] == ["anthropic-main"]
     assert data["materialized_bundle"]["config_exists"] is True
     assert data["materialized_bundle"]["env_key_count"] == 2
-    assert any(item["family_id"] == "openai" for item in data["provider_setup_catalog"])
 
 
 def test_model_routing_update_persists_runtime_and_gateway_state(tmp_path):

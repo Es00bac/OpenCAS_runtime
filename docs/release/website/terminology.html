@@ -1,0 +1,277 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCAS Key Terminology</title>
+  <meta name="description" content="Definitions for the vocabulary used throughout OpenCAS: memory, autonomy, scheduling, channels, platform trust, and the operator dashboard.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="media-player.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-shell">
+      <a class="brand" href="index.html">
+        <span class="brand-mark mono">O</span>
+        <span>OpenCAS Release</span>
+      </a>
+      <nav class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="installation.html">Installation</a>
+        <a href="usage.html">Usage</a>
+        <a href="features.html">Features</a>
+        <a href="terminology.html" aria-current="page">Terminology</a>
+        <a href="import.html">Import</a>
+        <a href="api/">API</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="site-shell">
+    <section class="page-hero">
+      <span class="eyebrow">Reference</span>
+      <h1>Key terminology.</h1>
+      <p class="section-lead">Definitions for the vocabulary used throughout OpenCAS docs, source code, and the operator dashboard. Terms are grouped by subsystem.</p>
+    </section>
+
+    <div class="content-stack">
+      <section class="page-card">
+        <h2>Core concepts</h2>
+        <dl class="term-list">
+          <dt>Agent</dt>
+          <dd>The running OpenCAS process. It holds a persistent identity, memory, and autonomous background activity. Unlike a stateless chatbot, the agent continues operating between conversations: daydreaming, consolidating memory, and executing queued work.</dd>
+          <dt>Bootstrap / BootstrapContext</dt>
+          <dd>The startup sequence that initializes every subsystem in order and assembles a <code>BootstrapContext</code> object containing all wired managers. Nothing runs until bootstrap completes. The <code>ready</code> readiness state is emitted at the end of bootstrap.</dd>
+          <dt>Operator</dt>
+          <dd>The human (or system) that owns and configures the agent. The operator accesses the agent through the dashboard, API, or CLI. In single-user deployments the operator and the conversational user are typically the same person.</dd>
+          <dt>State directory</dt>
+          <dd>The local directory where all persistent state is stored. Defaults to <code>./.opencas</code>. Contains SQLite databases, telemetry JSONL files, provider material, and identity snapshots. Moving or backing up this directory is how you migrate an agent between machines.</dd>
+          <dt>Provider material</dt>
+          <dd>Credentials and routing configuration for external model providers, managed by <code>open_llm_auth</code>. Stored under <code>state_dir/provider_material/</code> as a <code>config.json</code> and a <code>.env</code>. The TUI bootstrap wizard copies these from an existing <code>open_llm_auth</code> installation.</dd>
+          <dt>Readiness state</dt>
+          <dd>A state machine (<code>booting → ready / degraded</code>) that tracks whether the agent is fully initialized. Exposed at <code>/readiness</code> with the current state, entry timestamp, and transition history.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Memory</h2>
+        <dl class="term-list">
+          <dt>Episode</dt>
+          <dd>A single turn or event stored in memory. Episodes carry content, a source tag, timestamp, embedding, and optional tags. They are the atomic unit of memory and the primary input to retrieval.</dd>
+          <dt>Distilled memory</dt>
+          <dd>A higher-level memory object created by consolidating related episodes into a durable, semantically stable entry. Distilled memories have their own embeddings and edge links and survive compaction.</dd>
+          <dt>Memory edge</dt>
+          <dd>A weighted directed link between two memory objects. Edges are built by the consolidation engine and decayed over time. High-confidence edges surface related memories during retrieval without requiring a direct text match.</dd>
+          <dt>Consolidation</dt>
+          <dd>The periodic background process that reweights memory edges, promotes high-signal episodes to distilled memories, rebuilds autobiographical continuity, and prunes weak links. Managed by <code>NightlyConsolidationEngine</code>.</dd>
+          <dt>Compaction</dt>
+          <dd>Reducing the active context window by summarizing older conversation turns into a synthetic system message. Prevents unbounded context growth while preserving continuity. Managed by <code>ConversationCompactor</code>.</dd>
+          <dt>Retrieval fusion</dt>
+          <dd>Combining multiple retrieval signals — semantic vector similarity, keyword match, recency, graph edges, salience, emotional resonance, temporal echo, and reliability — into a single ranked result list using Reciprocal Rank Fusion (RRF). This is how the agent selects relevant memories for each conversation turn.</dd>
+          <dt>Embedding</dt>
+          <dd>A dense vector representation of a piece of text, used for semantic similarity search. OpenCAS uses <code>google/embeddinggemma-300m</code> as the active default and stores native 768-dimensional vectors for that lane. Degraded fallback vectors are marked when generated locally.</dd>
+          <dt>Embedding backfill</dt>
+          <dd>A startup background task that computes embeddings for any memory records that were stored without one, for example during offline operation or before the embedding model was configured.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Identity</h2>
+        <dl class="term-list">
+          <dt>Self-model</dt>
+          <dd>The agent's structured representation of itself: name, persona, values, traits, goals, narrative, and current somatic and relational state. Persisted across restarts and updated by identity recording, ToM belief sync, and nightly consolidation.</dd>
+          <dt>User model</dt>
+          <dd>The agent's representation of the operator or user: name, bio, known preferences, and recent interaction history. Updated on each conversational turn.</dd>
+          <dt>Continuity</dt>
+          <dd>The identity record that tracks boot count, session IDs, and a recent-activity log. Gives the agent a minimal autobiographical timeline that survives restarts.</dd>
+          <dt>Self-knowledge registry</dt>
+          <dd>A versioned JSONL file of structured self-beliefs keyed by <code>domain</code> and <code>key</code> (for example <code>domain="capability"</code>, <code>key="code_writing"</code>). High-confidence ToM beliefs about the self are mirrored here automatically.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Somatic state</h2>
+        <dl class="term-list">
+          <dt>Somatic state</dt>
+          <dd>A set of physiological-analogue dimensions — <code>arousal</code>, <code>fatigue</code>, <code>tension</code>, <code>valence</code> — that modulate how the agent behaves. These are not cosmetic. They directly influence LLM temperature, prompt style, memory salience, and whether the agent recommends pausing background work.</dd>
+          <dt>Somatic modulators</dt>
+          <dd>Derived signals from the live somatic state. <code>to_temperature()</code> adjusts LLM sampling heat. <code>to_prompt_style_note()</code> injects a behavioral directive into the system prompt. <code>to_memory_retrieval_boost()</code> emotionally tunes memory ranking toward affectively aligned content.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Relational state (musubi)</h2>
+        <dl class="term-list">
+          <dt>Musubi</dt>
+          <dd>The composite relational score derived from four dimensions: <code>trust</code>, <code>resonance</code>, <code>presence</code>, and <code>attunement</code>. Named after the Japanese concept of generative connection. A higher musubi score loosens self-approval thresholds, boosts creative-ladder promotion, and increases memory salience for relational content.</dd>
+          <dt>Relational engine</dt>
+          <dd>The subsystem (<code>RelationalEngine</code>) that tracks the four musubi dimensions and exposes modifiers for memory retrieval, creative ladder promotion, and self-approval risk. Updated as the agent and operator interact over time.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Autonomy</h2>
+        <dl class="term-list">
+          <dt>Self-approval ladder</dt>
+          <dd>A risk-tiered evaluation system that decides whether the agent can proceed with an action without operator intervention. Tiers range from low-risk (auto-approved) to high-risk (escalated or blocked). Every evaluation is recorded to the durable approval ledger.</dd>
+          <dt>Creative ladder</dt>
+          <dd>A seven-stage promotion system for internal creative work: <code>spark → note → artifact → micro_task → project_seed → project → durable_work_stream</code>. Work objects are promoted based on intrinsic value signals and relational boost. Demotion also occurs when value signals are weak.</dd>
+          <dt>Work object</dt>
+          <dd>A unit of autonomous work tracked through the creative ladder. Has a stage, content, value signal, and optional plan and commitment links.</dd>
+          <dt>Executive state</dt>
+          <dd>The agent's current intention, active goals, and capacity-limited task queue. Tracks whether the agent should pause background work (based on somatic fatigue) and manages goal persistence across restarts.</dd>
+          <dt>Daydream</dt>
+          <dd>A background creative process that generates sparks from memory and somatic tension during idle periods. High-value daydreams ("keeper daydreams") are persisted to durable memory with embeddings and can seed new work objects.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Execution</h2>
+        <dl class="term-list">
+          <dt>BAA (Bounded Assistant Agent)</dt>
+          <dd>The background execution engine. Accepts <code>RepairTask</code> objects, queues them, and executes them with concurrency limits and lane routing. Supports retry, recovery, and failure-rate throttling. BAA tasks come from scheduled items, harness objectives, and operator-submitted work.</dd>
+          <dt>RepairTask</dt>
+          <dd>The unit of work submitted to the BAA. Has an objective, optional commitment and project links, stage history, and metadata. Progresses through <code>PENDING → RUNNING → SUCCEEDED / FAILED / RECOVERING</code>.</dd>
+          <dt>Repair Executor</dt>
+          <dd>Executes a <code>RepairTask</code> through a plan → execute → verify → recover loop using the tool registry and optional LLM planning. Records a git checkpoint before destructive steps when git is available.</dd>
+          <dt>Lane</dt>
+          <dd>A named execution queue with configurable concurrency. Current lanes: <code>chat</code> (conversational turns), <code>baa</code> (background repair tasks), <code>consolidation</code> (nightly memory work), <code>cron</code> (daydream, schedule processing, and related background work). Prevents background work from crowding out conversation.</dd>
+          <dt>Execution receipt</dt>
+          <dd>A durable audit record created at the end of every terminal BAA task. Stored in <code>receipts.db</code> and surfaced through the dashboard Operations tab. Answers "what did the agent actually do?"</dd>
+          <dt>Retry governor</dt>
+          <dd>The control layer that decides whether a failed task should retry, salvage, or stop. It preserves blocked-vs-resumable intent instead of blindly replaying low-divergence failures.</dd>
+          <dt>Salvage packet</dt>
+          <dd>The durable retry metadata attached to a failed task. It captures the last meaningful attempt state so the governor can resume without losing provenance.</dd>
+          <dt>Project return</dt>
+          <dd>A resumable record for unfinished work. It stores the canonical artifact, recent attempt evidence, blocked/resumable status, creative continuity notes, and a next-step hint.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Scheduling</h2>
+        <dl class="term-list">
+          <dt>Schedule item</dt>
+          <dd>A durable cron or calendar entry with a recurrence rule, action, priority, and optional commitment and plan links. Kinds: <code>task</code> (triggers BAA execution) and <code>event</code> (reminder-only, records without executing). Recurrence options: <code>none</code>, <code>interval_hours</code>, <code>daily</code>, <code>weekly</code>, <code>weekdays</code>.</dd>
+          <dt>Schedule run</dt>
+          <dd>An audit record for each time a schedule item fires, whether automatically or via manual trigger. Stores the resulting BAA task ID, run status, and any error message.</dd>
+          <dt>Schedule service</dt>
+          <dd>The subsystem (<code>ScheduleService</code>) that detects due items every 60 seconds and fires them. Applies a catch-up policy: if the agent was offline and multiple occurrences were missed, it fires once for the latest due occurrence and then advances to the next future time rather than replaying every missed run.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Theory of Mind (ToM)</h2>
+        <dl class="term-list">
+          <dt>Belief</dt>
+          <dd>A structured record of something the agent infers about the user or itself: subject, predicate, confidence, and optional evidence. Beliefs about the self are mirrored into the self-knowledge registry when confidence is high enough.</dd>
+          <dt>Intention</dt>
+          <dd>A record of a user or agent goal inferred from a conversation turn. Tracked with confidence and staleness so outdated intentions can be pruned automatically.</dd>
+          <dt>ToM engine</dt>
+          <dd>The subsystem (<code>ToMEngine</code>) that records beliefs and intentions on every conversational turn, detects contradictions between existing beliefs, and syncs high-confidence self-beliefs into the identity self-model.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Channels</h2>
+        <dl class="term-list">
+          <dt>Voice chat</dt>
+          <dd>The chat lane's microphone and speech lane. It transcribes audio into chat text and can synthesize spoken replies. Voice output metadata is stored alongside the message history.</dd>
+          <dt>Phone bridge</dt>
+          <dd>The Twilio-backed voice surface for live inbound and outbound calls. It supports owner-vs-caller screening, workspace separation, and recent-call inspection.</dd>
+          <dt>Telegram</dt>
+          <dd>The existing chat channel for paired and policy-controlled Telegram access. It supports bot pairing, allowlists, typing indicators, and edited replies.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Tools and workflow</h2>
+        <dl class="term-list">
+          <dt>Tool registry</dt>
+          <dd>The central registry of callable tools available to the agent. Tools are validated through a safety pipeline (command classification, filesystem path enforcement, content size limits) before execution. Plugin-provided tools are auto-registered at startup.</dd>
+          <dt>Workflow tools</dt>
+          <dd>Higher-level composite tools that reduce round-trips for common patterns. Examples: <code>workflow_create_writing_task</code> (scaffold + commitment + plan in one call), <code>workflow_repo_triage</code> (quick repo and work summary), <code>workflow_supervise_session</code> (start, observe, and interact with a PTY terminal session), and <code>workflow_create_schedule</code> (create a durable scheduled task). Designed to reduce tool-call round-trips for common operator patterns.</dd>
+          <dt>Tool-use memory</dt>
+          <dd>Compact historical memory about which tools helped with which kinds of tasks, used with semantic tool metadata to retrieve a relevant toolbox on demand.</dd>
+          <dt>Objective contract</dt>
+          <dd>A task-specific success contract drafted for the work being attempted, including expected outputs, verification, and completion boundaries.</dd>
+          <dt>Tool loop guard</dt>
+          <dd>A circuit breaker inside the agent's tool-use loop. Stops execution after 24 rounds or if the same tool call is made identically twice in a row. Prevents runaway tool loops.</dd>
+          <dt>PTY session</dt>
+          <dd>A pseudo-terminal session managed by <code>PtySupervisor</code>. Lets the agent interact with terminal applications (vim, shells, external coding tools) the way a human would. Sessions expose screen-state heuristics that classify what the terminal application is currently doing.</dd>
+          <dt>HookBus</dt>
+          <dd>An event bus for pre-execution policy hooks. Hook points: <code>PRE_TOOL_EXECUTE</code>, <code>PRE_COMMAND_EXECUTE</code>, <code>PRE_FILE_WRITE</code>, <code>PRE_CONVERSATION_RESPONSE</code>. Hooks can mutate arguments or short-circuit an action before it runs.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Platform</h2>
+        <dl class="term-list">
+          <dt>Capability</dt>
+          <dd>The canonical platform capability descriptor. It carries identity, kind, source, owner, status, dependencies, and validation metadata for a tool or service entry.</dd>
+          <dt>Extension</dt>
+          <dd>A packaged capability bundle with manifest/version metadata. Extensions can be installed, updated, enabled, disabled, or uninstalled through the platform surface.</dd>
+          <dt>Plugin trust policy</dt>
+          <dd>A persisted rule describing whether a publisher, signer, checksum, or other trust dimension is trusted, user-approved, or blocked.</dd>
+          <dt>Plugin trust feed</dt>
+          <dd>A curated trust update feed that can be synced into the current trust policy set.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Observability</h2>
+        <dl class="term-list">
+          <dt>Telemetry store</dt>
+          <dd>An append-only JSONL event log. Every meaningful runtime event — bootstrap stages, tool calls, memory operations, LLM calls — is logged with a session ID and optional span ID. Queryable through <code>/api/monitor/events</code> and the Logs dashboard tab.</dd>
+          <dt>Token telemetry</dt>
+          <dd>Per-call LLM usage recording: prompt tokens, completion tokens, latency, and estimated cost. Rolled up by session and by day. Surfaced in the Usage dashboard tab.</dd>
+          <dt>Health monitor</dt>
+          <dd>A background process that runs <code>Doctor</code> checks every 60 seconds and emits health events to the event bus. Checks include memory store connectivity, embedding latency, BAA queue depth, and compaction lag.</dd>
+          <dt>Doctor</dt>
+          <dd>The diagnostic subsystem that runs named health checks across the full substrate and returns a <code>HealthReport</code> with <code>pass / warn / fail / skip</code> status per check. Also exposed at <code>/api/monitor/health</code>.</dd>
+          <dt>Readiness state</dt>
+          <dd>A state machine (<code>booting → ready / degraded</code>) that tracks whether the agent is fully initialized. The <code>/readiness</code> endpoint exposes the current state, the time it entered that state, and a history of transitions.</dd>
+        </dl>
+      </section>
+
+      <section class="page-card">
+        <h2>Dashboard tabs</h2>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr><th>Tab</th><th>What it shows</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Overview</td><td>System summary and quick status</td></tr>
+              <tr><td>Health</td><td>Doctor check results and health event feed</td></tr>
+              <tr><td>Chat</td><td>Conversational interface with session and lane metadata</td></tr>
+              <tr><td>Operations</td><td>PTY/browser/process sessions, receipts, work, commitments, plans, qualification</td></tr>
+              <tr><td>Schedule</td><td>Scheduled tasks and events, calendar view, run history</td></tr>
+              <tr><td>Usage</td><td>Token usage, cost, and latency over time</td></tr>
+              <tr><td>Daydream</td><td>Daydream sparks, keeper history</td></tr>
+              <tr><td>Memory</td><td>Episode and distilled memory browser</td></tr>
+              <tr><td>Identity</td><td>Self-model, user model, somatic, relational state</td></tr>
+              <tr><td>Executive</td><td>Goals, task queue, executive snapshot</td></tr>
+              <tr><td>Platform</td><td>Capability inventory, extension lifecycle, trust policy control</td></tr>
+              <tr><td>System</td><td>Configuration, model routing, phone, and Telegram setup</td></tr>
+              <tr><td>Logs</td><td>Runtime telemetry event stream</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="site-shell">
+      <div><a href="../terminology.md">Markdown source</a></div>
+      <div><a href="index.html">Back to release index</a></div>
+    </div>
+  </footer>
+  <script src="media-player.js"></script>
+</body>
+</html>

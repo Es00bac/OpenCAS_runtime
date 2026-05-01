@@ -8,6 +8,8 @@ from typing import Any, Dict, List
 
 from fastapi import APIRouter
 
+from opencas.api.gateway_admin import resolve_active_gateway_material
+
 
 def _window_bounds_ms(window_days: int) -> tuple[int, int]:
     end_ms = int(time.time() * 1000)
@@ -94,8 +96,47 @@ def _scan_process_hygiene() -> Dict[str, Any]:
     return snapshot
 
 
-async def _build_gateway_usage_snapshot(window_days: int, recent_limit: int) -> Dict[str, Any]:
+def _active_gateway_provider_ids(runtime: Any) -> List[str]:
     try:
+        from open_llm_auth.provider_catalog import normalize_provider_id
+    except Exception:
+        def normalize_provider_id(value: str) -> str:
+            return str(value or "").strip().lower()
+
+    ctx = getattr(runtime, "ctx", None)
+    config = getattr(ctx, "config", None)
+    llm = getattr(ctx, "llm", None)
+    if config is None:
+        return []
+
+    model_refs = [
+        getattr(config, "default_llm_model", None),
+        getattr(llm, "default_model", None),
+    ]
+    routing = getattr(config, "model_routing", None)
+    if routing is not None and hasattr(routing, "effective_map"):
+        model_refs.extend(
+            (routing.effective_map(getattr(config, "default_llm_model", None)) or {}).values()
+        )
+    model_refs.append(getattr(config, "embedding_model_id", None))
+
+    provider_ids = []
+    seen = set()
+    for model_ref in model_refs:
+        raw = str(model_ref or "").strip()
+        if not raw or "/" not in raw:
+            continue
+        provider_id = normalize_provider_id(raw.split("/", 1)[0])
+        if not provider_id or provider_id in seen:
+            continue
+        seen.add(provider_id)
+        provider_ids.append(provider_id)
+    return provider_ids
+
+
+async def _build_gateway_usage_snapshot(runtime: Any, window_days: int, recent_limit: int) -> Dict[str, Any]:
+    try:
+        from open_llm_auth.auth.manager import ProviderManager
         from open_llm_auth.server.usage_api import build_usage_overview, collect_provider_telemetry
     except Exception as exc:
         return {
@@ -106,8 +147,21 @@ async def _build_gateway_usage_snapshot(window_days: int, recent_limit: int) -> 
         }
 
     try:
+        runtime_config = getattr(getattr(runtime, "ctx", None), "config", None)
+        manager = None
+        if runtime_config is not None:
+            material = resolve_active_gateway_material(runtime_config)
+            manager = ProviderManager(
+                config_path=material.config_path,
+                env_path=material.env_path if material.env_path and material.env_path.exists() else None,
+            )
+        active_provider_ids = _active_gateway_provider_ids(runtime)
         overview = build_usage_overview(days=window_days, recent_limit=recent_limit)
-        telemetry = await collect_provider_telemetry(days=max(1, min(window_days, 30)))
+        telemetry = await collect_provider_telemetry(
+            days=max(1, min(window_days, 30)),
+            manager=manager,
+            provider_ids=active_provider_ids or None,
+        )
         return {
             "available": True,
             "overview": overview,
@@ -194,6 +248,7 @@ def build_usage_router(runtime: Any) -> APIRouter:
                 recent_limit=clamped_recent,
             ),
             "gateway": await _build_gateway_usage_snapshot(
+                runtime,
                 clamped_days,
                 clamped_recent,
             ),

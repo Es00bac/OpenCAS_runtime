@@ -2,6 +2,7 @@
 
 import json
 from pathlib import Path
+import time
 
 import pytest
 import pytest_asyncio
@@ -154,3 +155,39 @@ async def test_time_series(telemetry: TokenTelemetry) -> None:
     assert series[0].total_tokens == 20
     assert series[1].total_calls == 1
     assert series[1].total_tokens == 10
+
+
+@pytest.mark.asyncio
+async def test_prune_old_events_removes_old_records(telemetry: TokenTelemetry) -> None:
+    base = int(time.time() * 1000)
+    old_ts = base - (2 * 24 * 60 * 60 * 1000)
+    keep_ts = base - (1000 * 60 * 60)
+
+    old_event = json.dumps({
+        "ts": old_ts,
+        "provider": "p",
+        "model": "m1",
+        "promptTokens": 1,
+        "completionTokens": 1,
+        "totalTokens": 2,
+        "latencyMs": 1,
+        "source": "old",
+    })
+    keep_event = json.dumps({
+        "ts": keep_ts,
+        "provider": "p",
+        "model": "m1",
+        "promptTokens": 2,
+        "completionTokens": 2,
+        "totalTokens": 4,
+        "latencyMs": 2,
+        "source": "keep",
+    })
+    telemetry.events_file.write_text(f"{old_event}\n{keep_event}\n", encoding="utf-8")
+
+    removed = await telemetry.prune_old_events(max_age_days=1)
+
+    lines = telemetry.events_file.read_text().strip().splitlines()
+    assert removed == 1
+    assert len(lines) == 1
+    assert json.loads(lines[0])["source"] == "keep"

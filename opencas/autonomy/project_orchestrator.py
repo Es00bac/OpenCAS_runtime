@@ -25,11 +25,13 @@ class ProjectOrchestrator:
         baa: Optional[BoundedAssistantAgent] = None,
         work_store: Optional[WorkStore] = None,
         event_bus: Optional[EventBus] = None,
+        shadow_registry: Optional[Any] = None,
     ) -> None:
         self.llm = llm
         self.baa = baa
         self.work_store = work_store
         self.event_bus = event_bus
+        self.shadow_registry = shadow_registry
         if self.event_bus:
             self.event_bus.subscribe(BaaCompletedEvent, self._on_baa_completed)
 
@@ -58,6 +60,10 @@ class ProjectOrchestrator:
 
     async def _generate_plan(self, work: WorkObject) -> ProjectPlan:
         """Use LLM to generate a dependency-aware project plan."""
+        shadow_context = self._shadow_planning_context(
+            objective=work.content,
+            meta=work.meta,
+        )
         prompt = (
             f"Decompose the following project into 1-5 concrete tasks. "
             f"Return ONLY valid JSON with no markdown formatting.\n\n"
@@ -66,6 +72,8 @@ class ProjectOrchestrator:
             f'{{"tasks": [{{"name": "string", "description": "string", "dependencies": [0]}}], "summary": "string"}}\n'
             f'"dependencies" are zero-based indices of prerequisite tasks in the tasks list.\n'
         )
+        if shadow_context:
+            prompt += f"\n\n{shadow_context}"
 
         raw_text = ""
         if self.llm:
@@ -160,6 +168,7 @@ class ProjectOrchestrator:
                 meta={
                     "plan_task_index": idx,
                     "plan_summary": plan.summary,
+                    **({"resume_project": dict(project_work.meta.get("resume_project", {}))} if isinstance(project_work.meta.get("resume_project"), dict) else {}),
                 },
             )
             work_objects.append(task_wo)
@@ -183,6 +192,9 @@ class ProjectOrchestrator:
                 project_id=str(project_work.work_id),
                 depends_on=list(task_wo.dependency_ids),
                 scratch_dir=None,
+                meta={
+                    **({"resume_project": dict(project_work.meta.get("resume_project", {}))} if isinstance(project_work.meta.get("resume_project"), dict) else {}),
+                },
             )
             # Store mapping in meta for event handling
             task_wo.meta["repair_task_id"] = str(repair_task.task_id)
@@ -191,6 +203,35 @@ class ProjectOrchestrator:
             repair_tasks.append(repair_task)
 
         return work_objects, repair_tasks
+
+    def _shadow_planning_context(
+        self,
+        *,
+        objective: str,
+        meta: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        builder = getattr(self.shadow_registry, "build_planning_context", None)
+        if not callable(builder):
+            return ""
+        context = builder(
+            objective=objective,
+            artifact=self._artifact_hint_from_meta(meta),
+        )
+        if not isinstance(context, dict) or not context.get("available"):
+            return ""
+        return str(context.get("prompt_block", "") or "").strip()
+
+    @staticmethod
+    def _artifact_hint_from_meta(meta: Optional[Dict[str, Any]]) -> Optional[str]:
+        if not isinstance(meta, dict):
+            return None
+        resume_project = meta.get("resume_project")
+        if isinstance(resume_project, dict):
+            artifact = str(resume_project.get("canonical_artifact_path", "") or "").strip()
+            if artifact:
+                return artifact
+        artifact = str(meta.get("canonical_artifact_path", "") or "").strip()
+        return artifact or None
 
     async def _submit_task(self, task: RepairTask) -> None:
         """Submit a repair task to the BAA."""

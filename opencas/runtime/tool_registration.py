@@ -9,6 +9,7 @@ from opencas.tools.validation import create_default_tool_validation_pipeline
 from .tool_registration_advanced import register_advanced_tools
 from .tool_registration_foundation import register_foundation_tools
 from .tool_registration_workflow import register_workflow_tools
+from .tool_registration_memory import register_memory_tools
 
 
 def register_runtime_default_tools(runtime: Any) -> None:
@@ -23,3 +24,4 @@ def register_runtime_default_tools(runtime: Any) -> None:
     register_foundation_tools(runtime, roots=roots, default_cwd=default_cwd)
     register_workflow_tools(runtime, roots=roots)
     register_advanced_tools(runtime)
+    register_memory_tools(runtime)

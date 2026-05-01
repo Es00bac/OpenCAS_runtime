@@ -125,7 +125,7 @@ async def _run(output_dir: Path) -> dict[str, object]:
             [
                 f"# {recovered_heading}",
                 "",
-                "- Workspace: /tmp/opencas-repo",
+                "- Workspace: /tmp/opencas-public-fixture",
                 "- Scenario: 9 memory continuity",
                 f"- Gating issue: {recovered_issue}",
                 "- Retrieval source: prior session preference reused without a new discovery prompt",

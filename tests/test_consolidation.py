@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.consolidation import NightlyConsolidationEngine
-from opencas.embeddings import EmbeddingCache, EmbeddingService
+from opencas.embeddings import EmbeddingCache, EmbeddingService, EmbeddingRecord
 from opencas.identity import IdentityManager, IdentityStore
 from opencas.memory import Episode, EpisodeKind, Memory, MemoryStore
 
@@ -79,6 +79,33 @@ async def test_consolidation_clusters_and_creates_memories(deps):
 
 
 @pytest.mark.asyncio
+async def test_consolidation_respects_llm_call_budget(deps):
+    store, _embeds, _identity, engine = deps
+    episodes = []
+    for i in range(6):
+        ep = Episode(kind=EpisodeKind.OBSERVATION, content=f"budgeted cluster fact {i}")
+        await store.save_episode(ep)
+        episodes.append(ep)
+
+    engine._cluster_episodes = AsyncMock(
+        return_value=[episodes[0:2], episodes[2:4], episodes[4:6]]
+    )
+    engine.llm.chat_completion = AsyncMock(
+        return_value={"choices": [{"message": {"content": "Cluster summary"}}]}
+    )
+
+    result = await engine.run(
+        similarity_threshold=0.1,
+        budget={"max_llm_calls": 1, "max_cluster_summaries": 3},
+    )
+
+    assert engine.llm.chat_completion.await_count == 1
+    assert result.llm_calls_used == 1
+    assert result.budget_exhausted is True
+    assert result.budget_reason == "llm_calls"
+
+
+@pytest.mark.asyncio
 async def test_consolidation_reweights_salience(deps):
     store, _embeds, _identity, engine = deps
     # Save a memory with high access count
@@ -115,9 +142,20 @@ async def test_consolidation_updates_identity(deps):
 
     result = await engine.run(similarity_threshold=0.1)
     assert result.identity_updates
-    key = list(result.identity_updates.keys())[0]
+    assert result.identity_updates.get("recent_themes")
+    assert isinstance(result.identity_updates["recent_themes"], list)
+    key = next(
+        (
+            key
+            for key in result.identity_updates.keys()
+            if key.startswith("consolidation_themes")
+        ),
+        None,
+    )
+    assert key is not None
     assert "consolidation_themes" in key
     assert identity.self_model.self_beliefs.get(key)
+    assert identity.self_model.recent_themes
 
 
 @pytest.mark.asyncio
@@ -243,6 +281,43 @@ async def test_consolidation_recovers_orphans(deps):
     edges1 = await store.get_edges_for(str(ep1.episode_id), min_confidence=0.0, limit=1)
     edges2 = await store.get_edges_for(str(ep2.episode_id), min_confidence=0.0, limit=1)
     assert len(edges1) >= 1 or len(edges2) >= 1
+
+
+@pytest.mark.asyncio
+async def test_consolidation_reembeds_mixed_dimension_episodes(deps):
+    store, embeds, _identity, engine = deps
+    legacy_record = EmbeddingRecord(
+        source_hash="legacy-source",
+        model_id="legacy-model",
+        dimension=3,
+        vector=[0.1, 0.2, 0.3],
+    )
+    current_record = EmbeddingRecord(
+        source_hash="current-source",
+        model_id="local-fallback",
+        dimension=2,
+        vector=[0.4, 0.5],
+    )
+    await embeds.cache.put(legacy_record)
+    await embeds.cache.put(current_record)
+
+    ep1 = Episode(kind=EpisodeKind.OBSERVATION, content="legacy embedded memory", embedding_id="legacy-source")
+    ep2 = Episode(kind=EpisodeKind.OBSERVATION, content="current embedded memory", embedding_id="current-source")
+    await store.save_episode(ep1)
+    await store.save_episode(ep2)
+
+    result = await engine.run(similarity_threshold=0.99, signal_threshold=1.0)
+
+    assert result.candidate_episodes == 2
+    refreshed_ep1 = await store.get_episode(str(ep1.episode_id))
+    refreshed_ep2 = await store.get_episode(str(ep2.episode_id))
+    refreshed_rec1 = await embeds.cache.get(refreshed_ep1.embedding_id)
+    refreshed_rec2 = await embeds.cache.get(refreshed_ep2.embedding_id)
+    assert refreshed_rec1 is not None
+    assert refreshed_rec2 is not None
+    assert refreshed_rec1.model_id == "local-fallback"
+    assert refreshed_rec2.model_id == "local-fallback"
+    assert refreshed_rec1.dimension == refreshed_rec2.dimension == 256
 
 
 class _FakeCommitmentStore:

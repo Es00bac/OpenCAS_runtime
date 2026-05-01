@@ -25,7 +25,9 @@ class ToolUseContext:
     runtime: "AgentRuntime"
     session_id: str
     task_id: Optional[str] = None
+    artifact_hint: Optional[str] = None
     max_iterations: int = 32
+    tool_call_budget: Optional[int] = None
     plan_mode: bool = False
     active_plan_id: Optional[str] = None
 

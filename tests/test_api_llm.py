@@ -52,9 +52,8 @@ async def test_llm_chat_completion(mock_provider_manager: MagicMock, tracer: Tra
     assert response["choices"][0]["message"]["content"] == "hi"
     mock_provider_manager.resolve.assert_called_once_with("test/model")
 
-    events = tracer.store.query(kinds=[EventKind.TOOL_CALL])
-    assert len(events) == 1
-    assert "LLM chat_completion" in events[0].message
+    events = tracer.store.query(kinds=[EventKind.LLM_CALL])
+    assert any("LLM chat_completion" in event.message for event in events)
 
 
 @pytest.mark.asyncio
@@ -72,6 +71,19 @@ async def test_llm_embed(mock_provider_manager: MagicMock, tracer: Tracer) -> No
     vector = await client.embed("hello world")
     assert vector == [0.1, 0.2, 0.3]
     mock_provider_manager.resolve.assert_called_with("openai/text-embedding-3-small")
+
+
+@pytest.mark.asyncio
+async def test_llm_embed_passes_requested_dimensions(
+    mock_provider_manager: MagicMock,
+) -> None:
+    client = LLMClient(mock_provider_manager)
+
+    await client.embed("hello world", model="google/embeddinggemma-300m", dimensions=3072)
+
+    mock_provider_manager.resolve.return_value.provider.embeddings.assert_awaited_once()
+    _, kwargs = mock_provider_manager.resolve.return_value.provider.embeddings.await_args
+    assert kwargs["payload"]["dimensions"] == 3072
 
 
 @pytest.mark.asyncio

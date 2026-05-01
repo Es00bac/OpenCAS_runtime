@@ -11,17 +11,17 @@ from .models import MessageEntry, MessageRole, RetrievalResult
 
 
 def is_soul_foundation_episode(episode: Any) -> bool:
-    """Return whether an episode is an authoritative identity foundation."""
-    source = str(episode.payload.get("source") or episode.payload.get("legacy_source", "")).lower()
+    """Mirror of OpenBulma v4 isSoulFoundationEpisode."""
+    source = str(episode.payload.get("bulma_source", "")).lower()
     if source.startswith("soul:") or source.startswith("foundation:"):
         return True
-    metadata = episode.payload.get("metadata") or episode.payload.get("legacy_metadata") or {}
+    metadata = episode.payload.get("bulma_metadata") or {}
     ep_type = str(metadata.get("type", "")).lower()
     return ep_type in ("foundation_soul", "foundation_document")
 
 
 def is_workspace_derived_source(source: str) -> bool:
-    """Return whether an identity candidate came from workspace bookkeeping."""
+    """Mirror of OpenBulma v4 isWorkspaceDerivedIdentitySource."""
     normalized = source.lower()
     return (
         normalized.startswith("workspace:")
@@ -53,12 +53,12 @@ async def build_identity_anchors(builder: Any) -> Tuple[List[str], List[str]]:
         ep
         for ep in episodes
         if not is_soul_foundation_episode(ep)
-        and not is_workspace_derived_source(str(ep.payload.get("source") or ep.payload.get("legacy_source", "")))
+        and not is_workspace_derived_source(str(ep.payload.get("bulma_source", "")))
     ]
     identity_eps.sort(key=lambda ep: ep.salience, reverse=True)
     for ep in identity_eps[:8]:
         ts = ep.created_at.isoformat()[:19]
-        source = ep.payload.get("source") or ep.payload.get("legacy_source", "unknown")
+        source = ep.payload.get("bulma_source", "unknown")
         excerpt = str(ep.content)[:400]
         identity_anchors.append(f"- {ts} [{source}]: {excerpt}")
 
@@ -135,7 +135,20 @@ def to_memory_entries(results: List[RetrievalResult]) -> List[MessageEntry]:
     entries: List[MessageEntry] = []
     for result in results:
         label = result.source_type.capitalize()
-        content = f"[{label}] {result.content}"
+        ts_header = ""
+        if result.source_type == "episode" and result.episode is not None:
+            try:
+                ts = result.episode.created_at
+                ts_header = f"{ts.isoformat()[:19]} UTC | "
+            except Exception:
+                pass
+        elif result.source_type == "memory" and result.memory is not None:
+            try:
+                ts = result.memory.created_at
+                ts_header = f"{ts.isoformat()[:19]} UTC | "
+            except Exception:
+                pass
+        content = f"[{label}] {ts_header}{result.content}"
         entries.append(
             MessageEntry(
                 role=MessageRole.MEMORY,

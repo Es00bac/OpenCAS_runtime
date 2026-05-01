@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone, timedelta
+import re
+from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
@@ -87,6 +89,10 @@ class NightlyConsolidationEngine:
         if signal_ranker is None:
             signal_ranker = EpisodeSignalRanker(memory=self.memory)
         self.signal_ranker = signal_ranker
+        self._active_budget: Dict[str, Any] = {}
+        self._llm_calls_used = 0
+        self._budget_exhausted = False
+        self._budget_reason: Optional[str] = None
 
     async def run(
         self,
@@ -94,127 +100,197 @@ class NightlyConsolidationEngine:
         similarity_threshold: float = 0.75,
         max_candidates: int = 500,
         signal_threshold: float = 0.65,
+        budget: Optional[Dict[str, Any]] = None,
     ) -> ConsolidationResult:
         """Execute a full consolidation cycle."""
+        previous_budget = self._active_budget
+        previous_llm_calls = self._llm_calls_used
+        previous_exhausted = self._budget_exhausted
+        previous_reason = self._budget_reason
+        self._active_budget = dict(budget or {})
+        self._llm_calls_used = 0
+        self._budget_exhausted = False
+        self._budget_reason = None
         result = ConsolidationResult()
+        result.budget = dict(self._active_budget)
+        budget_max_candidates = self._budget_int("max_candidates")
+        if budget_max_candidates is not None:
+            max_candidates = min(max_candidates, budget_max_candidates)
 
-        # 1. Gather candidate episodes
-        candidates = await self.memory.list_non_compacted_episodes(limit=max_candidates)
-        result.candidate_episodes = len(candidates)
+        try:
+            # 1. Gather candidate episodes
+            candidates = await self.memory.list_non_compacted_episodes(limit=max_candidates)
+            result.candidate_episodes = len(candidates)
 
-        clusters: List[List[Any]] = []
-        cluster_consumed_ids: set[str] = set()
-        promoted_ids: set[str] = set()
-        score_map: Dict[str, SignalScore] = {}
-        if candidates:
-            # 2. Cluster candidates by embedding similarity
-            clusters = await self._cluster_episodes(candidates, similarity_threshold)
-            result.clusters_formed = len(clusters)
+            clusters: List[List[Any]] = []
+            cluster_consumed_ids: set[str] = set()
+            promoted_ids: set[str] = set()
+            score_map: Dict[str, SignalScore] = {}
+            if candidates:
+                # 2. Cluster candidates by embedding similarity
+                clusters = await self._cluster_episodes(candidates, similarity_threshold)
+                result.clusters_formed = len(clusters)
 
-            # 3. Summarize each cluster into a Memory
-            for cluster in clusters:
-                if len(cluster) < 2:
-                    continue
-                cluster_hash = self._cluster_hash(cluster)
-                if self.curation_store is not None:
-                    if await self.curation_store.is_rejected(cluster_hash):
+                # 3. Summarize each cluster into a Memory
+                cluster_summaries = 0
+                max_cluster_summaries = self._budget_int("max_cluster_summaries")
+                for cluster in clusters:
+                    if len(cluster) < 2:
+                        continue
+                    if self._budget_exhausted:
+                        break
+                    if max_cluster_summaries is not None and cluster_summaries >= max_cluster_summaries:
+                        self._mark_budget_exhausted("cluster_summaries")
+                        break
+                    cluster_hash = self._cluster_hash(cluster)
+                    if self.curation_store is not None:
+                        if await self.curation_store.is_rejected(cluster_hash):
+                            result.merges_rejected += 1
+                            continue
+                    cluster_summaries += 1
+                    summary = await self._summarize_cluster(cluster)
+                    if not summary:
+                        if self._budget_exhausted:
+                            break
+                        if self.curation_store is not None:
+                            await self.curation_store.record_rejection(
+                                cluster_hash,
+                                [str(e.episode_id) for e in cluster],
+                                reason="empty_summary",
+                            )
                         result.merges_rejected += 1
                         continue
-                summary = await self._summarize_cluster(cluster)
-                if not summary:
-                    if self.curation_store is not None:
-                        await self.curation_store.record_rejection(
-                            cluster_hash,
-                            [str(e.episode_id) for e in cluster],
-                            reason="empty_summary",
-                        )
-                    result.merges_rejected += 1
-                    continue
-                # Compute embedding for the summary
-                embed_record = await self.embeddings.embed(
-                    summary,
-                    task_type="consolidation_summary",
+                    # Compute embedding for the summary
+                    embed_record = await self.embeddings.embed(
+                        summary,
+                        task_type="consolidation_summary",
+                    )
+                    memory = Memory(
+                        content=summary,
+                        source_episode_ids=[str(e.episode_id) for e in cluster],
+                        tags=["consolidation"],
+                        embedding_id=embed_record.source_hash,
+                    )
+                    await self.memory.save_memory(memory)
+                    result.memories_created += 1
+                    for ep in cluster:
+                        cluster_consumed_ids.add(str(ep.episode_id))
+
+                # 3b. Promote strong individual signals to Memory
+                signal_scores = await self.signal_ranker.rank_episodes_with_degrees(
+                    candidates, identity=self.identity
                 )
-                memory = Memory(
-                    content=summary,
-                    source_episode_ids=[str(e.episode_id) for e in cluster],
-                    tags=["consolidation"],
-                    embedding_id=embed_record.source_hash,
+                score_map = {s.episode_id: s for s in signal_scores}
+                promoted_ids = await self._promote_strong_signals(
+                    candidates,
+                    score_map,
+                    cluster_consumed_ids,
+                    signal_threshold,
                 )
-                await self.memory.save_memory(memory)
-                result.memories_created += 1
-                for ep in cluster:
-                    cluster_consumed_ids.add(str(ep.episode_id))
+                result.signals_promoted = len(promoted_ids)
 
-            # 3b. Promote strong individual signals to Memory
-            signal_scores = await self.signal_ranker.rank_episodes_with_degrees(
-                candidates, identity=self.identity
+            # 4b. Consolidate commitments: deduplicate via embeddings + LLM, extract from chat logs
+            if self.commitment_store:
+                commitment_result = await self._consolidate_commitments(
+                    similarity_threshold=similarity_threshold
+                )
+                result.commitments_consolidated = commitment_result.get("commitments_merged", 0)
+                result.commitment_clusters_formed = commitment_result.get("clusters_formed", 0)
+                result.commitment_work_objects_created = commitment_result.get("work_objects_created", 0)
+                chat_extracted = await self._extract_commitments_from_chat_logs()
+                result.commitments_extracted_from_chat = chat_extracted
+
+            # 5. Rebuild episode edges, recover orphans, and promote identity core
+            if candidates:
+                edges_created = await self.fabric_builder.rebuild(candidates)
+                result.edges_created = edges_created
+                orphans_recovered = await self._recover_orphans(candidates)
+                result.orphans_recovered = orphans_recovered
+                core_promotions = await self._promote_identity_core(candidates, score_map)
+                result.identity_core_promotions = core_promotions
+
+                # Mark consumed/promoted episodes as compacted so health checks stay clean
+                consumed_ids = list(cluster_consumed_ids | promoted_ids)
+                if consumed_ids:
+                    await self.memory.mark_compacted(consumed_ids)
+
+            # 5. Reweight episode salience
+            episode_salience_updates = await self._reweight_episode_salience(
+                candidates, cluster_consumed_ids, promoted_ids
             )
-            score_map = {s.episode_id: s for s in signal_scores}
-            promoted_ids = await self._promote_strong_signals(
-                candidates,
-                score_map,
-                cluster_consumed_ids,
-                signal_threshold,
-            )
-            result.signals_promoted = len(promoted_ids)
+            result.episode_salience_updates = len(episode_salience_updates)
 
-        # 4b. Consolidate commitments: deduplicate via embeddings + LLM, extract from chat logs
-        if self.commitment_store:
-            commitment_result = await self._consolidate_commitments(
-                similarity_threshold=similarity_threshold
-            )
-            result.commitments_consolidated = commitment_result.get("commitments_merged", 0)
-            result.commitment_clusters_formed = commitment_result.get("clusters_formed", 0)
-            result.commitment_work_objects_created = commitment_result.get("work_objects_created", 0)
-            chat_extracted = await self._extract_commitments_from_chat_logs()
-            result.commitments_extracted_from_chat = chat_extracted
+            # 6. Reweight memory salience
+            salience_updates = await self._reweight_salience()
+            result.salience_updates = salience_updates
+            result.memories_updated = len(salience_updates)
 
-        # 5. Rebuild episode edges, recover orphans, and promote identity core
-        if candidates:
-            edges_created = await self.fabric_builder.rebuild(candidates)
-            result.edges_created = edges_created
-            orphans_recovered = await self._recover_orphans(candidates)
-            result.orphans_recovered = orphans_recovered
-            core_promotions = await self._promote_identity_core(candidates, score_map)
-            result.identity_core_promotions = core_promotions
+            # 7. Prune low-salience episodes
+            pruned = await self.memory.prune_episodes_by_salience(salience_threshold)
+            result.episodes_pruned = pruned
 
-            # Mark consumed/promoted episodes as compacted so health checks stay clean
-            consumed_ids = list(cluster_consumed_ids | promoted_ids)
-            if consumed_ids:
-                await self.memory.mark_compacted(consumed_ids)
+            # 8. Belief consistency sweep: decay high-confidence ToM beliefs lacking recent corroboration
+            beliefs_decayed = await self._sweep_belief_consistency()
+            result.beliefs_decayed = beliefs_decayed
 
-        # 5. Reweight episode salience
-        episode_salience_updates = await self._reweight_episode_salience(
-            candidates, cluster_consumed_ids, promoted_ids
-        )
-        result.episode_salience_updates = len(episode_salience_updates)
+            # 9. Update identity anchors
+            identity_updates = await self._update_identity(clusters)
+            result.identity_updates = identity_updates
 
-        # 6. Reweight memory salience
-        salience_updates = await self._reweight_salience()
-        result.salience_updates = salience_updates
-        result.memories_updated = len(salience_updates)
+            result.budget_exhausted = self._budget_exhausted
+            result.budget_reason = self._budget_reason
+            result.llm_calls_used = self._llm_calls_used
 
-        # 7. Prune low-salience episodes
-        pruned = await self.memory.prune_episodes_by_salience(salience_threshold)
-        result.episodes_pruned = pruned
+            if self.tracer:
+                self.tracer.log(
+                    EventKind.CONSOLIDATION_RUN,
+                    "Nightly consolidation completed",
+                    result.model_dump(mode="json"),
+                )
 
-        # 8. Belief consistency sweep: decay high-confidence ToM beliefs lacking recent corroboration
-        beliefs_decayed = await self._sweep_belief_consistency()
-        result.beliefs_decayed = beliefs_decayed
+            return result
+        finally:
+            self._active_budget = previous_budget
+            self._llm_calls_used = previous_llm_calls
+            self._budget_exhausted = previous_exhausted
+            self._budget_reason = previous_reason
 
-        # 9. Update identity anchors
-        identity_updates = await self._update_identity(clusters)
-        result.identity_updates = identity_updates
+    def _budget_int(self, key: str) -> Optional[int]:
+        value = self._active_budget.get(key)
+        if value is None:
+            return None
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed >= 0 else None
 
+    def _budget_prompt_limit(self) -> Optional[int]:
+        return self._budget_int("max_prompt_chars")
+
+    def _mark_budget_exhausted(self, reason: str) -> None:
+        if self._budget_exhausted:
+            return
+        self._budget_exhausted = True
+        self._budget_reason = reason
         if self.tracer:
             self.tracer.log(
                 EventKind.CONSOLIDATION_RUN,
-                "Nightly consolidation completed",
-                result.model_dump(mode="json"),
+                "NightlyConsolidationEngine: budget_exhausted",
+                {
+                    "reason": reason,
+                    "llm_calls_used": self._llm_calls_used,
+                    "budget": dict(self._active_budget),
+                },
             )
 
-        return result
+    def _consume_consolidation_llm_budget(self) -> bool:
+        max_llm_calls = self._budget_int("max_llm_calls")
+        if max_llm_calls is not None and self._llm_calls_used >= max_llm_calls:
+            self._mark_budget_exhausted("llm_calls")
+            return False
+        self._llm_calls_used += 1
+        return True
 
     async def _cluster_episodes(
         self,
@@ -222,52 +298,108 @@ class NightlyConsolidationEngine:
         threshold: float,
     ) -> List[List[Any]]:
         """Greedy clustering of episodes by cosine similarity of embeddings."""
-        # Embed each episode if not already cached
-        vectors: List[Optional[np.ndarray]] = []
-        for ep in episodes:
-            if ep.embedding_id:
-                cached = await self.embeddings.cache.get(ep.embedding_id)
-                if cached:
-                    vectors.append(np.array(cached.vector, dtype=np.float32))
-                    continue
-            # Fallback: compute via embed service
+        async def _reembed_episode(ep: Any) -> np.ndarray:
             record = await self.embeddings.embed(
                 ep.content,
                 task_type="memory_episode",
             )
-            vectors.append(np.array(record.vector, dtype=np.float32))
+            if getattr(ep, "embedding_id", None) != record.source_hash:
+                ep.embedding_id = record.source_hash
+                await self.memory.save_episode(ep)
+            return np.array(record.vector, dtype=np.float32)
+
+        cached_records: List[Optional[Any]] = []
+        observed_dimensions: set[int] = set()
+        requires_refresh = False
+        for ep in episodes:
+            cached = None
+            if ep.embedding_id:
+                cached = await self.embeddings.cache.get(ep.embedding_id)
+            cached_records.append(cached)
+            if cached is None:
+                requires_refresh = True
+                continue
+            observed_dimensions.add(int(cached.dimension or len(cached.vector)))
+            if cached.model_id != self.embeddings.model_id or len(cached.vector) != int(cached.dimension or 0):
+                requires_refresh = True
+
+        target_dimension: Optional[int] = None
+        if len(observed_dimensions) == 1:
+            target_dimension = next(iter(observed_dimensions))
+        elif observed_dimensions:
+            requires_refresh = True
+
+        if requires_refresh and episodes:
+            probe_record = await self.embeddings.embed(
+                episodes[0].content,
+                task_type="memory_episode",
+            )
+            target_dimension = len(probe_record.vector)
+
+        vectors: List[Optional[np.ndarray]] = []
+        for ep, cached in zip(episodes, cached_records):
+            if cached is None:
+                vectors.append(await _reembed_episode(ep))
+                continue
+            cached_dimension = int(cached.dimension or len(cached.vector))
+            if (
+                cached.model_id != self.embeddings.model_id
+                or (target_dimension is not None and cached_dimension != target_dimension)
+                or len(cached.vector) != cached_dimension
+            ):
+                vectors.append(await _reembed_episode(ep))
+                continue
+            vectors.append(np.array(cached.vector, dtype=np.float32))
 
         clusters: List[List[Any]] = []
         used = set()
-        for i, vi in enumerate(vectors):
-            if i in used or vi is None:
+        dimension_families: Dict[int, List[int]] = {}
+        for idx, vector in enumerate(vectors):
+            if vector is None:
                 continue
-            cluster = [episodes[i]]
-            used.add(i)
-            norm_i = np.linalg.norm(vi)
-            if norm_i == 0:
-                norm_i = 1.0
-            for j, vj in enumerate(vectors[i + 1 :], start=i + 1):
-                if j in used or vj is None:
+            dimension_families.setdefault(len(vector), []).append(idx)
+
+        for family_indices in dimension_families.values():
+            for pos, i in enumerate(family_indices):
+                if i in used:
                     continue
-                norm_j = np.linalg.norm(vj)
-                if norm_j == 0:
-                    norm_j = 1.0
-                sim = float(np.dot(vi, vj) / (norm_i * norm_j))
-                if sim >= threshold:
-                    cluster.append(episodes[j])
-                    used.add(j)
-            clusters.append(cluster)
+                vi = vectors[i]
+                if vi is None:
+                    continue
+                cluster = [episodes[i]]
+                used.add(i)
+                norm_i = np.linalg.norm(vi)
+                if norm_i == 0:
+                    norm_i = 1.0
+                for j in family_indices[pos + 1 :]:
+                    if j in used:
+                        continue
+                    vj = vectors[j]
+                    if vj is None:
+                        continue
+                    norm_j = np.linalg.norm(vj)
+                    if norm_j == 0:
+                        norm_j = 1.0
+                    sim = float(np.dot(vi, vj) / (norm_i * norm_j))
+                    if sim >= threshold:
+                        cluster.append(episodes[j])
+                        used.add(j)
+                clusters.append(cluster)
         return clusters
 
     async def _summarize_cluster(self, episodes: List[Any]) -> str:
         """Ask the LLM to synthesize a cluster summary."""
+        if not self._consume_consolidation_llm_budget():
+            return ""
         lines = [f"- {ep.content}" for ep in episodes]
         prompt = (
             "Synthesize the following related episodes into a single concise memory. "
             "Capture the core insight or factual takeaway.\n\n"
             + "\n".join(lines)
         )
+        prompt_limit = self._budget_prompt_limit()
+        if prompt_limit is not None and len(prompt) > prompt_limit:
+            prompt = prompt[:prompt_limit].rstrip()
         messages = [
             {"role": "system", "content": "You are a consolidation assistant."},
             {"role": "user", "content": prompt},
@@ -281,8 +413,13 @@ class NightlyConsolidationEngine:
             choices = response.get("choices", [])
             if choices:
                 return choices[0].get("message", {}).get("content", "").strip()
-        except Exception:
-            pass
+        except Exception as exc:
+            if self.tracer:
+                self.tracer.log(
+                    EventKind.TOOL_CALL,
+                    "consolidation_summarize_cluster_failed",
+                    {"error": str(exc), "episode_count": len(episodes)},
+                )
         return episodes[0].content[:400]
 
     @staticmethod
@@ -374,8 +511,13 @@ class NightlyConsolidationEngine:
                                 "revision_score": new_revision_score,
                             },
                         )
-        except Exception:
-            pass
+        except Exception as exc:
+            if self.tracer:
+                self.tracer.log(
+                    EventKind.TOOL_CALL,
+                    "consolidation_belief_decay_failed",
+                    {"error": str(exc), "decayed_count": len(decayed)},
+                )
         return decayed
 
     async def _consolidate_commitments(
@@ -449,8 +591,44 @@ class NightlyConsolidationEngine:
         """Push high-level themes into identity self-beliefs."""
         if not clusters:
             return {}
-        # Simple heuristic: belief keyed by consolidation date
-        themes = [f"Cluster of {len(c)} episodes" for c in clusters[:3]]
+
+        # Build a simple term-frequency theme distribution from clustered episodes.
+        token_counts: Counter[str] = Counter()
+        forbidden = {"returning", "drifted", "thread", "return"}
+        stop_words = {
+            "that", "this", "from", "with", "they", "have", "been", "were", "what", "when",
+            "where", "which", "while", "about", "would", "could", "should", "there",
+            "these", "those", "your", "said", "them", "than", "then", "just", "also",
+            "only", "some", "very", "were", "been", "will", "into", "because", "even",
+            "into", "their", "have", "more", "most", "many", "been", "being",
+        }
+        for cluster in clusters:
+            for ep in cluster:
+                text = (getattr(ep, "content", "") or "").lower()
+                for token in re.findall(r"\b[a-z]{4,}\b", text):
+                    if token in forbidden or token in stop_words:
+                        continue
+                    token_counts[token] += 1
+
+        top_themes = [
+            {"term": term, "count": int(count)}
+            for term, count in token_counts.most_common(15)
+        ]
+        if not top_themes:
+            # Deterministic fallback when cluster text is unexpectedly sparse
+            top_themes = [
+                {"term": f"cluster_of_{len(cluster)}_episodes", "count": len(cluster)}
+                for cluster in clusters[:3]
+            ]
+
+        # Keep the legacy self-belief key for existing consumers that read
+        # consolidated theme snapshots from self-beliefs.
         key = f"consolidation_themes_{datetime.now(timezone.utc).strftime('%Y-%m-%d')}"
-        self.identity.update_self_belief(key, themes)
-        return {key: themes}
+        theme_labels = [theme["term"] for theme in top_themes[:10]]
+        self.identity.update_self_belief(key, theme_labels)
+        self.identity.set_recent_themes(top_themes[:10])
+
+        return {
+            "recent_themes": top_themes[:10],
+            key: theme_labels,
+        }

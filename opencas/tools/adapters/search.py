@@ -31,6 +31,10 @@ class SearchToolAdapter:
         pattern = str(args.get("pattern", ""))
         raw_path = args.get("path")
         output_mode = str(args.get("output_mode", "content"))
+        glob = args.get("glob")
+        max_count_raw = args.get("max_count")
+        max_count = int(max_count_raw) if max_count_raw is not None else None
+        glob_str = str(glob) if isinstance(glob, str) and glob else None
 
         if not pattern:
             return ToolResult(success=False, output="pattern is required", metadata={})
@@ -39,7 +43,13 @@ class SearchToolAdapter:
 
         # Try ripgrep first if available
         try:
-            rg_results = self._run_ripgrep(pattern, search_paths, output_mode)
+            rg_results = self._run_ripgrep(
+                pattern,
+                search_paths,
+                output_mode,
+                glob=glob_str,
+                max_count=max_count,
+            )
             if rg_results is not None:
                 return rg_results
         except Exception:
@@ -83,11 +93,21 @@ class SearchToolAdapter:
         )
 
     def _run_ripgrep(
-        self, pattern: str, search_paths: List[Path], output_mode: str
+        self,
+        pattern: str,
+        search_paths: List[Path],
+        output_mode: str,
+        *,
+        glob: str | None = None,
+        max_count: int | None = None,
     ) -> ToolResult | None:
         cmd = ["rg", "-n", "--no-heading"]
         if output_mode == "files_with_matches":
             cmd.append("-l")
+        if glob:
+            cmd.extend(["--glob", glob])
+        if max_count is not None:
+            cmd.extend(["--max-count", str(max_count)])
         cmd.extend(["--", pattern])
         cmd.extend(str(p) for p in search_paths)
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30.0)

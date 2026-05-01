@@ -3,13 +3,14 @@
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import AsyncMock
+
 import pytest
 import pytest_asyncio
 
-from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
-from opencas.runtime import AgentRuntime
 from opencas.autonomy import WorkObject, WorkStage
+from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
 from opencas.daydream import DaydreamReflection
+from opencas.runtime import AgentRuntime
 
 
 def _backdate_boredom(runtime: AgentRuntime, hours: float = 2.0) -> None:
@@ -74,6 +75,10 @@ async def test_run_cycle_daydream_keeper_gate(runtime: AgentRuntime) -> None:
     sparks = {r.spark_content for r in recent}
     assert any("keeper spark about growth and clarity" in s for s in sparks)
     assert any("reject spark about nothing relevant" in s for s in sparks)
+    keeper_record = next(r for r in recent if "keeper spark about growth and clarity" in r.spark_content)
+    assert keeper_record.experience_context["trigger"] == "background_daydream"
+    assert keeper_record.experience_context["resolution_strategy"] in {"accept", "reframe"}
+    assert keeper_record.experience_context["somatic"]["tension"] == 0.5
 
 
 @pytest.mark.asyncio

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 class BeliefSubject(str, Enum):
     SELF = "self"
     USER = "user"
+    WORLD = "world"
 
 
 class Belief(BaseModel):

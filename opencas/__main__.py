@@ -20,6 +20,7 @@ from opencas.model_routing import (
     save_persisted_model_routing_state,
 )
 from opencas.runtime import AgentRuntime
+from opencas.runtime.tom_intention_mirror import reconcile_completed_runtime_intentions
 from opencas.telegram_config import load_telegram_runtime_config
 
 
@@ -91,6 +92,13 @@ def _read_materialized_available_models(state_dir: Path) -> list[str]:
     return available
 
 
+def _env_bool(name: str) -> bool | None:
+    value = os.getenv(name)
+    if value is None:
+        return None
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _build_bootstrap_config(args, persisted_telegram) -> BootstrapConfig:
     """Build BootstrapConfig without clobbering model defaults with None."""
     state_dir = Path(args.state_dir).expanduser().resolve()
@@ -105,6 +113,10 @@ def _build_bootstrap_config(args, persisted_telegram) -> BootstrapConfig:
         "workspace_roots": [
             Path(root).expanduser().resolve() for root in args.workspace_extra_root
         ],
+        "cycle_interval": getattr(args, "cycle_interval", 600),
+        "daydream_interval": getattr(args, "daydream_interval", 720),
+        "baa_heartbeat_interval": getattr(args, "baa_heartbeat_interval", 120),
+        "approval_mode": str(getattr(args, "approval_mode", "default") or "default").replace("-", "_"),
         "credential_profile_ids": list(args.credential_profile_id),
         "credential_env_keys": list(args.credential_env_key),
         "telegram_enabled": (
@@ -157,6 +169,39 @@ def _build_bootstrap_config(args, persisted_telegram) -> BootstrapConfig:
         config_kwargs["default_llm_model"] = materialized_default
     if args.embedding_model_id is not None:
         config_kwargs["embedding_model_id"] = args.embedding_model_id
+    qdrant_url = getattr(args, "qdrant_url", None) or os.getenv("OPENCAS_QDRANT_URL")
+    if qdrant_url:
+        config_kwargs["qdrant_url"] = str(qdrant_url)
+    qdrant_api_key = getattr(args, "qdrant_api_key", None) or os.getenv(
+        "OPENCAS_QDRANT_API_KEY"
+    )
+    if qdrant_api_key:
+        config_kwargs["qdrant_api_key"] = str(qdrant_api_key)
+    qdrant_collection = getattr(args, "qdrant_collection", None) or os.getenv(
+        "OPENCAS_QDRANT_COLLECTION"
+    )
+    if qdrant_collection:
+        config_kwargs["qdrant_collection"] = str(qdrant_collection)
+    qdrant_auto_start = getattr(args, "qdrant_auto_start", None)
+    if qdrant_auto_start is None:
+        qdrant_auto_start = _env_bool("OPENCAS_QDRANT_AUTO_START")
+    if qdrant_auto_start is not None:
+        config_kwargs["qdrant_auto_start"] = bool(qdrant_auto_start)
+    qdrant_required = getattr(args, "qdrant_required", None)
+    if qdrant_required is None:
+        qdrant_required = _env_bool("OPENCAS_QDRANT_REQUIRED")
+    if qdrant_required is not None:
+        config_kwargs["qdrant_required"] = bool(qdrant_required)
+    qdrant_container_name = getattr(args, "qdrant_container_name", None) or os.getenv(
+        "OPENCAS_QDRANT_CONTAINER_NAME"
+    )
+    if qdrant_container_name:
+        config_kwargs["qdrant_container_name"] = str(qdrant_container_name)
+    qdrant_image = getattr(args, "qdrant_image", None) or os.getenv(
+        "OPENCAS_QDRANT_IMAGE"
+    )
+    if qdrant_image:
+        config_kwargs["qdrant_image"] = str(qdrant_image)
     if args.provider_config_path:
         config_kwargs["provider_config_path"] = (
             Path(args.provider_config_path).expanduser().resolve()
@@ -203,8 +248,20 @@ def main() -> int:
     parser.add_argument(
         "--cycle-interval",
         type=int,
-        default=300,
-        help="Creative cycle interval in seconds (default: 300)",
+        default=600,
+        help="Creative cycle interval in seconds (default: 600)",
+    )
+    parser.add_argument(
+        "--daydream-interval",
+        type=int,
+        default=720,
+        help="Daydream interval in seconds (default: 720)",
+    )
+    parser.add_argument(
+        "--baa-heartbeat-interval",
+        type=int,
+        default=120,
+        help="BAA heartbeat interval in seconds (default: 120)",
     )
     parser.add_argument(
         "--consolidation-interval",
@@ -220,7 +277,64 @@ def main() -> int:
     parser.add_argument(
         "--embedding-model-id",
         default=None,
-        help="Embedding model reference (e.g. google/gemini-embedding-2-preview)",
+        help="Embedding model reference (e.g. google/embeddinggemma-300m)",
+    )
+    parser.add_argument(
+        "--qdrant-url",
+        default=None,
+        help="Qdrant vector backend URL (e.g. http://127.0.0.1:6333)",
+    )
+    parser.add_argument(
+        "--qdrant-api-key",
+        default=None,
+        help="Qdrant API key, if required.",
+    )
+    parser.add_argument(
+        "--qdrant-collection",
+        default=None,
+        help="Qdrant collection for embedding vectors.",
+    )
+    parser.add_argument(
+        "--qdrant-auto-start",
+        dest="qdrant_auto_start",
+        action="store_true",
+        default=None,
+        help="Start local Qdrant automatically for localhost Qdrant URLs.",
+    )
+    parser.add_argument(
+        "--no-qdrant-auto-start",
+        dest="qdrant_auto_start",
+        action="store_false",
+        help="Do not automatically start local Qdrant.",
+    )
+    parser.add_argument(
+        "--qdrant-required",
+        dest="qdrant_required",
+        action="store_true",
+        default=None,
+        help="Fail bootstrap if configured Qdrant is unavailable.",
+    )
+    parser.add_argument(
+        "--qdrant-optional",
+        dest="qdrant_required",
+        action="store_false",
+        help="Allow bootstrap to continue if configured Qdrant is unavailable.",
+    )
+    parser.add_argument(
+        "--qdrant-container-name",
+        default=None,
+        help="Docker container name for local Qdrant startup.",
+    )
+    parser.add_argument(
+        "--qdrant-image",
+        default=None,
+        help="Docker image to use when creating local Qdrant.",
+    )
+    parser.add_argument(
+        "--approval-mode",
+        choices=["default", "auto-review", "auto_review"],
+        default="default",
+        help="Approval routing mode. auto-review routes eligible on-request escalations through an auto-reviewer subagent.",
     )
     parser.add_argument(
         "--provider-config-path",
@@ -331,17 +445,22 @@ def main() -> int:
         ctx = await BootstrapPipeline(config).run()
         runtime = AgentRuntime(ctx)
         await runtime.tom.load()
+        await reconcile_completed_runtime_intentions(runtime)
 
         if args.with_server:
             await runtime.run_autonomous_with_server(
                 host=args.host,
                 port=args.port,
                 cycle_interval=args.cycle_interval,
+                daydream_interval=args.daydream_interval,
+                baa_heartbeat_interval=args.baa_heartbeat_interval,
                 consolidation_interval=args.consolidation_interval,
             )
         else:
             await runtime.run_autonomous(
                 cycle_interval=args.cycle_interval,
+                daydream_interval=args.daydream_interval,
+                baa_heartbeat_interval=args.baa_heartbeat_interval,
                 consolidation_interval=args.consolidation_interval,
             )
 

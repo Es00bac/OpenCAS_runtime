@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import subprocess
 import json
+import sys
 from pathlib import Path
 
 from scripts.run_qualification_cycle import (
     build_summary_command,
     build_validation_command,
     main,
+    parse_args,
     render_results,
     resolve_python_executable,
     run_cycle,
@@ -57,6 +59,14 @@ def test_build_summary_command_targets_runs_and_output_dirs() -> None:
         output_dir=Path("/tmp/out"),
     )
     assert command[-4:] == ["--runs-dir", "/tmp/runs", "--output-dir", "/tmp/out"]
+
+
+def test_parse_args_defaults_to_embeddinggemma(monkeypatch) -> None:
+    monkeypatch.setattr(sys, "argv", ["run_qualification_cycle.py"])
+
+    args = parse_args()
+
+    assert args.embedding_model == "google/embeddinggemma-300m"
 
 
 def test_run_cycle_runs_summary_after_iterations(monkeypatch) -> None:

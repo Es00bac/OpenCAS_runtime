@@ -7,7 +7,7 @@ embedded in the main runtime loop.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, Dict, List
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from opencas.autonomy import WorkObject, WorkStage
 from opencas.daydream import DaydreamReflection
@@ -15,6 +15,22 @@ from opencas.somatic import AppraisalEventType
 
 if TYPE_CHECKING:
     from .agent_loop import AgentRuntime
+
+
+def _somatic_experience_context(runtime: "AgentRuntime") -> Dict[str, Any]:
+    state = getattr(getattr(runtime.ctx, "somatic", None), "state", None)
+    if state is None:
+        return {}
+    return {
+        "somatic_tag": getattr(state, "somatic_tag", None),
+        "arousal": round(float(getattr(state, "arousal", 0.0) or 0.0), 3),
+        "fatigue": round(float(getattr(state, "fatigue", 0.0) or 0.0), 3),
+        "tension": round(float(getattr(state, "tension", 0.0) or 0.0), 3),
+        "valence": round(float(getattr(state, "valence", 0.0) or 0.0), 3),
+        "focus": round(float(getattr(state, "focus", 0.0) or 0.0), 3),
+        "energy": round(float(getattr(state, "energy", 0.0) or 0.0), 3),
+        "certainty": round(float(getattr(state, "certainty", 0.0) or 0.0), 3),
+    }
 
 
 async def run_runtime_daydream(runtime: "AgentRuntime") -> Dict[str, Any]:
@@ -103,6 +119,17 @@ async def run_runtime_daydream_inner(runtime: "AgentRuntime") -> Dict[str, Any]:
                 stored_conflicts,
                 runtime.ctx.somatic.state,
             )
+            reflection.experience_context = {
+                **(reflection.experience_context or {}),
+                "trigger": "background_daydream",
+                "generated_at": now.isoformat(),
+                "active_goals": list(getattr(runtime.executive, "active_goals", []) or []),
+                "somatic_readiness": round(float(somatic_readiness), 3),
+                "somatic": _somatic_experience_context(runtime),
+                "resolution_strategy": resolution.strategy,
+                "resolution_reason": resolution.reason,
+                "keeper": reflection.keeper,
+            }
 
             allow_promotion = reflection.keeper and resolution.strategy in ("accept", "reframe")
             original_spark_content = reflection.spark_content
@@ -229,6 +256,19 @@ async def run_runtime_daydream_inner(runtime: "AgentRuntime") -> Dict[str, Any]:
                     meta={"suggested_strategy": resolution.mirror.suggested_strategy},
                 )
 
+            initiative_contact = getattr(runtime, "initiative_contact", None)
+            if initiative_contact is not None and hasattr(initiative_contact, "consider_reflection"):
+                try:
+                    await initiative_contact.consider_reflection(reflection, resolution)
+                except Exception as exc:
+                    runtime._trace(
+                        "initiative_contact_reflection_error",
+                        {
+                            "reflection_id": str(reflection.reflection_id),
+                            "error": str(exc),
+                        },
+                    )
+
             if reflection.keeper and runtime.ctx.identity:
                 synthesis = reflection.synthesis.lower()
                 for prefix in ("i want to", "i should"):
@@ -271,16 +311,40 @@ def build_runtime_metacognition_status(runtime: "AgentRuntime") -> Dict[str, Any
     }
 
 
-async def rebuild_runtime_identity(runtime: "AgentRuntime") -> Dict[str, Any]:
-    """Rebuild identity from autobiographical memory and apply it to self-model."""
-    result = await runtime.rebuilder.rebuild()
-    await runtime.rebuilder.apply(result, runtime.ctx.identity)
+async def rebuild_runtime_identity(
+    runtime: "AgentRuntime",
+    *,
+    seed_episode_ids: Optional[List[str]] = None,
+    min_created_at: Optional[datetime] = None,
+    expand_graph: bool = True,
+    term_limits: Optional[Dict[str, int]] = None,
+    apply: bool = True,
+) -> Dict[str, Any]:
+    """Rebuild identity from autobiographical memory, optionally as a preview."""
+    result = await runtime.rebuilder.rebuild(
+        seed_episode_ids=seed_episode_ids,
+        min_created_at=min_created_at,
+        expand_graph=expand_graph,
+        term_limits=term_limits,
+    )
+    validation = runtime.rebuilder.validate_result(result, term_limits=term_limits)
+    if apply:
+        await runtime.rebuilder.apply(
+            result,
+            runtime.ctx.identity,
+            term_limits=term_limits,
+        )
     runtime._trace(
-        "identity_rebuilt",
+        "identity_rebuilt" if apply else "identity_rebuild_preview",
         {
             "source_episode_count": len(result.source_episode_ids),
             "confidence": result.confidence,
             "has_narrative": bool(result.narrative),
+            "applied": apply,
+            "validation": validation,
         },
     )
-    return result.model_dump(mode="json")
+    payload = result.model_dump(mode="json")
+    payload["applied"] = apply
+    payload["validation"] = validation
+    return payload

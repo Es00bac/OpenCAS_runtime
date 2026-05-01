@@ -31,6 +31,27 @@ class ExecutionPhase(str, Enum):
     POSTCHECK = "postcheck"
 
 
+class RetryMode(str, Enum):
+    """Preferred retry posture after an attempt is salvaged."""
+
+    CONTINUE_RETRY = "continue_retry"
+    RESUME_EXISTING_ARTIFACT = "resume_existing_artifact"
+    NARROW_EDIT = "narrow_edit"
+    DETERMINISTIC_REVIEW = "deterministic_review"
+    PAUSE_PROJECT = "pause_project"
+    COMPLETE_PARTIAL_AND_STOP = "complete_partial_and_stop"
+
+
+class AttemptOutcome(str, Enum):
+    """Normalized salvage outcome for an execution attempt."""
+
+    PARTIAL = "partial"
+    FAILED = "failed"
+    VERIFY_FAILED = "verify_failed"
+    GUARD_STOPPED = "guard_stopped"
+    DONE = "done"
+
+
 class PhaseRecord(BaseModel):
     """Record of a single phase execution."""
 
@@ -102,3 +123,39 @@ class ExecutionReceipt(BaseModel):
     completed_at: Optional[datetime] = None
     success: bool = False
     output: str = ""
+
+
+class AttemptSalvagePacket(BaseModel):
+    """Deterministic salvage summary for a single execution attempt."""
+
+    packet_id: UUID
+    task_id: UUID
+    attempt: int
+    project_signature: Optional[str] = None
+    project_id: Optional[str] = None
+    objective: str
+    canonical_artifact_path: Optional[str] = None
+    artifact_paths_touched: List[str] = Field(default_factory=list)
+    plan_digest: str = ""
+    execution_digest: str = ""
+    verification_digest: Optional[str] = None
+    tool_signature: str = ""
+    divergence_signature: str
+    outcome: AttemptOutcome
+    partial_value: str = ""
+    discovered_constraints: List[str] = Field(default_factory=list)
+    unresolved_questions: List[str] = Field(default_factory=list)
+    best_next_step: str
+    recommended_mode: RetryMode
+    meaningful_progress_signal: str = ""
+    llm_spend_class: str = "broad"
+    created_at: datetime
+
+
+class RetryDecision(BaseModel):
+    """Decision for whether the retry governor allows the next attempt."""
+
+    allowed: bool
+    reason: str
+    mode: RetryMode
+    reuse_packet_id: Optional[UUID] = None

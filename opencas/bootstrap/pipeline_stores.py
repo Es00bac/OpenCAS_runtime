@@ -15,6 +15,7 @@ from opencas.execution.receipt_store import ExecutionReceiptStore
 from opencas.memory import MemoryStore
 
 from .config import BootstrapConfig
+from .live_objective import read_tasklist_live_objective
 
 if TYPE_CHECKING:
     from opencas.identity import IdentityManager
@@ -78,6 +79,11 @@ async def initialize_runtime_stores(
     )
     executive.load_snapshot(config.state_dir / "executive.json")
     executive.restore_goals_from_identity()
+    live_objective = read_tasklist_live_objective(config.workspace_root)
+    if live_objective:
+        executive.set_intention(live_objective, source="tasklist_live_objective")
+    elif executive.intention_source == "tasklist_live_objective":
+        executive.set_intention(None)
     stage("executive_online")
 
     return RuntimeStoreBundle(

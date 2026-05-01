@@ -7,10 +7,12 @@ from typing import Any, Dict, Optional
 
 from opencas.telegram_config import (
     TelegramRuntimeConfig,
+    telegram_config_path,
     load_telegram_runtime_config,
     save_telegram_runtime_config,
 )
 from opencas.telegram_integration import TelegramBotService
+from opencas.provenance_events_adapter import ProvenanceEventType, emit_provenance_event
 
 
 def build_runtime_telegram_service(runtime: Any) -> Optional[TelegramBotService]:
@@ -81,11 +83,24 @@ async def configure_runtime_telegram(runtime: Any, settings: TelegramRuntimeConf
         except Exception:
             pass
     runtime._telegram_config = settings
-    save_telegram_runtime_config(runtime.ctx.config.state_dir, settings)
+    saved_path = save_telegram_runtime_config(runtime.ctx.config.state_dir, settings) or telegram_config_path(runtime.ctx.config.state_dir)
     runtime._telegram = build_runtime_telegram_service(runtime)
     await start_runtime_telegram(runtime)
     status = await get_runtime_telegram_status(runtime)
     status["saved"] = True
+    emit_provenance_event(
+        status,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact="setting|telegram|runtime",
+        triggering_action="UPDATE",
+        parent_link_id=str(saved_path),
+        linked_link_ids=[str(saved_path)],
+        details={
+            "enabled": settings.enabled,
+            "dm_policy": settings.dm_policy,
+            "bot_token_configured": bool(settings.bot_token),
+        },
+    )
     return status
 
 

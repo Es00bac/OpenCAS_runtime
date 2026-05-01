@@ -49,6 +49,7 @@ class ScheduleService:
         processed = 0
         submitted = 0
         recorded = 0
+        skipped = 0
         failed = 0
         for item in due:
             try:
@@ -58,12 +59,77 @@ class ScheduleService:
                     submitted += 1
                 elif run.status == ScheduleRunStatus.RECORDED:
                     recorded += 1
+                elif run.status == ScheduleRunStatus.SKIPPED:
+                    skipped += 1
                 elif run.status == ScheduleRunStatus.FAILED:
                     failed += 1
             except Exception as exc:
                 failed += 1
                 self._trace("schedule_process_error", {"schedule_id": str(item.schedule_id), "error": str(exc)})
-        return {"processed": processed, "submitted": submitted, "recorded": recorded, "failed": failed}
+        return {
+            "processed": processed,
+            "submitted": submitted,
+            "recorded": recorded,
+            "skipped": skipped,
+            "failed": failed,
+        }
+
+    async def temporal_agenda(
+        self,
+        now: Optional[datetime] = None,
+        *,
+        horizon_hours: float = 24.0,
+        upcoming_limit: int = 8,
+        recent_limit: int = 8,
+    ) -> Dict[str, Any]:
+        """Return the agent-facing temporal agenda from durable schedule state."""
+        now = self._as_utc(now or datetime.now(timezone.utc))
+        horizon_hours = max(0.25, float(horizon_hours))
+        upcoming_limit = max(1, int(upcoming_limit))
+        recent_limit = max(1, int(recent_limit))
+        horizon_end = now + timedelta(hours=horizon_hours)
+
+        active_items = await self.store.list_items(status=ScheduleStatus.ACTIVE, limit=1000)
+        due_items = [
+            item
+            for item in active_items
+            if item.next_run_at is not None and self._as_utc(item.next_run_at) <= now
+        ]
+        future_items = [
+            item
+            for item in active_items
+            if item.next_run_at is not None and now < self._as_utc(item.next_run_at) <= horizon_end
+        ]
+        due_items.sort(key=lambda item: (item.next_run_at or item.start_at, -item.priority))
+        future_items.sort(key=lambda item: (item.next_run_at or item.start_at, -item.priority))
+        recent_runs = await self.store.list_runs(limit=recent_limit)
+
+        due_payload = [self._agenda_item_payload(item, now) for item in due_items[:upcoming_limit]]
+        upcoming_payload = [
+            self._agenda_item_payload(item, now) for item in future_items[:upcoming_limit]
+        ]
+        runs_payload = [self._agenda_run_payload(run) for run in recent_runs]
+        next_item = due_payload[0] if due_payload else upcoming_payload[0] if upcoming_payload else None
+        counts = {
+            "active": len(active_items),
+            "due_now": len(due_items),
+            "upcoming": len(future_items),
+            "recent_runs": len(runs_payload),
+            "tasks": sum(1 for item in active_items if item.kind == ScheduleKind.TASK),
+            "events": sum(1 for item in active_items if item.kind == ScheduleKind.EVENT),
+        }
+        return {
+            "now": now.isoformat(),
+            "horizon_hours": horizon_hours,
+            "horizon_end": horizon_end.isoformat(),
+            "timezone": self.default_timezone,
+            "counts": counts,
+            "due_now": due_payload,
+            "upcoming": upcoming_payload,
+            "recent_runs": runs_payload,
+            "next": next_item,
+            "summary": self._agenda_summary(counts, next_item),
+        }
 
     async def trigger(
         self,
@@ -87,6 +153,25 @@ class ScheduleService:
             status=ScheduleRunStatus.RECORDED,
             meta={"manual": manual, "action": item.action.value},
         )
+        if await self._linked_commitment_finished(item):
+            run.status = ScheduleRunStatus.SKIPPED
+            run.finished_at = datetime.now(timezone.utc)
+            run.meta["skip_reason"] = "linked_commitment_finished"
+            item.status = ScheduleStatus.COMPLETED
+            item.next_run_at = None
+            await self.store.record_run(run)
+            await self.store.save(item)
+            self._trace(
+                "schedule_triggered",
+                {
+                    "schedule_id": str(item.schedule_id),
+                    "run_id": str(run.run_id),
+                    "status": run.status.value,
+                    "task_id": run.task_id,
+                    "skip_reason": run.meta["skip_reason"],
+                },
+            )
+            return run
         try:
             if item.action == ScheduleAction.SUBMIT_BAA:
                 task = RepairTask(
@@ -128,6 +213,27 @@ class ScheduleService:
             },
         )
         return run
+
+    async def _linked_commitment_finished(self, item: ScheduleItem) -> bool:
+        commitment_id = str(item.commitment_id or "").strip()
+        if not commitment_id or self.runtime is None:
+            return False
+        store = getattr(self.runtime, "commitment_store", None)
+        if store is None:
+            store = getattr(getattr(self.runtime, "ctx", None), "commitment_store", None)
+        if store is None:
+            executive = getattr(getattr(self.runtime, "ctx", None), "executive", None)
+            store = getattr(executive, "commitment_store", None)
+        if store is None:
+            return False
+        try:
+            commitment = await store.get(commitment_id)
+        except Exception:
+            return False
+        if commitment is None:
+            return False
+        status = str(getattr(getattr(commitment, "status", None), "value", getattr(commitment, "status", "")))
+        return status in {"completed", "abandoned"}
 
     async def _advance_item(self, item: ScheduleItem, scheduled_for: datetime, now: datetime) -> None:
         item.last_run_at = now
@@ -254,6 +360,54 @@ class ScheduleService:
                 )
         entries.sort(key=lambda entry: entry["scheduled_for"])
         return entries
+
+    def _agenda_item_payload(self, item: ScheduleItem, now: datetime) -> Dict[str, Any]:
+        next_run_at = item.next_run_at or item.start_at
+        next_run_utc = self._as_utc(next_run_at)
+        return {
+            "schedule_id": str(item.schedule_id),
+            "title": item.title,
+            "kind": item.kind.value,
+            "action": item.action.value,
+            "status": item.status.value,
+            "next_run_at": next_run_utc.isoformat(),
+            "seconds_until": round((next_run_utc - now).total_seconds(), 3),
+            "is_due": next_run_utc <= now,
+            "recurrence": item.recurrence.value,
+            "priority": item.priority,
+            "tags": item.tags,
+            "objective": item.objective,
+            "description": item.description,
+            "commitment_id": item.commitment_id,
+            "plan_id": item.plan_id,
+            "meta": item.meta,
+        }
+
+    @staticmethod
+    def _agenda_run_payload(run: ScheduleRun) -> Dict[str, Any]:
+        return {
+            "run_id": str(run.run_id),
+            "schedule_id": str(run.schedule_id),
+            "scheduled_for": run.scheduled_for.isoformat(),
+            "started_at": run.started_at.isoformat(),
+            "finished_at": run.finished_at.isoformat() if run.finished_at else None,
+            "status": run.status.value,
+            "task_id": run.task_id,
+            "error": run.error,
+            "meta": run.meta,
+        }
+
+    @staticmethod
+    def _agenda_summary(counts: Dict[str, int], next_item: Optional[Dict[str, Any]]) -> str:
+        due = int(counts.get("due_now", 0))
+        upcoming = int(counts.get("upcoming", 0))
+        if due:
+            return f"{due} schedule item(s) due now; next: {next_item.get('title') if next_item else 'unknown'}."
+        if next_item:
+            return f"No schedule items due now; next: {next_item.get('title')} at {next_item.get('next_run_at')}."
+        if upcoming:
+            return f"No schedule items due now; {upcoming} upcoming in the horizon."
+        return "No active schedule items due or upcoming in the horizon."
 
     @staticmethod
     def _as_utc(value: datetime) -> datetime:

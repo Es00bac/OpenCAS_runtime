@@ -231,15 +231,11 @@ async def build_config_overview_payload(runtime: Any) -> Dict[str, Any]:
     configured_embedding_model = getattr(runtime_config, "embedding_model_id", None)
     effective_chat_model = getattr(getattr(runtime.ctx, "llm", None), "default_model", None) or configured_chat_model
     effective_embedding_model = getattr(getattr(runtime.ctx, "embeddings", None), "model_id", None) or configured_embedding_model
-    embedding_models = sorted(
-        {
-            model_id
-            for model_id in available_models
-            if "embedding" in model_id.lower()
-        }
-    )
+    embedding_models: List[str] = []
     if effective_embedding_model:
-        embedding_models = sorted(set(embedding_models + [effective_embedding_model]))
+        embedding_models.append(effective_embedding_model)
+    if configured_embedding_model and configured_embedding_model not in embedding_models:
+        embedding_models.append(configured_embedding_model)
     if "local-fallback" not in embedding_models:
         embedding_models.append("local-fallback")
     state_dir = getattr(runtime_config, "state_dir", None)

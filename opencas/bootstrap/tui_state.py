@@ -28,8 +28,8 @@ class WizardState:
         self.credential_source_env_path: str = ""
         self.credential_env_keys: List[str] = []
         self.selected_profiles: List[str] = []
-        self.default_llm_model: str = "anthropic/claude-sonnet-4-6"
-        self.embedding_model_id: str = "google/gemini-embedding-2-preview"
+        self.default_llm_model: Optional[str] = None
+        self.embedding_model_id: str = "google/embeddinggemma-300m"
         self.model_routing_mode: str = "single"
         self.routing_light_model: str = ""
         self.routing_standard_model: str = ""
@@ -56,7 +56,9 @@ class WizardState:
         self.use_server: bool = True
         self.host: str = "127.0.0.1"
         self.port: str = "8080"
-        self.cycle_interval: str = "300"
+        self.cycle_interval: str = "600"
+        self.daydream_interval: str = "720"
+        self.baa_heartbeat_interval: str = "120"
         self.consolidation_interval: str = "86400"
         self.with_embeddings: bool = True
         self.accepted_warning: bool = False

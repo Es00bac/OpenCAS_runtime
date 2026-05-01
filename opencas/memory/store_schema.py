@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS episodes (
     last_accessed TEXT,
     used_successfully INTEGER NOT NULL DEFAULT 0,
     used_unsuccessfully INTEGER NOT NULL DEFAULT 0,
+    identity_mutagen INTEGER NOT NULL DEFAULT 0,
     payload TEXT NOT NULL DEFAULT '{}'
 );
 
@@ -41,7 +42,9 @@ CREATE TABLE IF NOT EXISTS memories (
     tags TEXT NOT NULL DEFAULT '[]',
     salience REAL NOT NULL DEFAULT 1.0,
     access_count INTEGER NOT NULL DEFAULT 0,
-    last_accessed TEXT
+    last_accessed TEXT,
+    identity_mutagen INTEGER NOT NULL DEFAULT 0,
+    confidence_score REAL NOT NULL DEFAULT 0.8
 );
 
 CREATE INDEX IF NOT EXISTS idx_memories_salience ON memories(salience);
@@ -115,4 +118,7 @@ MEMORY_STORE_MIGRATIONS = [
     "ALTER TABLE episode_edges ADD COLUMN causal_weight REAL NOT NULL DEFAULT 0.0",
     "ALTER TABLE episode_edges ADD COLUMN verification_weight REAL NOT NULL DEFAULT 0.0",
     "ALTER TABLE episode_edges ADD COLUMN actor_affinity_weight REAL NOT NULL DEFAULT 0.0",
+    "ALTER TABLE episodes ADD COLUMN identity_mutagen INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE memories ADD COLUMN identity_mutagen INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE memories ADD COLUMN confidence_score REAL NOT NULL DEFAULT 0.8",
 ]

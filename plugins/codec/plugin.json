@@ -1,0 +1,17 @@
+{
+  "manifest_version": 1,
+  "id": "codec",
+  "name": "Codec Tools",
+  "description": "Encoding utilities: hashing, base64, URL encode/decode, slugify.",
+  "version": "1.0.0",
+  "entrypoint": "main.py",
+  "capabilities": [
+    {
+      "capability_id": "plugin:codec.main",
+      "display_name": "Codec Tools",
+      "kind": "tool",
+      "description": "Hashing and encoding utilities.",
+      "tool_names": ["hash_text", "base64_encode", "base64_decode", "url_encode", "url_decode", "slugify"]
+    }
+  ]
+}

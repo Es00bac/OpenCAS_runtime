@@ -13,11 +13,19 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from opencas.autonomy.models import ActionRequest, ActionRiskTier, ApprovalLevel
-from opencas.governance import classify_web_action, normalize_web_domain
+from opencas.governance import (
+    AutoReviewMode,
+    classify_web_action,
+    normalize_auto_review_mode,
+    normalize_web_domain,
+)
+from opencas.infra import POST_ACTION_DECISION, POST_TOOL_EXECUTE, PRE_TOOL_EXECUTE
 from opencas.platform import CapabilityDescriptor, CapabilitySource, CapabilityStatus
 from opencas.somatic import AppraisalEventType
-from opencas.tools import ToolUseContext
-from opencas.tools.validation import assess_command
+from opencas.provenance_events_adapter import (
+    ProvenanceEventType,
+    emit_provenance_event,
+)
 
 if TYPE_CHECKING:
     from .agent_loop import AgentRuntime
@@ -28,6 +36,8 @@ def build_runtime_tool_use_context(
     session_id: str,
 ) -> ToolUseContext:
     """Create a tool-use context with the active plan, if one exists."""
+    from opencas.tools.context import ToolUseContext
+
     return ToolUseContext(runtime=runtime, session_id=session_id)
 
 
@@ -46,6 +56,43 @@ async def hydrate_runtime_tool_use_context(
         except Exception:
             pass
     return ctx
+
+
+async def resolve_runtime_tool_use_artifact_hint(
+    runtime: "AgentRuntime",
+    ctx: ToolUseContext,
+    *,
+    objective: str = "",
+) -> Optional[str]:
+    """Resolve the best available artifact hint for general tool-use planning."""
+
+    explicit_hint = _clean_artifact_path(ctx.artifact_hint)
+    if explicit_hint:
+        return explicit_hint
+
+    task_cache: dict[str, Any] = {}
+
+    if ctx.task_id:
+        task = await _get_task(runtime, ctx.task_id, task_cache)
+        artifact = _artifact_from_task(task)
+        if artifact:
+            return artifact
+
+    if ctx.active_plan_id:
+        artifact = await _artifact_from_plan(runtime, ctx.active_plan_id, task_cache)
+        if artifact:
+            return artifact
+
+    objective_text = str(objective or "").strip()
+    if not objective_text:
+        return None
+
+    best_match = await _match_artifact_from_active_state(
+        runtime,
+        objective=objective_text,
+        task_cache=task_cache,
+    )
+    return best_match
 
 
 async def discover_and_register_mcp_tools(
@@ -142,10 +189,204 @@ def make_mcp_register_adapter(runtime: "AgentRuntime"):
     return adapter
 
 
+async def _match_artifact_from_active_state(
+    runtime: "AgentRuntime",
+    *,
+    objective: str,
+    task_cache: dict[str, Any],
+) -> Optional[str]:
+    objective_tokens = _tokenize_text(objective)
+    if not objective_tokens:
+        return None
+
+    best_score = 0
+    best_artifact: Optional[str] = None
+
+    task_store = getattr(runtime.ctx, "tasks", None)
+    if task_store is not None:
+        try:
+            pending_tasks = await task_store.list_pending(limit=25)
+        except Exception:
+            pending_tasks = []
+        for task in pending_tasks:
+            task_id = str(getattr(task, "task_id", "") or "")
+            if task_id:
+                task_cache[task_id] = task
+            artifact = _artifact_from_task(task)
+            if not artifact:
+                continue
+            score = _score_artifact_candidate(
+                objective_tokens=objective_tokens,
+                texts=[getattr(task, "objective", ""), artifact],
+            )
+            if score > best_score:
+                best_score = score
+                best_artifact = artifact
+
+    plan_store = getattr(runtime.ctx, "plan_store", None)
+    if plan_store is not None:
+        try:
+            active_plans = await plan_store.list_active()
+        except Exception:
+            active_plans = []
+        for plan in active_plans:
+            artifact = await _artifact_from_plan(runtime, plan, task_cache)
+            if not artifact:
+                continue
+            score = _score_artifact_candidate(
+                objective_tokens=objective_tokens,
+                texts=[getattr(plan, "content", ""), artifact],
+            )
+            if score > best_score:
+                best_score = score
+                best_artifact = artifact
+
+    return best_artifact if best_score > 0 else None
+
+
+async def _artifact_from_plan(
+    runtime: "AgentRuntime",
+    plan_or_id: Any,
+    task_cache: dict[str, Any],
+) -> Optional[str]:
+    plan_store = getattr(runtime.ctx, "plan_store", None)
+    if plan_store is None:
+        return None
+
+    plan = plan_or_id
+    if isinstance(plan_or_id, str):
+        try:
+            plan = await plan_store.get_plan(plan_or_id)
+        except Exception:
+            return None
+    if plan is None:
+        return None
+
+    task_id = str(getattr(plan, "task_id", "") or "")
+    if task_id:
+        task = await _get_task(runtime, task_id, task_cache)
+        artifact = _artifact_from_task(task)
+        if artifact:
+            return artifact
+
+    try:
+        actions = await plan_store.get_actions(getattr(plan, "plan_id", ""), limit=25)
+    except Exception:
+        actions = []
+    candidate_paths = _artifact_candidates_from_actions(
+        actions,
+        state_dir=getattr(getattr(runtime.ctx, "config", None), "state_dir", None),
+    )
+    if not candidate_paths:
+        return None
+    return candidate_paths[0]
+
+
+async def _get_task(
+    runtime: "AgentRuntime",
+    task_id: str,
+    task_cache: dict[str, Any],
+) -> Optional[Any]:
+    cached = task_cache.get(task_id)
+    if cached is not None:
+        return cached
+
+    task_store = getattr(runtime.ctx, "tasks", None)
+    if task_store is None:
+        return None
+    try:
+        task = await task_store.get(task_id)
+    except Exception:
+        return None
+    if task is not None:
+        task_cache[task_id] = task
+    return task
+
+
+def _artifact_from_task(task: Any) -> Optional[str]:
+    if task is None:
+        return None
+
+    meta = getattr(task, "meta", {})
+    if isinstance(meta, dict):
+        resume_project = meta.get("resume_project")
+        if isinstance(resume_project, dict):
+            artifact = _clean_artifact_path(resume_project.get("canonical_artifact_path"))
+            if artifact:
+                return artifact
+        artifact = _clean_artifact_path(meta.get("canonical_artifact_path"))
+        if artifact:
+            return artifact
+
+    artifacts = [
+        _clean_artifact_path(path)
+        for path in getattr(task, "artifacts", []) or []
+    ]
+    artifacts = [path for path in artifacts if path]
+    if len(artifacts) == 1:
+        return artifacts[0]
+    return None
+
+
+def _artifact_candidates_from_actions(actions: List[Any], *, state_dir: Any) -> List[str]:
+    scored: dict[str, int] = {}
+    for action in actions:
+        args = getattr(action, "args", {}) if action is not None else {}
+        if not isinstance(args, dict):
+            continue
+        for key in ("canonical_artifact_path", "artifact_path", "file_path", "path"):
+            candidate = _clean_artifact_path(args.get(key))
+            if not candidate or _is_plan_scaffold_path(candidate, state_dir):
+                continue
+            scored[candidate] = scored.get(candidate, 0) + 1
+    return [
+        path
+        for path, _count in sorted(
+            scored.items(),
+            key=lambda item: (item[1], len(item[0])),
+            reverse=True,
+        )
+    ]
+
+
+def _is_plan_scaffold_path(path: str, state_dir: Any) -> bool:
+    normalized = str(path or "").replace("\\", "/")
+    if normalized.startswith(".opencas/plans/") or "/.opencas/plans/" in normalized:
+        return True
+    if state_dir:
+        plans_dir = str(Path(state_dir) / "plans").replace("\\", "/")
+        if normalized.startswith(plans_dir):
+            return True
+    return False
+
+
+def _score_artifact_candidate(*, objective_tokens: set[str], texts: List[str]) -> int:
+    candidate_tokens: set[str] = set()
+    for text in texts:
+        candidate_tokens.update(_tokenize_text(text))
+    return len(objective_tokens & candidate_tokens)
+
+
+def _tokenize_text(text: Any) -> set[str]:
+    return {
+        token
+        for token in re.findall(r"[a-z0-9_./-]+", str(text or "").lower())
+        if len(token) >= 4
+    }
+
+
+def _clean_artifact_path(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    return text or None
+
+
 async def execute_runtime_tool(
     runtime: "AgentRuntime",
     name: str,
     args: Dict[str, Any],
+    *,
+    session_id: Optional[str] = None,
+    task_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Execute a tool through the registry after self-approval."""
     entry = runtime.tools.get(name)
@@ -165,7 +406,14 @@ async def execute_runtime_tool(
         tool_name=name,
         payload=_build_tool_request_payload(runtime, name, args),
     )
-    approval = await handle_runtime_action(runtime, request)
+    approval = await handle_runtime_action(
+        runtime,
+        request,
+        session_id=session_id,
+        task_id=task_id,
+        tool_name=name,
+        args=args,
+    )
     if not approval["approved"]:
         if entry.risk_tier != ActionRiskTier.READONLY:
             runtime.ctx.somatic.bump_from_work(intensity=0.05, success=False)
@@ -181,30 +429,138 @@ async def execute_runtime_tool(
             "decision": approval["decision"],
         }
 
+    hook_bus = getattr(runtime.ctx, "hook_bus", None)
+    hook_context: Dict[str, Any] = {
+        "tool_name": name,
+        "args": args,
+        "risk_tier": entry.risk_tier.value,
+        "session_id": session_id or getattr(getattr(runtime.ctx, "config", None), "session_id", None),
+        "task_id": task_id,
+    }
+    if hook_bus is not None:
+        pre_hook = hook_bus.run(PRE_TOOL_EXECUTE, hook_context)
+        if not pre_hook.allowed:
+            failure = {
+                "success": False,
+                "output": f"Tool execution blocked: {pre_hook.reason}",
+                "metadata": {"hook_blocked": True, "reason": pre_hook.reason},
+            }
+            post_context = {
+                **hook_context,
+                "result_success": False,
+                "result_output": failure["output"],
+                "result_metadata": failure["metadata"],
+            }
+            post_hook = hook_bus.run(POST_TOOL_EXECUTE, post_context)
+            if post_hook.mutated_context is not None:
+                failure["metadata"] = dict(post_hook.mutated_context.get("result_metadata") or failure["metadata"])
+            return failure
+        if pre_hook.mutated_context is not None:
+            hook_context = pre_hook.mutated_context
+            args = dict(hook_context.get("args") or args)
+
     result = await runtime.tools.execute_async(name, args)
     await _record_web_trust_outcome(runtime, request.payload, result.success)
     if entry.risk_tier != ActionRiskTier.READONLY:
         runtime.ctx.somatic.bump_from_work(intensity=0.1, success=result.success)
     await runtime.ctx.somatic.emit_appraisal_event(
         AppraisalEventType.TOOL_EXECUTED,
-        source_text=f"tool {name} executed",
+        source_text=_tool_appraisal_source_text(name, result.output),
         trigger_event_id=str(request.action_id),
         meta={"tool_name": name, "success": result.success},
     )
     if result.success:
+        if hook_bus is not None:
+            post_context = {
+                **hook_context,
+                "result_success": True,
+                "result_output": result.output,
+                "result_metadata": dict(result.metadata or {}),
+            }
+            post_hook = hook_bus.run(POST_TOOL_EXECUTE, post_context)
+            if post_hook.mutated_context is not None:
+                result.metadata = dict(post_hook.mutated_context.get("result_metadata") or result.metadata or {})
+    result.metadata = dict(result.metadata or {})
+    affective_pressure = await _record_affective_tool_result(
+        runtime,
+        name=name,
+        result=result,
+        action_id=str(request.action_id),
+        session_id=session_id,
+        task_id=task_id,
+    )
+    if affective_pressure:
+        result.metadata["affective_pressure"] = affective_pressure
+    if result.success:
+        result.metadata = dict(result.metadata or {})
         resolved_goals = await runtime.executive.check_goal_resolution(result.output)
+        provenance_events = list(result.metadata.get("provenance_events") or [])
+        provenance_events.append(
+            emit_provenance_event(
+                None,
+                event_type=ProvenanceEventType.CHECK,
+                triggering_artifact=f"tool|default|{name}",
+                triggering_action="VERIFY",
+                parent_link_id=str(request.action_id),
+                linked_link_ids=[str(request.action_id)],
+                details={
+                    "action_id": str(request.action_id),
+                    "result_success": True,
+                    "resolved_goal_count": len(resolved_goals),
+                },
+            ).to_dict()
+        )
         for goal in resolved_goals:
             await runtime.ctx.somatic.emit_appraisal_event(
                 AppraisalEventType.GOAL_ACHIEVED,
                 source_text=f"Goal achieved: {goal}",
                 trigger_event_id=str(request.action_id),
             )
+        result.metadata["provenance_events"] = provenance_events
     runtime._sync_executive_snapshot()
     return {
         "success": result.success,
         "output": result.output,
         "metadata": result.metadata,
     }
+
+
+def _tool_appraisal_source_text(name: str, output: str, *, max_chars: int = 1200) -> str:
+    """Use actual tool output for appraisal without feeding unbounded text."""
+    text = str(output or "").strip()
+    if len(text) > max_chars:
+        text = text[:max_chars].rstrip()
+    if text:
+        return f"tool {name} output: {text}"
+    return f"tool {name} executed with empty output"
+
+
+async def _record_affective_tool_result(
+    runtime: "AgentRuntime",
+    *,
+    name: str,
+    result: Any,
+    action_id: str,
+    session_id: Optional[str],
+    task_id: Optional[str],
+) -> Optional[Dict[str, Any]]:
+    service = getattr(getattr(runtime, "ctx", None), "affective_examinations", None)
+    examine = getattr(service, "examine_tool_result", None)
+    if not callable(examine):
+        return None
+    config_session = getattr(getattr(getattr(runtime, "ctx", None), "config", None), "session_id", None)
+    try:
+        record = await examine(
+            session_id=session_id or config_session,
+            source_id=action_id,
+            tool_name=name,
+            success=bool(result.success),
+            output=str(result.output or ""),
+            meta={"task_id": task_id} if task_id else None,
+        )
+    except Exception:
+        return None
+    return record.pressure_metadata()
 
 
 async def install_runtime_plugin(
@@ -260,24 +616,114 @@ async def submit_runtime_repair(
 async def handle_runtime_action(
     runtime: "AgentRuntime",
     request: ActionRequest,
+    *,
+    session_id: Optional[str] = None,
+    task_id: Optional[str] = None,
+    tool_name: Optional[str] = None,
+    args: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Evaluate an action through the self-approval ladder."""
+    args = args or {}
     decision = runtime.approval.evaluate(request)
+    auto_review_meta: Dict[str, Any] = {"mode": "default", "eligible": False, "reason": "not_configured"}
+    auto_review = getattr(runtime, "auto_review", None) or getattr(runtime, "auto_review_policy", None)
+    if auto_review is not None and hasattr(auto_review, "review"):
+        decision, auto_review_meta = await auto_review.review(request, decision)
     await runtime.approval.maybe_record(decision, request, decision.score)
-    runtime._trace(
-        "handle_action",
-        {
-            "action_id": str(request.action_id),
-            "decision": decision.level.value,
-            "confidence": decision.confidence,
-        },
+    trace = getattr(runtime, "_trace", None)
+    if callable(trace):
+        trace(
+            "handle_action",
+            {
+                "action_id": str(request.action_id),
+                "decision": decision.level.value,
+                "confidence": decision.confidence,
+                "auto_review": auto_review_meta,
+            },
+        )
+    target_kind = "file" if any(
+        str(args.get(key, "") or "").strip() for key in ("file_path", "path")
+    ) else "tool"
+    target_id = (
+        str(args.get("file_path") or args.get("path") or "").strip()
+        or str(args.get("session_id") or args.get("process_id") or args.get("plan_id") or args.get("schedule_id") or args.get("commitment_id") or "").strip()
     )
+    scope_key = "workspace" if target_kind == "file" and target_id else "default"
+    artifact = f"{target_kind}|{scope_key}|{target_id or tool_name or request.tool_name or 'action'}"
+    approved = decision.level in (
+        ApprovalLevel.CAN_DO_NOW,
+        ApprovalLevel.CAN_DO_WITH_CAUTION,
+    )
+    provenance_events = [
+        emit_provenance_event(
+            None,
+            event_type=ProvenanceEventType.CHECK,
+            triggering_artifact=artifact,
+            triggering_action="DECIDE",
+            parent_link_id=str(request.action_id),
+            linked_link_ids=[str(request.action_id)],
+            details={
+                "action_id": str(request.action_id),
+                "approved": approved,
+                "decision_level": decision.level.value,
+                "tool_name": tool_name or request.tool_name or "",
+                "auto_review": auto_review_meta,
+            },
+        ).to_dict()
+    ]
+    if not approved:
+        provenance_events.append(
+            emit_provenance_event(
+                None,
+                event_type=ProvenanceEventType.BLOCKED,
+                triggering_artifact=artifact,
+                triggering_action="DECIDE",
+                parent_link_id=str(request.action_id),
+                linked_link_ids=[str(request.action_id)],
+                details={
+                    "action_id": str(request.action_id),
+                    "reasoning": decision.reasoning,
+                    "decision_level": decision.level.value,
+                    "auto_review": auto_review_meta,
+                    "tool_name": tool_name or request.tool_name or "",
+                },
+            ).to_dict()
+    )
+    hook_bus = getattr(runtime.ctx, "hook_bus", None)
+    if hook_bus is not None:
+        hook_bus.run(
+            POST_ACTION_DECISION,
+            {
+                "session_id": session_id or getattr(getattr(runtime.ctx, "config", None), "session_id", None),
+                "task_id": task_id,
+                "tool_name": tool_name or request.tool_name or "",
+                "args": args or dict(request.payload),
+                "risk_tier": request.tier.value,
+                "artifact": artifact,
+                "target_kind": target_kind,
+                "target_id": target_id or tool_name or "",
+                "scope_key": scope_key,
+                "approved": decision.level in (
+                    ApprovalLevel.CAN_DO_NOW,
+                    ApprovalLevel.CAN_DO_WITH_CAUTION,
+                ),
+                "decision_level": decision.level.value,
+                "reasoning": decision.reasoning,
+                "score": decision.score,
+                "auto_review": auto_review_meta,
+                "source_trace": {
+                    "event": "action_decision",
+                    "outcome": "approved" if approved else "escalated",
+                    "tool_name": tool_name or request.tool_name or "",
+                    "task_id": task_id,
+                },
+            },
+        )
     return {
-        "approved": decision.level in (
-            ApprovalLevel.CAN_DO_NOW,
-            ApprovalLevel.CAN_DO_WITH_CAUTION,
-        ),
+        "approved": approved,
         "decision": decision,
+        "auto_review": auto_review_meta,
+        "provenance_events": provenance_events,
     }
 
 
@@ -434,6 +880,8 @@ def _build_tool_request_payload(
     }:
         command = str(args.get("command", "")).strip()
         if command:
+            from opencas.tools.validation import assess_command
+
             assessment = assess_command(command)
             request_payload.update(
                 {
@@ -477,7 +925,22 @@ def _build_tool_request_payload(
         "browser_snapshot",
     }:
         request_payload.update(_classify_browser_session_target(runtime, name, args))
+    request_payload.update(_approval_mode_payload(runtime, request_payload))
     return request_payload
+
+
+def _approval_mode_payload(runtime: "AgentRuntime", payload: Dict[str, Any]) -> Dict[str, Any]:
+    config = getattr(getattr(runtime, "ctx", None), "config", None)
+    try:
+        mode = normalize_auto_review_mode(getattr(config, "approval_mode", AutoReviewMode.DEFAULT.value))
+    except ValueError:
+        mode = AutoReviewMode.DEFAULT
+    if mode is not AutoReviewMode.AUTO_REVIEW:
+        return {}
+    return {
+        "approval_mode": mode.value,
+        "approval_channel": payload.get("approval_channel") or "on_request",
+    }
 
 
 async def _record_web_trust_outcome(
@@ -618,6 +1081,8 @@ def _classify_shell_command_scope(
         }
         remainder = _command_after_leading_cd(command)
         if remainder:
+            from opencas.tools.validation import assess_command
+
             effective = assess_command(remainder)
             payload.update(
                 {

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
+from opencas.runtime.tool_registration_advanced_integrations import (
+    register_advanced_integration_tools,
+)
 from opencas.platform import CapabilityRegistry, CapabilityStatus
 from opencas.runtime.tool_runtime import (
     discover_and_register_mcp_tools,
@@ -211,3 +215,39 @@ async def test_namespaced_mcp_tool_names_do_not_collapse() -> None:
     assert runtime.capability_registry.get("mcp:filesystem.alpha__read") is not None
     assert runtime.capability_registry.get("mcp:filesystem.beta__read") is not None
     assert runtime.capability_registry.get("mcp:filesystem.read") is None
+
+
+@pytest.mark.asyncio
+async def test_register_advanced_integration_tools_fires_mcp_auto_register_without_blocking(
+    monkeypatch,
+) -> None:
+    seen: list[str] = []
+    seen_events: list[tuple[str, dict[str, object]]] = []
+    done = asyncio.Event()
+
+    async def discover_and_register() -> list[str]:
+        await asyncio.sleep(0)
+        seen.append("discovered")
+        done.set()
+        return ["alpha", "beta"]
+
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            mcp_registry=SimpleNamespace(),
+            config=SimpleNamespace(mcp_auto_register=True),
+        ),
+        _discover_and_register_mcp_tools=discover_and_register,
+        _make_mcp_list_servers_adapter=lambda: "list_servers",
+        _make_mcp_register_adapter=lambda: "register_server",
+        _trace=lambda event, payload: seen_events.append((event, payload)),
+    )
+
+    monkeypatch.setattr(
+        "opencas.runtime.tool_registration_advanced_integrations.register_tool_specs",
+        lambda *_args, **_kwargs: None,
+    )
+    register_advanced_integration_tools(runtime)
+    await asyncio.wait_for(done.wait(), 1)
+
+    assert "discovered" in seen
+    assert seen_events == [("mcp_auto_registered", {"tool_count": 2})]

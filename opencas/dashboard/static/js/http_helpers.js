@@ -1,4 +1,33 @@
 (function (global) {
+  function normalizeRelativeUrl(url) {
+    if (typeof url !== 'string') return url;
+    if (url.startsWith('//')) return url;
+    if (/^(?:[a-z]+:|data:|blob:|mailto:|tel:|ws:|wss:)/i.test(url)) return url;
+    return url.startsWith('/') ? url.slice(1) : url;
+  }
+
+  if (!global.__openCASUrlNormalizerInstalled) {
+    global.__openCASUrlNormalizerInstalled = true;
+    const rawFetch = global.fetch?.bind(global);
+    if (rawFetch) {
+      global.fetch = (input, init) => {
+        if (typeof input === 'string') {
+          return rawFetch(normalizeRelativeUrl(input), init);
+        }
+        if (input && typeof input.url === 'string' && input.url.startsWith('/')) {
+          const request = new Request(normalizeRelativeUrl(input.url), input);
+          return rawFetch(request, init);
+        }
+        return rawFetch(input, init);
+      };
+    }
+
+    const rawOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+      return rawOpen.call(this, method, normalizeRelativeUrl(url), ...rest);
+    };
+  }
+
   function buildUrl(base, params) {
     const query = new URLSearchParams();
     Object.entries(params || {}).forEach(([key, value]) => {
@@ -8,6 +37,10 @@
     });
     const suffix = query.toString();
     return suffix ? `${base}?${suffix}` : base;
+  }
+
+  function resolveUrl(url) {
+    return normalizeRelativeUrl(url);
   }
 
   async function safeJson(response, fallback = null) {
@@ -49,6 +82,7 @@
     fetchJson,
     fetchJsonOrNull,
     fetchJsonAllSettled,
+    resolveUrl,
     safeJson,
   };
 })(window);

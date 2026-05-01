@@ -1,10 +1,13 @@
 """Tests for ConversationCompactor."""
 
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 from opencas.compaction import ConversationCompactor
+from opencas.identity import IdentityManager, IdentityStore
 from opencas.memory import Episode, EpisodeKind, MemoryStore
 
 
@@ -74,3 +77,67 @@ async def test_compact_session_summarizes_and_marks_compacted(store, mock_llm, t
     messages = await ctx_store.list_recent(session_id="s1", limit=5)
     assert any("compacted" in m.content and "Summary of old episodes" in m.content for m in messages)
     await ctx_store.close()
+
+
+@pytest.mark.asyncio
+async def test_compact_session_embeds_summary_memory_when_embeddings_available(store, mock_llm):
+    embeddings = SimpleNamespace(
+        embed=AsyncMock(return_value=SimpleNamespace(source_hash="summary-embedding-hash"))
+    )
+    compactor = ConversationCompactor(memory=store, llm=mock_llm, embeddings=embeddings)
+    for i in range(12):
+        ep = Episode(kind=EpisodeKind.TURN, session_id="s1", content=f"turn {i}")
+        await store.save_episode(ep)
+
+    record = await compactor.compact_session("s1", tail_size=10)
+
+    assert record is not None
+    memories = await store.list_memories(limit=10)
+    assert memories[0].embedding_id == "summary-embedding-hash"
+    embeddings.embed.assert_awaited_once_with(
+        "Summary of old episodes",
+        task_type="memory_compaction",
+        meta={
+            "source": "compaction",
+            "session_id": "s1",
+            "removed_count": 2,
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_compact_session_records_identity_continuity(store, mock_llm, tmp_path):
+    identity_store = IdentityStore(tmp_path / "identity")
+    identity = IdentityManager(identity_store)
+    identity.load()
+    before = identity.continuity.compaction_count
+
+    compactor = ConversationCompactor(memory=store, llm=mock_llm, identity=identity)
+    for i in range(12):
+        ep = Episode(kind=EpisodeKind.TURN, session_id="s1", content=f"turn {i}")
+        await store.save_episode(ep)
+
+    record = await compactor.compact_session("s1", tail_size=10)
+
+    assert record is not None
+    assert identity.continuity.compaction_count == before + 1
+    assert identity.continuity.last_session_id == "s1"
+
+    fresh_identity = IdentityManager(identity_store)
+    fresh_identity.load()
+    assert fresh_identity.continuity.compaction_count == before + 1
+    assert fresh_identity.continuity.last_session_id == "s1"
+
+
+@pytest.mark.asyncio
+async def test_compact_session_skips_when_removed_count_is_below_minimum(store, mock_llm):
+    compactor = ConversationCompactor(memory=store, llm=mock_llm)
+    for i in range(12):
+        ep = Episode(kind=EpisodeKind.TURN, session_id="s1", content=f"turn {i}")
+        await store.save_episode(ep)
+
+    record = await compactor.compact_session("s1", tail_size=10, min_removed_count=3)
+
+    assert record is None
+    memories = await store.list_memories(limit=10)
+    assert memories == []

@@ -11,6 +11,7 @@ from opencas.bootstrap.tui_bootstrap import build_bootstrap_config, save_questio
 from opencas.bootstrap.tui_components import StepHeader
 from opencas.bootstrap.tui_state import STATE
 from opencas.runtime import AgentRuntime
+from opencas.runtime.tom_intention_mirror import reconcile_completed_runtime_intentions
 
 
 class BootstrapScreen(Screen):
@@ -73,6 +74,7 @@ class BootstrapScreen(Screen):
 
             runtime = AgentRuntime(ctx)
             await runtime.tom.load()
+            await reconcile_completed_runtime_intentions(runtime)
             self.progress.update(progress=80)
             self._log("Runtime ready. Starting autonomous mode...")
 
@@ -85,6 +87,8 @@ class BootstrapScreen(Screen):
                     host=STATE.host,
                     port=int(STATE.port),
                     cycle_interval=int(STATE.cycle_interval),
+                    daydream_interval=int(STATE.daydream_interval),
+                    baa_heartbeat_interval=int(STATE.baa_heartbeat_interval),
                     consolidation_interval=int(STATE.consolidation_interval),
                 )
             else:
@@ -92,6 +96,8 @@ class BootstrapScreen(Screen):
                 self._log("Press Ctrl+C in this terminal to shutdown gracefully.")
                 await runtime.run_autonomous(
                     cycle_interval=int(STATE.cycle_interval),
+                    daydream_interval=int(STATE.daydream_interval),
+                    baa_heartbeat_interval=int(STATE.baa_heartbeat_interval),
                     consolidation_interval=int(STATE.consolidation_interval),
                 )
 
@@ -110,4 +116,3 @@ class BootstrapScreen(Screen):
             self._cancelled = True
             self._log("Shutdown requested...")
             self.app.exit()
-

@@ -1,0 +1,17 @@
+{
+  "manifest_version": 1,
+  "id": "system_stats",
+  "name": "System Stats",
+  "description": "Self-monitoring: CPU, memory, disk, load, process count.",
+  "version": "1.0.0",
+  "entrypoint": "main.py",
+  "capabilities": [
+    {
+      "capability_id": "plugin:system_stats.main",
+      "display_name": "System Stats",
+      "kind": "tool",
+      "description": "Read host system telemetry.",
+      "tool_names": ["system_status"]
+    }
+  ]
+}

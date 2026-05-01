@@ -39,6 +39,7 @@ def episode_db_params(episode: Episode) -> tuple[Any, ...]:
         episode.last_accessed.isoformat() if episode.last_accessed else None,
         episode.used_successfully,
         episode.used_unsuccessfully,
+        int(episode.identity_mutagen),
         episode.model_dump_json(include={'payload'}),
     )
 
@@ -74,6 +75,8 @@ def memory_db_params(memory: Memory) -> tuple[Any, ...]:
         memory.salience,
         memory.access_count,
         memory.last_accessed.isoformat() if memory.last_accessed else None,
+        int(memory.identity_mutagen),
+        memory.confidence_score,
     )
 
 
@@ -145,6 +148,7 @@ def row_to_episode(row: Mapping[str, Any]) -> Episode:
         last_accessed=datetime.fromisoformat(row['last_accessed']) if row['last_accessed'] else None,
         used_successfully=row['used_successfully'],
         used_unsuccessfully=row['used_unsuccessfully'],
+        identity_mutagen=bool(row['identity_mutagen']) if 'identity_mutagen' in row.keys() else False,
         payload=payload,
     )
 
@@ -169,4 +173,6 @@ def row_to_memory(row: Mapping[str, Any]) -> Memory:
         salience=row['salience'],
         access_count=row['access_count'],
         last_accessed=datetime.fromisoformat(row['last_accessed']) if row['last_accessed'] else None,
+        identity_mutagen=bool(row['identity_mutagen']) if 'identity_mutagen' in row.keys() else False,
+        confidence_score=row['confidence_score'] if 'confidence_score' in row.keys() else 0.8,
     )

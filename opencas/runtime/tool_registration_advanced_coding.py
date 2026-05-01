@@ -21,7 +21,7 @@ def register_advanced_coding_tools(runtime: Any) -> None:
             ToolRegistrationSpec(
                 name="python_repl",
                 description="Execute Python code in a persistent REPL session.",
-                risk_tier=ActionRiskTier.SHELL_LOCAL,
+                risk_tier=ActionRiskTier.WORKSPACE_WRITE,
                 schema={
                     "type": "object",
                     "properties": {

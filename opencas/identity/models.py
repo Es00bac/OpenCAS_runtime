@@ -62,5 +62,7 @@ class ContinuityState(BaseModel):
     # Phase 9: Continuous Present
     continuous_present_score: float = Field(default=1.0, ge=0.0, le=1.0)
     last_continuity_monologue: Optional[str] = None
+    continuity_breadcrumb: Optional[str] = None
+    continuity_breadcrumbs: List[str] = Field(default_factory=list)
     continuity_decay_rate: float = 0.95  # multiplied per hour of sleep
     continuity_recovery_rate: float = 0.05  # added per meaningful turn

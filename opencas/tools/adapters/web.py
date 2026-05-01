@@ -58,31 +58,61 @@ class WebToolAdapter:
 
         url = str(args.get("url", ""))
         max_length = int(args.get("max_length", 8000))
+        raw = bool(args.get("raw", False))
+        parse_json = bool(args.get("parse_json", False))
         if not url:
             return ToolResult(success=False, output="url is required", metadata={})
+        if not (url.startswith("http://") or url.startswith("https://")):
+            return ToolResult(
+                success=False,
+                output="url must start with http:// or https://",
+                metadata={"url": url},
+            )
 
         try:
             import httpx
         except ImportError:
             return ToolResult(success=False, output="httpx is required for web_fetch", metadata={})
 
-        def _fetch() -> str:
+        def _fetch() -> tuple[str, int, str]:
             with httpx.Client(timeout=30.0, follow_redirects=True) as client:
                 resp = client.get(url, headers={"User-Agent": "OpenCAS/1.0"})
                 resp.raise_for_status()
-                return resp.text
+                return resp.text, resp.status_code, resp.headers.get("Content-Type", "")
 
-        html = await asyncio.to_thread(_fetch)
-        extractor = _TextExtractor()
-        await asyncio.to_thread(lambda: extractor.feed(html))
-        text = extractor.get_text()
-        if len(text) > max_length:
-            text = text[:max_length] + "\n[truncated]"
-        return ToolResult(
-            success=True,
-            output=text,
-            metadata={"url": url, "length": len(text)},
-        )
+        body, status, content_type = await asyncio.to_thread(_fetch)
+        metadata: Dict[str, Any] = {
+            "url": url,
+            "status": status,
+            "content_type": content_type,
+        }
+
+        if parse_json:
+            try:
+                parsed = json.loads(body)
+                rendered = json.dumps(parsed, indent=2)
+            except json.JSONDecodeError as exc:
+                return ToolResult(
+                    success=False,
+                    output=f"JSON parse failed: {exc}",
+                    metadata=metadata,
+                )
+            output = rendered
+        elif raw:
+            output = body
+        else:
+            extractor = _TextExtractor()
+            await asyncio.to_thread(lambda: extractor.feed(body))
+            output = extractor.get_text()
+
+        truncated = False
+        if len(output) > max_length:
+            output = output[:max_length] + "\n[truncated]"
+            truncated = True
+        metadata["length"] = len(output)
+        metadata["truncated"] = truncated
+        metadata["mode"] = "json" if parse_json else ("raw" if raw else "text")
+        return ToolResult(success=True, output=output, metadata=metadata)
 
     async def _web_search(self, args: Dict[str, Any]) -> ToolResult:
         query = str(args.get("query", ""))

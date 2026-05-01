@@ -5,9 +5,14 @@ import sys
 import pytest
 from pathlib import Path
 from types import SimpleNamespace
-from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
+from opencas.bootstrap import BootstrapConfig, BootstrapPipeline, pipeline_support
 from opencas.__main__ import _build_bootstrap_config
 from opencas.model_routing import PersistedModelRoutingState, ModelRoutingConfig, save_persisted_model_routing_state
+
+
+def test_embeddinggemma_request_dimension_is_pinned() -> None:
+    assert pipeline_support.resolve_embedding_dimensions("google/embeddinggemma-300m") == 768
+    assert pipeline_support.resolve_embedding_dimensions("google/gemini-embedding-2-preview") is None
 
 
 @pytest.mark.asyncio
@@ -15,6 +20,7 @@ async def test_bootstrap_pipeline(tmp_path: Path) -> None:
     config = BootstrapConfig(
         state_dir=tmp_path,
         session_id="test-session",
+        default_llm_model="test/default-model",
     )
     pipeline = BootstrapPipeline(config)
     ctx = await pipeline.run()
@@ -28,6 +34,9 @@ async def test_bootstrap_pipeline(tmp_path: Path) -> None:
     assert ctx.tracer is not None
     assert ctx.llm is not None
     assert ctx.llm.default_model == config.default_llm_model
+    assert ctx.embeddings.model_id == "google/embeddinggemma-300m"
+    assert ctx.embeddings._embed_batch_fn is None
+    assert ctx.embeddings.expected_dimension == 768
 
     # Verify telemetry recorded bootstrap stages
     events = ctx.tracer.store.query()
@@ -36,8 +45,7 @@ async def test_bootstrap_pipeline(tmp_path: Path) -> None:
     assert len(stage_events) >= 1
 
     # Clean up
-    await ctx.memory.close()
-    await ctx.embeddings.cache.close()
+    await ctx.close()
 
 
 @pytest.mark.asyncio
@@ -261,6 +269,9 @@ def test_build_bootstrap_config_loads_persisted_model_routing(tmp_path: Path) ->
         agent_profile_id="general_technical_operator",
         workspace_root=str(tmp_path),
         workspace_extra_root=[],
+        cycle_interval=600,
+        daydream_interval=720,
+        baa_heartbeat_interval=120,
         credential_profile_id=[],
         credential_env_key=[],
         telegram_enabled=None,
@@ -292,6 +303,9 @@ def test_build_bootstrap_config_loads_persisted_model_routing(tmp_path: Path) ->
     assert config.model_routing.mode.value == "tiered"
     assert config.model_routing.light_model == "google/gemini-2.5-flash"
     assert config.model_routing.extra_high_model == "codex-cli/gpt-5.3-codex"
+    assert config.cycle_interval == 600
+    assert config.daydream_interval == 720
+    assert config.baa_heartbeat_interval == 120
 
 
 def test_build_bootstrap_config_heals_stale_persisted_model_routing(tmp_path: Path) -> None:
@@ -338,6 +352,9 @@ def test_build_bootstrap_config_heals_stale_persisted_model_routing(tmp_path: Pa
         agent_profile_id="general_technical_operator",
         workspace_root=str(tmp_path),
         workspace_extra_root=[],
+        cycle_interval=600,
+        daydream_interval=720,
+        baa_heartbeat_interval=120,
         credential_profile_id=[],
         credential_env_key=[],
         telegram_enabled=None,
@@ -368,6 +385,9 @@ def test_build_bootstrap_config_heals_stale_persisted_model_routing(tmp_path: Pa
     assert config.default_llm_model == "zai-coding/glm-5.1"
     assert config.model_routing.standard_model == "zai-coding/glm-5.1"
     assert config.model_routing.high_model == "zai-coding/glm-5.1"
+    assert config.cycle_interval == 600
+    assert config.daydream_interval == 720
+    assert config.baa_heartbeat_interval == 120
     repaired_payload = json.loads((provider_material / "config.json").read_text(encoding="utf-8"))
     assert repaired_payload["defaultModel"] == "zai-coding/glm-5.1"
 
@@ -482,8 +502,51 @@ def test_cli_bootstrap_config_preserves_default_embedding_model_when_flag_omitte
 
     config = _build_bootstrap_config(args, persisted_telegram)
 
-    assert config.default_llm_model == "anthropic/claude-sonnet-4-6"
-    assert config.embedding_model_id == "google/gemini-embedding-2-preview"
+    assert config.default_llm_model is None
+    assert config.embedding_model_id == "google/embeddinggemma-300m"
+
+
+def test_cli_bootstrap_config_accepts_qdrant_backend_flags(tmp_path: Path) -> None:
+    args = SimpleNamespace(
+        state_dir=str(tmp_path / "state"),
+        session_id="cli-test",
+        agent_profile_id="general_technical_operator",
+        workspace_root=str(tmp_path),
+        workspace_extra_root=[],
+        default_llm_model=None,
+        embedding_model_id=None,
+        qdrant_url="http://127.0.0.1:6333",
+        qdrant_api_key=None,
+        qdrant_collection="episodes_embed_v1",
+        provider_config_path=None,
+        provider_env_path=None,
+        credential_source_config_path=None,
+        credential_source_env_path=None,
+        credential_profile_id=[],
+        credential_env_key=[],
+        telegram_enabled=None,
+        telegram_bot_token=None,
+        telegram_dm_policy=None,
+        telegram_allow_from=[],
+        telegram_poll_interval=None,
+        telegram_pairing_ttl=None,
+    )
+    persisted_telegram = SimpleNamespace(
+        enabled=False,
+        bot_token=None,
+        dm_policy="pairing",
+        allow_from=[],
+        poll_interval_seconds=1.0,
+        pairing_ttl_seconds=3600,
+        api_base_url="https://api.telegram.org",
+    )
+
+    config = _build_bootstrap_config(args, persisted_telegram)
+
+    assert config.qdrant_url == "http://127.0.0.1:6333"
+    assert config.qdrant_collection == "episodes_embed_v1"
+    assert config.qdrant_auto_start is True
+    assert config.qdrant_required is True
 
 
 def test_cli_bootstrap_config_prefers_materialized_bundle_default_model(tmp_path: Path) -> None:
@@ -528,18 +591,9 @@ def test_cli_bootstrap_config_prefers_materialized_bundle_default_model(tmp_path
     config = _build_bootstrap_config(args, persisted_telegram)
 
     assert config.default_llm_model == "kimi-coding/k2p5"
-    assert config.embedding_model_id == "google/gemini-embedding-2-preview"
+    assert config.embedding_model_id == "google/embeddinggemma-300m"
 
 
-def test_pipeline_prefers_resolvable_gemini_embedding_model(tmp_path: Path) -> None:
+def test_pipeline_defaults_to_local_gemma_embedding_model(tmp_path: Path) -> None:
     pipeline = BootstrapPipeline(BootstrapConfig(state_dir=tmp_path, embedding_model_id=None))
-
-    class FakeLLM:
-        def _resolve(self, model_ref: str):
-            if model_ref == "google/gemini-embedding-2-preview":
-                return object()
-            raise ValueError(model_ref)
-
-    pipeline._llm = FakeLLM()
-
-    assert pipeline._resolve_embedding_model() == "google/gemini-embedding-2-preview"
+    assert pipeline._resolve_embedding_model() == "google/embeddinggemma-300m"

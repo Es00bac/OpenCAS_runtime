@@ -2,10 +2,14 @@
 
 import pytest
 import pytest_asyncio
+from types import SimpleNamespace
+
+from opencas.api import provenance_store as ps
 
 from opencas.autonomy.models import WorkObject, WorkStage
 from opencas.autonomy.work_store import WorkStore
-from opencas.execution import BoundedAssistantAgent, RepairTask
+from opencas.execution import BoundedAssistantAgent, RepairTask, ExecutionStage
+from opencas.execution.lifecycle import LifecycleStage
 from opencas.execution.lanes import CommandLane
 from opencas.execution.store import TaskStore
 from opencas.tools import ToolRegistry
@@ -220,3 +224,39 @@ def test_active_count_excludes_held_and_queued_tasks():
     agent._held = {"held": RepairTask(objective="held")}
     agent._lanes.submit(CommandLane.BAA, object())
     assert agent.active_count == 1
+
+
+@pytest.mark.asyncio
+async def test_task_transition_to_operator_input_records_waiting_provenance(store, tmp_path):
+    tools = ToolRegistry()
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            config=SimpleNamespace(session_id="session-1", state_dir=tmp_path),
+        )
+    )
+    baa = BoundedAssistantAgent(tools=tools, store=store, runtime=runtime, max_concurrent=1)
+
+    task = RepairTask(objective="needs approval")
+    task.stage = ExecutionStage.QUEUED
+
+    await baa._transition_task(task, LifecycleStage.NEEDS_APPROVAL, "need operator input")
+
+    records_path = tmp_path / "provenance.transitions.jsonl"
+    records = [
+        ps.parse_provenance_transition(line)
+        for line in records_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    record = records[-1]
+
+    assert record.kind == ps.ProvenanceTransitionKind.WAITING
+    assert record.status == "blocked"
+    assert record.details["source_artifact"] == f"repair|baa|{task.task_id}"
+    assert record.details["trigger_action"] == "baa.transition_task"
+    assert record.details["target_entity"] == str(task.task_id)
+    assert record.details["origin_action_id"] == str(task.task_id)
+    assert any(event.get("event_type") == "BLOCKED" for event in task.meta["provenance_events"])
+    assert any(
+        event.get("triggering_artifact") == f"repair-task|default|{task.task_id}"
+        for event in task.meta["provenance_events"]
+    )

@@ -1,0 +1,17 @@
+{
+  "manifest_version": 1,
+  "id": "time_tools",
+  "name": "Time Tools",
+  "description": "Reliable time/date primitives: now, parse, diff, age.",
+  "version": "1.0.0",
+  "entrypoint": "main.py",
+  "capabilities": [
+    {
+      "capability_id": "plugin:time_tools.main",
+      "display_name": "Time Tools",
+      "kind": "tool",
+      "description": "Time and date utilities.",
+      "tool_names": ["time_now", "time_parse", "time_diff", "time_age"]
+    }
+  ]
+}

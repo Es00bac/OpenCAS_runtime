@@ -83,6 +83,7 @@ class TestCompactSessionUsesHelpers:
         memory.list_non_compacted_episodes = AsyncMock(return_value=fake_episodes)
         memory.save_memory = AsyncMock()
         memory.mark_compacted = AsyncMock()
+        memory.delete_edges_for = AsyncMock()
         memory.record_compaction = AsyncMock()
 
         # Context store returns messages including an orphaned tool result
@@ -109,7 +110,7 @@ class TestCompactSessionUsesHelpers:
         assert isinstance(record, CompactionRecord)
         # Because _repair_tool_pairing should drop the orphaned tc2 message,
         # the prompt should only contain the paired messages.
-        prompt = llm.chat_completion.call_args[0][0][1]["content"]
+        prompt = llm.chat_completion.call_args_list[0][0][0][1]["content"]
         assert "[assistant]" in prompt
         assert "[tool]" in prompt
         assert "orphan" not in prompt

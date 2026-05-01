@@ -3,12 +3,15 @@ from __future__ import annotations
 
 
 import asyncio
+import logging
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
 from open_llm_auth.auth.manager import ProviderManager
 
+from opencas.affective import AffectiveExaminationService, AffectiveExaminationStore
 from opencas.api import LLMClient
 from opencas.embeddings import (
     EmbeddingCache,
@@ -17,6 +20,7 @@ from opencas.embeddings import (
     QdrantVectorBackend,
 )
 from opencas.embeddings.backfill import EmbeddingBackfill
+from opencas.embeddings.qdrant_startup import ensure_local_qdrant
 from opencas.execution.receipt_store import ExecutionReceiptStore
 from opencas.identity import IdentityManager, IdentityStore, SelfKnowledgeRegistry
 from opencas.sandbox import SandboxConfig
@@ -35,6 +39,7 @@ from .context import BootstrapContext
 from .pipeline_support import (
     emit_moral_warning,
     hnsw_runtime_supported,
+    resolve_embedding_dimensions,
     resolve_embedding_model,
     run_embedding_backfill,
     runtime_guard,
@@ -71,6 +76,7 @@ class BootstrapPipeline:
         self._token_telemetry = TokenTelemetry(self.config.telemetry_dir)
         if self.config.session_id:
             self._tracer.set_session(self.config.session_id)
+        await self._prune_telemetry_store(telemetry_store)
         self._tracer.log(EventKind.BOOTSTRAP_STAGE, "Telemetry initialized")
 
         event_bus = EventBus()
@@ -106,6 +112,12 @@ class BootstrapPipeline:
                 user_bio=self.config.user_bio,
             )
             self._stage("identity_seeded", {"clean_boot": self.config.clean_boot})
+            if self.config.clean_boot and self.config.state_dir:
+                somatic_path = self.config.state_dir / "somatic.json"
+                if somatic_path.exists():
+                    somatic_path.rename(
+                        somatic_path.with_suffix(f".json.pre_clean_boot_{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}")
+                    )
 
         stores = await initialize_runtime_stores(
             self.config,
@@ -160,14 +172,32 @@ class BootstrapPipeline:
         self._stage("llm_online", {"default_model": self._llm.default_model})
 
         # 6. Embedding service startup (uses LLM gateway when configured)
+        embed_model = self._resolve_embedding_model()
+        embed_dimensions = resolve_embedding_dimensions(embed_model)
         vector_backend = None
         if self.config.qdrant_url:
+            if self.config.qdrant_auto_start:
+                startup_result = await ensure_local_qdrant(
+                    self.config.qdrant_url,
+                    state_dir=self.config.state_dir,
+                    container_name=self.config.qdrant_container_name,
+                    image=self.config.qdrant_image,
+                    timeout_seconds=self.config.qdrant_start_timeout_seconds,
+                )
+                self._stage("qdrant_startup", startup_result.to_dict())
+                if self.config.qdrant_required and startup_result.status == "failed":
+                    raise RuntimeError(startup_result.message)
             vector_backend = QdrantVectorBackend(
                 url=self.config.qdrant_url,
                 collection=self.config.qdrant_collection or "opencas_embeddings",
                 api_key=self.config.qdrant_api_key,
+                dimension=embed_dimensions,
             )
             await vector_backend.connect()
+            if self.config.qdrant_required and not vector_backend.available:
+                raise RuntimeError(
+                    f"Qdrant is required but unavailable at {self.config.qdrant_url}"
+                )
         hnsw_backend = None
         if not self.config.qdrant_url and self.config.hnsw_enabled and self._hnsw_runtime_supported():
             try:
@@ -176,22 +206,39 @@ class BootstrapPipeline:
                     ef_construction=self.config.hnsw_ef_construction,
                 )
                 hnsw_backend.connect()
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "HNSW backend connection failed: %s", exc
+                )
         embedding_cache = EmbeddingCache(
             self.config.embedding_db,
             vector_backend=vector_backend,
             hnsw_backend=hnsw_backend,
         )
         await embedding_cache.connect()
-        embed_model = self._resolve_embedding_model()
         embed_fn = None
-        if embed_model != "local-fallback":
-            embed_fn = lambda text: self._llm.embed(text, model=embed_model)
+        embed_batch_fn = None
+
+        # EmbeddingGemma-300M is 768-native and is the canonical local text
+        # embedding model. Remote providers are only called for non-Gemma IDs.
+        if embed_model not in {"local-fallback", "google/embeddinggemma-300m"}:
+            embed_fn = lambda text: self._llm.embed(
+                text,
+                model=embed_model,
+                dimensions=embed_dimensions,
+            )
+            embed_batch_fn = lambda texts: self._llm.embed_batch(
+                texts,
+                model=embed_model,
+                dimensions=embed_dimensions,
+            )
+
         self._embeddings = EmbeddingService(
             cache=embedding_cache,
             model_id=embed_model,
             embed_fn=embed_fn,
+            embed_batch_fn=embed_batch_fn,
+            expected_dimension=embed_dimensions,
             store=self._memory,
         )
         self._stage("embeddings_online", {"model_id": self._embeddings.model_id})
@@ -215,8 +262,18 @@ class BootstrapPipeline:
             store=somatic_store,
             embeddings=self._embeddings,
         )
+        affective_store = AffectiveExaminationStore(
+            self.config.state_dir / "affective_examinations.db"
+        )
+        await affective_store.connect()
+        affective_examinations = AffectiveExaminationService(
+            affective_store,
+            somatic_manager=self._somatic,
+        )
         executive.somatic = self._somatic
+        executive.refresh_structural_load()
         self._stage("somatic_online")
+        self._stage("affective_examinations_online")
 
         services = await initialize_runtime_services(
             self.config,
@@ -284,6 +341,7 @@ class BootstrapPipeline:
             hook_bus=hook_bus,
             typed_hook_registry=typed_hook_registry,
             ledger=ledger,
+            shadow_registry=services.shadow_registry,
             web_trust=services.web_trust,
             plugin_trust=services.plugin_trust,
             sandbox=sandbox,
@@ -312,11 +370,36 @@ class BootstrapPipeline:
             plan_store=plan_store,
             schedule_store=schedule_store,
             schedule_service=schedule_service,
+            affective_examinations=affective_examinations,
             mcp_registry=mcp_registry,
             background_tasks=(backfill_task,),
         )
         doctor.context = bctx
         return bctx
+
+    async def _prune_telemetry_store(self, telemetry_store: TelemetryStore) -> None:
+        try:
+            old_files = telemetry_store.prune_old_files(30)
+            old_events = 0
+            if self._token_telemetry is not None:
+                old_events = await self._token_telemetry.prune_old_events(30)
+            if self._tracer is not None:
+                self._tracer.log(
+                    EventKind.BOOTSTRAP_STAGE,
+                    "Telemetry retention applied",
+                    {
+                        "retention_days": 30,
+                        "removed_daily_files": old_files,
+                        "removed_token_events": old_events,
+                    },
+                )
+        except Exception as exc:
+            if self._tracer is not None:
+                self._tracer.log(
+                    EventKind.WARNING,
+                    "Telemetry retention skipped",
+                    {"error": str(exc)},
+                )
 
     def _emit_moral_warning(self) -> None:
         emit_moral_warning(self._stage)

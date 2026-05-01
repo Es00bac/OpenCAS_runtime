@@ -1,8 +1,14 @@
 (function (global) {
   "use strict";
 
-  // Preserve the existing Alpine/HTMX globals while moving the memory atlas
-  // implementation out of the monolithic dashboard HTML.
+  function _hashColor(str) {
+    let hash = 0;
+    for (let i = 0; i < str.length; i++) {
+      hash = (hash * 31 + str.charCodeAt(i)) & 0xffffffff;
+    }
+    return `hsl(${Math.abs(hash) % 360} 70% 58%)`;
+  }
+
   function defaultRetrievalWeights() {
     return {
       semantic_score: 0.30,
@@ -62,10 +68,24 @@
       retrievalExpandGraph: 'true',
       showRetrievalOnAtlas: false,
       weights: defaultRetrievalWeights(),
+      somatic: null,
+      musubiState: null,
+      somaticLoading: false,
+      musubiLoading: false,
+      globalStats: null,
       initMemory() {
         global.__openCASMemoryApp = this;
+        this.loadGlobalStats();
         this.loadMemoryValue();
         this.loadLandscape();
+        this.loadSomaticState();
+        this.loadMusubiState();
+      },
+      async loadGlobalStats() {
+        try {
+          const response = await fetch('/api/memory/stats');
+          if (response.ok) this.globalStats = await response.json();
+        } catch (e) { console.error(e); }
       },
       async loadLandscape() {
         this.landscapeLoading = true;
@@ -121,7 +141,25 @@
         this.activeLowerPanel = panel;
         if (panel === 'value') {
           await this.loadMemoryValue();
+        } else if (panel === 'somatic') {
+          await Promise.all([this.loadSomaticState(), this.loadMusubiState()]);
         }
+      },
+      async loadSomaticState() {
+        this.somaticLoading = true;
+        try {
+          const response = await fetch('/api/identity/somatic');
+          if (response.ok) this.somatic = await response.json();
+        } catch (e) { console.error(e); }
+        this.somaticLoading = false;
+      },
+      async loadMusubiState() {
+        this.musubiLoading = true;
+        try {
+          const response = await fetch('/api/identity/musubi');
+          if (response.ok) this.musubiState = await response.json();
+        } catch (e) { console.error(e); }
+        this.musubiLoading = false;
       },
       async loadMemoryValue(force = false) {
         if (this.memoryValue && !force) return;
@@ -171,10 +209,15 @@
         this.retrievalExpandGraph = 'true';
       },
       emotionOptions() {
-        return Object.keys(this.landscape?.stats?.emotion_distribution || {}).sort();
+        const visible = this.landscape?.stats?.emotion_distribution || {};
+        const global_ = this.globalStats?.affect_distribution || {};
+        const merged = { ...global_, ...visible };
+        return Object.keys(merged).sort();
       },
       edgeKindOptions() {
-        return Object.keys(this.landscape?.stats?.edge_kind_distribution || {}).sort();
+        const visible = Object.keys(this.landscape?.stats?.edge_kind_distribution || {});
+        const allKinds = ['semantic', 'emotional', 'temporal', 'conceptual', 'relational', 'causal', 'distilled_from'];
+        return Array.from(new Set([...allKinds, ...visible])).sort();
       },
       visibleNodes() {
         return (this.landscape.nodes || []).filter(node => typeof node.x === 'number' && typeof node.y === 'number');
@@ -317,6 +360,9 @@
           const salience = Number(node.salience || 0);
           const hue = Math.max(0, 210 - Math.min(salience, 10) * 14);
           return `hsl(${hue} 85% 60%)`;
+        }
+        if (this.colorBy === 'somatic_tag') {
+          return node.somatic_tag ? _hashColor(node.somatic_tag) : '#64748b';
         }
         return emotionPalette[emotion] || emotionPalette.none;
       },
@@ -665,6 +711,7 @@
           <p class="muted">Created: ${formatDateTime(node.created_at)} • Age: ${escapeHtml(String(node.age_days ?? '-'))}d</p>
           <p class="muted">Embedding: ${escapeHtml(node.embedding_model_id || 'none')} • Group: ${escapeHtml(node.projection_group || '-')}</p>
           <p class="muted">Salience: ${escapeHtml(String(node.salience ?? '-'))} • Confidence: ${escapeHtml(String(node.confidence_score ?? '-'))} • Connections: ${escapeHtml(String(node.connection_count ?? 0))}</p>
+          ${node.somatic_tag ? `<p class="muted">Somatic tag: <span class="badge">${escapeHtml(node.somatic_tag)}</span></p>` : ''}
           ${(node.used_successfully > 0 || node.used_unsuccessfully > 0) ? (() => {
             const total = node.used_successfully + node.used_unsuccessfully;
             const pct = Math.round((node.used_successfully / total) * 100);
@@ -760,6 +807,110 @@
           </div>`;
         });
         return html + '</div>';
+      },
+      somaticMarkup() {
+        if (this.somaticLoading || this.musubiLoading) {
+          return '<p class="muted">Loading somatic and relational state…</p>';
+        }
+        const s = this.somatic;
+        const m = this.musubiState;
+        if (!s && !m) {
+          return '<p class="muted">Somatic and relational state are not available in the current runtime.</p>';
+        }
+        let html = '<div class="somatic-relational-grid">';
+
+        if (s) {
+          const salienceMod = 1.0 + (s.arousal * 0.3) + (s.tension * 0.3) - (s.fatigue * 0.2);
+          const vitals = [
+            { label: 'arousal',   value: s.arousal,   color: '#f59e0b', range: [0,1] },
+            { label: 'energy',    value: s.energy,    color: '#22c55e', range: [0,1] },
+            { label: 'focus',     value: s.focus,     color: '#38bdf8', range: [0,1] },
+            { label: 'certainty', value: s.certainty, color: '#a78bfa', range: [0,1] },
+            { label: 'fatigue',   value: s.fatigue,   color: '#94a3b8', range: [0,1] },
+            { label: 'tension',   value: s.tension,   color: '#f87171', range: [0,1] },
+            { label: 'valence',   value: s.valence,   color: s.valence >= 0 ? '#34d399' : '#f87171', range: [-1,1] },
+          ];
+          html += `<div class="somatic-panel">
+            <h5>Somatic State</h5>
+            <div class="pill-row mb-2">
+              ${s.primary_emotion ? `<span class="badge">${escapeHtml(s.primary_emotion)}</span>` : ''}
+              ${s.somatic_tag ? `<span class="badge">${escapeHtml(s.somatic_tag)}</span>` : ''}
+              <span class="muted" style="font-size:11px">updated ${escapeHtml(s.updated_at ? s.updated_at.replace('T',' ').slice(0,19) : '-')}</span>
+            </div>
+            <div class="somatic-bars">
+              ${vitals.map(v => {
+                const [lo, hi] = v.range;
+                const pct = Math.round(((v.value - lo) / (hi - lo)) * 100);
+                const sign = v.range[0] < 0 && v.value >= 0 ? '+' : '';
+                return `<div class="somatic-bar-row">
+                  <span class="somatic-bar-label">${escapeHtml(v.label)}</span>
+                  <div class="somatic-bar-track"><div class="somatic-bar-fill" style="width:${pct}%;background:${v.color}"></div></div>
+                  <span class="somatic-bar-value">${sign}${Number(v.value).toFixed(2)}</span>
+                </div>`;
+              }).join('')}
+            </div>
+            <div class="helper-text mt-3">
+              <strong>Salience modifier now:</strong> ${salienceMod.toFixed(3)}
+              <span class="muted"> = 1 + arousal×0.3 + tension×0.3 − fatigue×0.2</span>
+            </div>
+          </div>`;
+        }
+
+        if (m) {
+          const dims = [
+            { label: 'trust',      value: m.dimensions.trust      || 0, color: '#38bdf8' },
+            { label: 'resonance',  value: m.dimensions.resonance  || 0, color: '#fb7185' },
+            { label: 'presence',   value: m.dimensions.presence   || 0, color: '#34d399' },
+            { label: 'attunement', value: m.dimensions.attunement || 0, color: '#a78bfa' },
+          ];
+          const musubiPct = Math.round(((m.musubi + 1) / 2) * 100);
+          const musubiColor = m.musubi >= 0.4 ? '#34d399' : m.musubi >= 0 ? '#f59e0b' : '#f87171';
+          const relMult = (1 + m.musubi * 0.2).toFixed(3);
+          html += `<div class="musubi-panel">
+            <h5>Relational State (Musubi)</h5>
+            <div class="pill-row mb-2">
+              ${m.source_tag ? `<span class="badge">${escapeHtml(m.source_tag)}</span>` : ''}
+              <span class="muted" style="font-size:11px">updated ${escapeHtml(m.updated_at ? m.updated_at.replace('T',' ').slice(0,19) : '-')}</span>
+            </div>
+            <div class="somatic-bar-row mb-3" style="gap:10px">
+              <span class="somatic-bar-label"><strong>musubi</strong></span>
+              <div class="somatic-bar-track"><div class="somatic-bar-fill" style="width:${musubiPct}%;background:${musubiColor}"></div></div>
+              <span class="somatic-bar-value" style="color:${musubiColor}">${m.musubi >= 0 ? '+' : ''}${Number(m.musubi).toFixed(3)}</span>
+            </div>
+            <div class="somatic-bars">
+              ${dims.map(d => {
+                const pct = Math.round(((d.value + 1) / 2) * 100);
+                return `<div class="somatic-bar-row">
+                  <span class="somatic-bar-label">${escapeHtml(d.label)}</span>
+                  <div class="somatic-bar-track"><div class="somatic-bar-fill" style="width:${pct}%;background:${d.color}"></div></div>
+                  <span class="somatic-bar-value">${d.value >= 0 ? '+' : ''}${Number(d.value).toFixed(2)}</span>
+                </div>`;
+              }).join('')}
+            </div>
+            <div class="helper-text mt-3">
+              <strong>Retrieval multiplier now:</strong> ${relMult}
+              <span class="muted"> = 1 + musubi×0.2 (applied per candidate)</span>
+            </div>
+            ${m.continuity_breadcrumb ? `<p class="muted mt-2" style="font-style:italic">"${escapeHtml(m.continuity_breadcrumb)}"</p>` : ''}
+          </div>`;
+        }
+
+        const taggedNodes = (this.landscape.nodes || []).filter(n => n.somatic_tag);
+        if (taggedNodes.length) {
+          const tagCounts = {};
+          taggedNodes.forEach(n => { tagCounts[n.somatic_tag] = (tagCounts[n.somatic_tag] || 0) + 1; });
+          const tagEntries = Object.entries(tagCounts).sort((a, b) => b[1] - a[1]).slice(0, 10);
+          html += `<div class="somatic-tags-panel">
+            <h5>Somatic Tags in Current Atlas</h5>
+            <p class="muted">Emotional state recorded at memory formation time — a trace of somatic history through the graph.</p>
+            <div class="pill-row mt-2">
+              ${tagEntries.map(([tag, count]) => `<span class="badge" style="border-left:3px solid ${_hashColor(tag)}">${escapeHtml(tag)} <strong>${count}</strong></span>`).join('')}
+            </div>
+          </div>`;
+        }
+
+        html += '</div>';
+        return html;
       },
       async inspectRetrieval() {
         if (!this.retrievalQuery.trim()) return;

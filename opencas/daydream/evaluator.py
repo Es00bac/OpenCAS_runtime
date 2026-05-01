@@ -1,10 +1,57 @@
 """Reflection evaluator for daydream sparks."""
 
+import re
 from typing import List, Optional
 
 from opencas.identity import IdentityManager
 
 from .models import DaydreamReflection
+
+_TOKEN_RE = re.compile(r"[a-z0-9']+")
+_STOPWORDS = {
+    "a",
+    "an",
+    "and",
+    "are",
+    "as",
+    "at",
+    "be",
+    "by",
+    "for",
+    "from",
+    "how",
+    "in",
+    "into",
+    "is",
+    "it",
+    "its",
+    "of",
+    "on",
+    "or",
+    "that",
+    "the",
+    "this",
+    "to",
+    "was",
+    "where",
+    "with",
+}
+
+
+def _normalize_token(token: str) -> str:
+    if len(token) > 4 and token.endswith("ies"):
+        return token[:-3] + "y"
+    if len(token) > 3 and token.endswith("s"):
+        return token[:-1]
+    return token
+
+
+def _meaningful_tokens(text: str) -> set[str]:
+    return {
+        _normalize_token(token)
+        for token in _TOKEN_RE.findall(text.lower())
+        if len(token) > 2 and token not in _STOPWORDS
+    }
 
 
 class ReflectionEvaluator:
@@ -38,8 +85,33 @@ class ReflectionEvaluator:
         if not anchors:
             return 0.5
 
-        matches = sum(1 for a in anchors if a.lower() in text)
-        score = min(1.0, 0.2 + (matches * 0.15))
+        text_tokens = _meaningful_tokens(text)
+        score_units = 0.0
+        for anchor in anchors:
+            anchor_text = anchor.lower().strip()
+            if not anchor_text:
+                continue
+            if anchor_text in text:
+                score_units += 1.0
+                continue
+
+            anchor_tokens = _meaningful_tokens(anchor_text)
+            if not anchor_tokens:
+                continue
+
+            overlap_count = len(anchor_tokens & text_tokens)
+            if not overlap_count:
+                continue
+
+            overlap_ratio = overlap_count / len(anchor_tokens)
+            if len(anchor_tokens) == 1:
+                score_units += 0.75
+            elif overlap_count >= 3 or overlap_ratio >= 0.3:
+                score_units += 1.0
+            elif overlap_count >= 2 and overlap_ratio >= 0.18:
+                score_units += 0.75
+
+        score = min(1.0, 0.2 + (score_units * 0.15))
         reflection.alignment_score = round(score, 3)
         return reflection.alignment_score
 

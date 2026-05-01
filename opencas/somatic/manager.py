@@ -1,5 +1,6 @@
 """Somatic state manager for OpenCAS."""
 
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Coroutine, Dict, List, Optional, Sequence, Tuple
@@ -10,11 +11,30 @@ from .appraisal import AppraisalEventType, SomaticAppraisalEvent
 from .models import AffectState, PrimaryEmotion, SomaticSnapshot, SomaticState, SocialTarget
 from .store import SomaticStore
 
+logger = logging.getLogger(__name__)
+
 # Configurable thresholds for somatic reconciliation
 _MASKING_TENSION_THRESHOLD = 0.5
 _WARM_VALENCE_THRESHOLD = 0.3
 _WARM_AROUSAL_CEILING = 0.6
 _NUDGE_MAGNITUDE = 0.04
+
+
+def _blend(current: float, target: float, weight: float) -> float:
+    """Blend *current* toward *target* by *weight*."""
+    return round(current * (1.0 - weight) + target * weight, 3)
+
+
+def _clamp01(value: float) -> float:
+    return round(max(0.0, min(1.0, value)), 3)
+
+
+def _step_toward(current: float, target: float, step: float) -> float:
+    if current < target:
+        return _clamp01(min(target, current + step))
+    if current > target:
+        return _clamp01(max(target, current - step))
+    return _clamp01(current)
 
 
 class SomaticManager:
@@ -39,7 +59,19 @@ class SomaticManager:
                 self._state = SomaticState.model_validate_json(
                     self.state_path.read_text(encoding="utf-8")
                 )
-            except (ValueError, OSError):
+            except (ValueError, OSError) as exc:
+                backup = self.state_path.with_suffix(
+                    f".corrupted.{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S')}.json"
+                )
+                try:
+                    self.state_path.rename(backup)
+                except OSError:
+                    pass
+                logger.warning(
+                    "Somatic state file corrupted (%s). Backed up to %s. Resetting to defaults.",
+                    exc,
+                    backup.name,
+                )
                 self._state = SomaticState()
 
     def save(self) -> None:
@@ -119,7 +151,9 @@ class SomaticManager:
             self._state.tension = round(
                 max(0.0, self._state.tension - _NUDGE_MAGNITUDE), 3
             )
+            self._state.focus = _clamp01(self._state.focus + _NUDGE_MAGNITUDE)
             adjustments["adjustments"].append("tension_down_warm")
+            adjustments["adjustments"].append("focus_up_warm")
 
         # Expressed uncertainty/apology while felt confident → certainty drops
         if felt_certainty > 0.6 and expressed_affect.primary_emotion in (
@@ -199,18 +233,76 @@ class SomaticManager:
             3,
         )
         self._state.tension = next_tension
+        if next_arousal <= 0.35 and next_tension < 0.3:
+            self._state.energy = _clamp01(s.energy + fatigue_delta)
+            self._state.focus = _step_toward(s.focus, 0.5, max(0.01, fatigue_delta * 0.5))
         self.save()
 
     def bump_from_work(self, intensity: float = 0.1, success: bool = True) -> None:
         """Update somatic state based on completed work."""
-        self._state.fatigue = round(max(0.0, min(1.0, self._state.fatigue + intensity * 0.3)), 3)
-        self._state.arousal = round(max(0.0, min(1.0, self._state.arousal + intensity * 0.1)), 3)
+        bounded_intensity = max(0.0, min(1.0, intensity))
+        self._state.fatigue = _clamp01(self._state.fatigue + bounded_intensity * 0.3)
+        self._state.arousal = _clamp01(self._state.arousal + bounded_intensity * 0.1)
+        self._state.energy = _clamp01(self._state.energy - bounded_intensity * 0.1)
         if success:
             self._state.valence = round(max(-1.0, min(1.0, self._state.valence + 0.05)), 3)
             self._state.tension = round(max(0.0, self._state.tension - 0.05), 3)
+            self._state.focus = _clamp01(self._state.focus + bounded_intensity * 0.05)
         else:
             self._state.valence = round(max(-1.0, min(1.0, self._state.valence - 0.05)), 3)
             self._state.tension = round(max(0.0, min(1.0, self._state.tension + 0.1)), 3)
+            self._state.focus = _clamp01(self._state.focus - bounded_intensity * 0.05)
+        self.save()
+
+    def reflect_structural_load(
+        self,
+        *,
+        weighted_queue_load: float,
+        queue_depth: int,
+        active_goal_count: int = 0,
+        parked_goal_count: int = 0,
+    ) -> None:
+        """Mirror executive clutter into the somatic layer with a light touch."""
+        queue_pressure = max(0.0, float(weighted_queue_load) - 1.0)
+        depth_pressure = max(0, int(queue_depth) - 1) * 0.04
+        active_goal_pressure = max(0, int(active_goal_count) - 1) * 0.05
+        parked_pressure = min(0.2, max(0, int(parked_goal_count)) * 0.02)
+
+        target_tension = min(
+            0.75,
+            0.03 + queue_pressure * 0.18 + depth_pressure + active_goal_pressure + parked_pressure,
+        )
+        target_fatigue = min(
+            0.65,
+            queue_pressure * 0.08 + max(0, int(queue_depth) - 2) * 0.03 + parked_pressure * 0.5,
+        )
+        target_arousal = min(0.6, 0.05 + queue_pressure * 0.14 + depth_pressure * 0.5)
+        target_certainty = max(
+            0.25,
+            min(1.0, 0.7 - queue_pressure * 0.05 - parked_pressure * 0.25),
+        )
+
+        self._state.tension = _blend(self._state.tension, target_tension, 0.4)
+        reflected_fatigue = _blend(self._state.fatigue, target_fatigue, 0.35)
+        self._state.fatigue = max(self._state.fatigue, reflected_fatigue)
+        self._state.arousal = _blend(self._state.arousal, target_arousal, 0.4)
+        self._state.certainty = _blend(self._state.certainty, target_certainty, 0.25)
+        if queue_depth >= 4 or weighted_queue_load > 1.5:
+            self._state.focus = _blend(self._state.focus, 0.4, 0.25)
+            self._state.energy = _blend(self._state.energy, 0.7, 0.2)
+        elif parked_goal_count >= 5 and queue_depth == 0 and active_goal_count == 0:
+            self._state.focus = _blend(self._state.focus, 0.55, 0.15)
+            self._state.energy = _blend(self._state.energy, 0.6, 0.15)
+
+        if queue_depth >= 4 or (
+            parked_goal_count >= 5 and (queue_depth > 0 or active_goal_count > 0 or weighted_queue_load > 1.0)
+        ):
+            self._state.somatic_tag = "crowded"
+        elif weighted_queue_load > 1.5 or active_goal_count > 1:
+            self._state.somatic_tag = "task_pressure"
+        elif parked_goal_count >= 5:
+            self._state.somatic_tag = "continuity_pressure"
+
         self.save()
 
     def nudge_from_appraisal(self, affect: AffectState, intensity_scale: float = 0.25) -> None:
@@ -233,8 +325,23 @@ class SomaticManager:
         # Energy drains slightly on high arousal, recovers on calm positive
         if affect.arousal > 0.7:
             self._state.energy = round(max(0.0, self._state.energy - 0.02), 3)
+        elif affect.arousal > 0.55:
+            self._state.energy = round(max(0.0, self._state.energy - 0.01), 3)
         elif affect.valence > 0.2 and affect.arousal < 0.5:
             self._state.energy = round(min(1.0, self._state.energy + 0.02), 3)
+        # Focus should not pin while appraisals change around the agent.
+        if affect.primary_emotion in (
+            PrimaryEmotion.ANTICIPATION,
+            PrimaryEmotion.CURIOUS,
+            PrimaryEmotion.DETERMINED,
+            PrimaryEmotion.FOCUSED,
+        ) or affect.certainty > 0.65:
+            self._state.focus = _clamp01(self._state.focus + affect.intensity * 0.02)
+        elif affect.certainty < 0.35 or affect.primary_emotion in (
+            PrimaryEmotion.CONCERNED,
+            PrimaryEmotion.SURPRISE,
+        ):
+            self._state.focus = _clamp01(self._state.focus - affect.intensity * 0.015)
         # Certainty tracks appraisal certainty
         self._state.certainty = round(
             max(0.0, min(1.0, self._state.certainty * (1 - a) + affect.certainty * a)), 3
@@ -242,6 +349,12 @@ class SomaticManager:
         # Tag tracks primary emotion when it's salient
         if affect.intensity > 0.4 and affect.primary_emotion != PrimaryEmotion.NEUTRAL:
             self._state.somatic_tag = affect.primary_emotion.value
+        # Keep higher-resolution attention/energy drift tied to current appraisal so
+        # recurring calm or flat interactions still register movement over time.
+        focus_delta = (affect.arousal - 0.5) * 0.006 + (affect.certainty - 0.5) * 0.004
+        energy_delta = (-affect.arousal + 0.5) * 0.004 + (0.5 - affect.certainty) * 0.003
+        self._state.focus = _clamp01(self._state.focus + round(focus_delta, 3))
+        self._state.energy = _clamp01(self._state.energy + round(energy_delta, 3))
         self.save()
 
     def appraise(self, text: str, outcome: str = "neutral") -> AffectState:
@@ -501,7 +614,8 @@ class SomaticManager:
 
         snapshot = self._snapshot_from_state(source, trigger_event_id, musubi=musubi)
 
-        # Simple dedup: if the latest snapshot is within 30s and identical core dims, skip
+        # Simple dedup: if the latest snapshot is within 30s and identical core dims,
+        # including focus/energy/certainty, skip.
         latest = await self.store.get_latest()
         if latest is not None:
             age_seconds = (snapshot.recorded_at - latest.recorded_at).total_seconds()
@@ -511,6 +625,9 @@ class SomaticManager:
                     and round(snapshot.fatigue, 3) == round(latest.fatigue, 3)
                     and round(snapshot.tension, 3) == round(latest.tension, 3)
                     and round(snapshot.valence, 3) == round(latest.valence, 3)
+                    and round(snapshot.focus, 3) == round(latest.focus, 3)
+                    and round(snapshot.energy, 3) == round(latest.energy, 3)
+                    and round(snapshot.certainty, 3) == round(latest.certainty, 3)
                 ):
                     return latest
 

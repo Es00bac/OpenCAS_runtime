@@ -1,12 +1,14 @@
 """Tests for higher-level operator workflow tools."""
 
-import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from opencas.api import provenance_store as ps
 from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.tools.adapters.workflow import WorkflowToolAdapter
 
@@ -17,6 +19,7 @@ def _make_mock_runtime(tmp_path: Path):
     runtime.ctx = MagicMock()
     runtime.ctx.config.primary_workspace_root.return_value = tmp_path
     runtime.ctx.config.agent_workspace_root.return_value = tmp_path / "workspace"
+    runtime.ctx.config.state_dir = tmp_path
 
     # Commitment store
     commitment_store = MagicMock()
@@ -120,6 +123,169 @@ async def test_update_commitment_invalid_status(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_create_schedule_rejects_finished_commitment_link(tmp_path: Path) -> None:
+    runtime = _make_mock_runtime(tmp_path)
+    runtime.commitment_store.get = AsyncMock(
+        return_value=Commitment(content="already done", status=CommitmentStatus.COMPLETED)
+    )
+    runtime.schedule_service = MagicMock()
+    runtime.schedule_service.create_schedule = AsyncMock(
+        return_value=SimpleNamespace(
+            schedule_id="schedule-1",
+            title="Continue work",
+            kind=SimpleNamespace(value="task"),
+            action=SimpleNamespace(value="submit_baa"),
+            next_run_at=datetime(2026, 5, 1, 10, tzinfo=timezone.utc),
+        )
+    )
+    adapter = WorkflowToolAdapter(runtime)
+
+    result = await adapter(
+        "workflow_create_schedule",
+        {
+            "title": "Continue work",
+            "start_at": "2026-05-01T10:00:00+00:00",
+            "commitment_id": "commitment-1",
+        },
+    )
+
+    assert result.success is False
+    assert "completed commitment" in result.output.lower()
+    runtime.schedule_service.create_schedule.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_schedule_rejects_accidental_past_start(tmp_path: Path) -> None:
+    runtime = _make_mock_runtime(tmp_path)
+    runtime.schedule_service = MagicMock()
+    runtime.schedule_service.create_schedule = AsyncMock()
+    adapter = WorkflowToolAdapter(runtime)
+
+    result = await adapter(
+        "workflow_create_schedule",
+        {
+            "title": "Continue writing later",
+            "objective": "Draft the next chapter.",
+            "start_at": (datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+        },
+    )
+
+    assert result.success is False
+    assert "start_at is in the past" in result.output.lower()
+    assert "choose a future time" in result.output.lower()
+    runtime.schedule_service.create_schedule.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_schedule_rejects_reminder_only_for_unfinished_writing_return(tmp_path: Path) -> None:
+    runtime = _make_mock_runtime(tmp_path)
+    runtime.schedule_service = MagicMock()
+    runtime.schedule_service.create_schedule = AsyncMock()
+    adapter = WorkflowToolAdapter(runtime)
+
+    result = await adapter(
+        "workflow_create_schedule",
+        {
+            "title": "Chronicle 4246 — Continue manuscript revision",
+            "description": (
+                "Return to the Chronicle 4246 manuscript. Next steps: prose-level "
+                "revision of Chapters 1-2 and review thin spots in Chapters 4, 5, 7, 8."
+            ),
+            "action": "reminder_only",
+            "start_at": (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat(),
+            "tags": ["chronicle-4246", "creative-writing", "manuscript-revision"],
+        },
+    )
+
+    assert result.success is False
+    assert "submit_baa" in result.output
+    assert "unfinished writing/project return" in result.output.lower()
+    runtime.schedule_service.create_schedule.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_schedule_rejects_far_future_active_project_return_without_delay_reason(tmp_path: Path) -> None:
+    runtime = _make_mock_runtime(tmp_path)
+    runtime.schedule_service = MagicMock()
+    runtime.schedule_service.create_schedule = AsyncMock()
+    adapter = WorkflowToolAdapter(runtime)
+
+    result = await adapter(
+        "workflow_create_schedule",
+        {
+            "title": "Return to Chronicle 4246 Chapter 3 Expansion",
+            "description": "Return to continue an unfinished active writing project.",
+            "objective": "Persist expanded Chapter 3 prose and continue manuscript revision.",
+            "start_at": (datetime.now(timezone.utc) + timedelta(days=90)).isoformat(),
+            "priority": 9.0,
+        },
+    )
+
+    assert result.success is False
+    assert "too far in the future" in result.output.lower()
+    assert "delay_reason" in result.output
+    runtime.schedule_service.create_schedule.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_create_schedule_allows_far_future_active_project_return_with_delay_reason(tmp_path: Path) -> None:
+    runtime = _make_mock_runtime(tmp_path)
+    runtime.schedule_service = MagicMock()
+    runtime.schedule_service.create_schedule = AsyncMock(
+        return_value=SimpleNamespace(
+            schedule_id="schedule-1",
+            title="Return to Chronicle 4246 Chapter 3 Expansion",
+            kind=SimpleNamespace(value="task"),
+            action=SimpleNamespace(value="submit_baa"),
+            next_run_at=datetime.now(timezone.utc) + timedelta(days=90),
+        )
+    )
+    adapter = WorkflowToolAdapter(runtime)
+
+    result = await adapter(
+        "workflow_create_schedule",
+        {
+            "title": "Return to Chronicle 4246 Chapter 3 Expansion",
+            "description": "Return to continue an unfinished active writing project.",
+            "objective": "Persist expanded Chapter 3 prose and continue manuscript revision.",
+            "start_at": (datetime.now(timezone.utc) + timedelta(days=90)).isoformat(),
+            "priority": 9.0,
+            "delay_reason": "Wait for a planned consolidation window before returning.",
+        },
+    )
+
+    assert result.success is True
+    created_kwargs = runtime.schedule_service.create_schedule.await_args.kwargs
+    assert created_kwargs["meta"]["delay_reason"] == "Wait for a planned consolidation window before returning."
+
+
+@pytest.mark.asyncio
+async def test_create_schedule_rejects_writing_return_outside_managed_workspace(tmp_path: Path) -> None:
+    runtime = _make_mock_runtime(tmp_path)
+    runtime.schedule_service = MagicMock()
+    runtime.schedule_service.create_schedule = AsyncMock()
+    adapter = WorkflowToolAdapter(runtime)
+
+    result = await adapter(
+        "workflow_create_schedule",
+        {
+            "title": "Return to Chronicle 4246 Chapter 3 Expansion",
+            "description": "Return to continue an unfinished active writing project.",
+            "objective": (
+                "Persist expanded prose to "
+                f"{tmp_path}/Chronicles/4246/chronicle_4246.md before continuing."
+            ),
+            "start_at": (datetime.now(timezone.utc) + timedelta(hours=2)).isoformat(),
+            "priority": 9.0,
+        },
+    )
+
+    assert result.success is False
+    assert "outside managed workspace root" in result.output.lower()
+    runtime.schedule_service.create_schedule.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_list_commitments(tmp_path: Path) -> None:
     runtime = _make_mock_runtime(tmp_path)
     c = Commitment(content="Test commitment", priority=7.0, tags=["test"])
@@ -158,6 +324,39 @@ async def test_create_writing_task(tmp_path: Path) -> None:
     assert "# Architecture Overview" in content
     assert "## Introduction" in content
     assert "## Conclusion" in content
+
+
+@pytest.mark.asyncio
+async def test_create_writing_task_records_mutation_provenance(tmp_path: Path) -> None:
+    runtime = _make_mock_runtime(tmp_path)
+    adapter = WorkflowToolAdapter(runtime)
+
+    result = await adapter("workflow_create_writing_task", {
+        "title": "Architecture Overview",
+        "description": "High-level system design document",
+        "outline": ["Introduction"],
+    })
+    assert result.success is True
+    payload = json.loads(result.output)
+
+    records_path = tmp_path / "provenance.transitions.jsonl"
+    records = [
+        ps.parse_provenance_transition(line)
+        for line in records_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    record = records[-1]
+
+    assert record.kind == ps.ProvenanceTransitionKind.MUTATION
+    assert record.status == "mutated"
+    assert record.details["source_artifact"] == "workflow|writing-task|Architecture Overview"
+    assert record.details["trigger_action"] == "workflow_create_writing_task"
+    assert record.details["target_entity"] == (
+        Path(payload["output_path"]).relative_to(tmp_path / "workspace").as_posix()
+    )
+    assert record.details["origin_action_id"] == payload["output_path"]
+    assert record.details["parent_transition_id"] == payload["output_path"]
+    assert record.details["linked_transition_ids"] == [payload["output_path"], record.details["target_entity"]]
 
 
 @pytest.mark.asyncio
@@ -385,6 +584,52 @@ async def test_supervise_session_stops_on_auth_gate_before_submit(tmp_path: Path
     assert payload["supervision_advisory"]["reason"] == "auth_or_gate_blocked"
     assert payload["rounds_used"] == 1
     runtime.execute_tool.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_supervise_session_records_waiting_provenance_when_blocked(tmp_path: Path) -> None:
+    runtime = _make_mock_runtime(tmp_path)
+    runtime.execute_tool = AsyncMock(return_value={
+        "success": True,
+        "output": json.dumps({
+            "session_id": "sess-auth",
+            "running": True,
+            "cleaned_combined_output": "Please sign in to continue",
+            "screen_state": {
+                "app": "kilocode",
+                "mode": "auth_required",
+                "ready_for_input": False,
+                "blocked": True,
+            },
+            "idle_reached": True,
+        }),
+        "metadata": {},
+    })
+    adapter = WorkflowToolAdapter(runtime)
+
+    result = await adapter("workflow_supervise_session", {
+        "command": "kilocode",
+        "task": "Create the note",
+        "max_rounds": 3,
+    })
+
+    assert result.success is True
+    records_path = tmp_path / "provenance.transitions.jsonl"
+    records = [
+        ps.parse_provenance_transition(line)
+        for line in records_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    record = records[-1]
+
+    assert record.kind == ps.ProvenanceTransitionKind.WAITING
+    assert record.status == "blocked"
+    assert record.details["source_artifact"] == "workflow|supervision|workflow-supervision"
+    assert record.details["trigger_action"] == "workflow_supervise_session"
+    assert record.details["target_entity"] == "sess-auth"
+    assert record.details["origin_action_id"] == "sess-auth"
+    assert record.details["parent_transition_id"] == "sess-auth"
+    assert record.details["linked_transition_ids"] == ["sess-auth"]
 
 
 @pytest.mark.asyncio

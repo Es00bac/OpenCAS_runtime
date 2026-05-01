@@ -1,0 +1,133 @@
+/* OpenCAS Floating Video Player */
+#ocas-video-toggle {
+  position: fixed;
+  right: 1.2rem;
+  bottom: 1.2rem;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.6rem 1rem;
+  border-radius: 999px;
+  border: 1px solid rgba(110, 231, 200, 0.35);
+  background: linear-gradient(135deg, rgba(17,21,34,0.96), rgba(9,13,23,0.98));
+  color: #c8fff0;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.45);
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+#ocas-video-toggle:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 14px 40px rgba(0,0,0,0.55);
+}
+#ocas-video-toggle svg {
+  width: 1.1rem;
+  height: 1.1rem;
+  fill: currentColor;
+}
+
+#ocas-video-panel {
+  position: fixed;
+  right: 1.2rem;
+  bottom: 4.5rem;
+  z-index: 9998;
+  width: 320px;
+  max-width: calc(100vw - 2.4rem);
+  background: rgba(8,11,18,0.98);
+  border: 1px solid rgba(110, 231, 200, 0.25);
+  border-radius: 16px;
+  box-shadow: 0 24px 70px rgba(0,0,0,0.6);
+  overflow: hidden;
+  display: none;
+  flex-direction: column;
+}
+#ocas-video-panel.ocas-open {
+  display: flex;
+}
+#ocas-video-panel.ocas-expanded {
+  width: min(92vw, 1100px);
+  max-height: 90vh;
+  bottom: 50%;
+  right: 50%;
+  transform: translate(50%, 50%);
+}
+
+#ocas-video-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.65rem 0.9rem;
+  background: rgba(17,21,34,0.85);
+  border-bottom: 1px solid rgba(110, 231, 200, 0.15);
+}
+#ocas-video-title {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #edf2ff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+#ocas-video-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+}
+#ocas-video-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  border-radius: 8px;
+  border: 1px solid rgba(110, 231, 200, 0.2);
+  background: rgba(255,255,255,0.04);
+  color: #c8fff0;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+#ocas-video-controls button:hover {
+  background: rgba(110, 231, 200, 0.12);
+}
+#ocas-video-controls svg {
+  width: 0.9rem;
+  height: 0.9rem;
+  fill: currentColor;
+}
+
+#ocas-video-wrapper {
+  position: relative;
+  aspect-ratio: 16 / 9;
+  background: #000;
+}
+#ocas-video-panel.ocas-expanded #ocas-video-wrapper {
+  aspect-ratio: auto;
+  height: min(76vh, 618px);
+}
+#ocas-video-wrapper video {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
+@media (max-width: 720px) {
+  #ocas-video-panel {
+    right: 0.8rem;
+    bottom: 4rem;
+    width: calc(100vw - 1.6rem);
+  }
+  #ocas-video-panel.ocas-expanded {
+    width: calc(100vw - 1.6rem);
+    bottom: 0.8rem;
+    right: 0.8rem;
+    transform: none;
+  }
+  #ocas-video-panel.ocas-expanded #ocas-video-wrapper {
+    height: auto;
+    aspect-ratio: 16 / 9;
+  }
+}

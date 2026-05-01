@@ -127,6 +127,9 @@ async def consolidate_commitments(engine: Any, similarity_threshold: float = 0.7
 
 async def llm_pick_commitment_survivor(engine: Any, cluster: List[Commitment]) -> Optional[int]:
     """Ask the LLM which commitment in a cluster should survive."""
+    budget_consumer = getattr(engine, "_consume_consolidation_llm_budget", None)
+    if callable(budget_consumer) and not budget_consumer():
+        return None
     numbered = "\n".join(
         f"[{i}] {c.content} (status={c.status.value}, priority={c.priority}, linked_work={len(c.linked_work_ids)})"
         for i, c in enumerate(cluster)
@@ -177,6 +180,9 @@ async def extract_commitments_from_chat_logs(engine: Any) -> int:
     candidates = collect_commitment_recovery_candidates(episodes, cutoff=cutoff)
     if not candidates:
         return 0
+    budget_consumer = getattr(engine, "_consume_consolidation_llm_budget", None)
+    if callable(budget_consumer) and not budget_consumer():
+        return 0
 
     numbered_candidates = "\n\n".join(
         (
@@ -197,6 +203,12 @@ async def extract_commitments_from_chat_logs(engine: Any) -> int:
         "If no commitments are found, return an empty array: []\n\n"
         + numbered_candidates
     )
+    prompt_limit = None
+    prompt_limiter = getattr(engine, "_budget_prompt_limit", None)
+    if callable(prompt_limiter):
+        prompt_limit = prompt_limiter()
+    if prompt_limit is not None and len(prompt) > prompt_limit:
+        prompt = prompt[:prompt_limit].rstrip()
     messages = [
         {"role": "system", "content": "You are a consolidation assistant. Output valid JSON only."},
         {"role": "user", "content": prompt},

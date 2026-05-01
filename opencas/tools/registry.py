@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any, Dict, List, Optional
 
 from opencas.autonomy.models import ActionRiskTier
-from opencas.infra import PRE_COMMAND_EXECUTE, PRE_FILE_WRITE, PRE_TOOL_EXECUTE
+from opencas.infra import POST_TOOL_EXECUTE, PRE_COMMAND_EXECUTE, PRE_FILE_WRITE, PRE_TOOL_EXECUTE
 from opencas.telemetry import EventKind, Tracer
 
 from .models import ToolEntry, ToolResult
@@ -27,6 +28,7 @@ class ToolRegistry:
         self.validation_pipeline = validation_pipeline
         self.hook_bus = hook_bus
         self._plugin_tools: Dict[str, str] = {}
+        self.runtime: Optional[Any] = None
 
     def register(
         self,
@@ -73,16 +75,21 @@ class ToolRegistry:
 
     def execute(self, name: str, args: Dict[str, Any]) -> ToolResult:
         """Execute a tool by name with the given arguments (synchronous)."""
-        import asyncio
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             loop = None
         if loop is not None:
-            # If we're already in an async context but execute() was called,
-            # run the async version in a thread-safe way. For simplicity,
-            # delegate to asyncio.run_coroutine_threadsafe when possible,
-            # but since we're likely on the same thread, just run it directly.
+            loop_thread_id = getattr(loop, "_thread_id", None)
+            if loop_thread_id is not None and loop_thread_id == threading.get_ident():
+                return ToolResult(
+                    success=False,
+                    output=(
+                        "ToolRegistry.execute was called from a running event loop; "
+                        "use execute_async instead."
+                    ),
+                    metadata={"error_type": "RuntimeError", "suggested_api": "execute_async"},
+                )
             try:
                 return asyncio.run_coroutine_threadsafe(
                     self.execute_async(name, args), loop
@@ -116,6 +123,23 @@ class ToolRegistry:
             "tool_executing",
             {"name": name, "tier": entry.risk_tier.value},
         )
+        hook_context: Dict[str, Any] = {
+            "tool_name": name,
+            "args": args,
+            "risk_tier": entry.risk_tier.value,
+        }
+
+        def _emit_post_tool_execute(result: ToolResult) -> None:
+            if self.hook_bus is None:
+                return
+            post_context = {
+                **hook_context,
+                "result_success": result.success,
+                "result_output": result.output,
+                "result_metadata": result.metadata,
+            }
+            self.hook_bus.run(POST_TOOL_EXECUTE, post_context)
+
         # Run hook bus for high-risk tools
         if self.hook_bus is not None and entry.risk_tier in (
             ActionRiskTier.WORKSPACE_WRITE,
@@ -129,13 +153,16 @@ class ToolRegistry:
                 {"tool_name": name, "args": args, "risk_tier": entry.risk_tier.value},
             )
             if not hook_result.allowed:
-                return ToolResult(
+                result = ToolResult(
                     success=False,
                     output=f"Hook blocked execution: {hook_result.reason}",
                     metadata={"hook_blocked": True, "reason": hook_result.reason},
                 )
+                _emit_post_tool_execute(result)
+                return result
             if hook_result.mutated_context and "args" in hook_result.mutated_context:
                 args = hook_result.mutated_context["args"]
+                hook_context["args"] = args
 
         # Run specific hooks for command and file-write tools
         if self.hook_bus is not None:
@@ -143,33 +170,39 @@ class ToolRegistry:
                 cmd_hook_result = self.hook_bus.run(
                     PRE_COMMAND_EXECUTE,
                     {"command": args.get("command", ""), "args": args},
-                )
+                    )
                 if not cmd_hook_result.allowed:
-                    return ToolResult(
+                    result = ToolResult(
                         success=False,
                         output=f"Command blocked by hook: {cmd_hook_result.reason}",
                         metadata={"hook_blocked": True, "reason": cmd_hook_result.reason},
                     )
+                    _emit_post_tool_execute(result)
+                    return result
                 if cmd_hook_result.mutated_context and "args" in cmd_hook_result.mutated_context:
                     args = cmd_hook_result.mutated_context["args"]
+                    hook_context["args"] = args
             elif name in ("fs_write_file", "edit_file"):
                 file_hook_result = self.hook_bus.run(
                     PRE_FILE_WRITE,
                     {"tool_name": name, "args": args},
                 )
                 if not file_hook_result.allowed:
-                    return ToolResult(
+                    result = ToolResult(
                         success=False,
                         output=f"File write blocked by hook: {file_hook_result.reason}",
                         metadata={"hook_blocked": True, "reason": file_hook_result.reason},
                     )
+                    _emit_post_tool_execute(result)
+                    return result
                 if file_hook_result.mutated_context and "args" in file_hook_result.mutated_context:
                     args = file_hook_result.mutated_context["args"]
+                    hook_context["args"] = args
 
         if self.validation_pipeline is not None:
             validation = self.validation_pipeline.validate(name, args)
             if not validation.allowed:
-                return ToolResult(
+                result = ToolResult(
                     success=False,
                     output=f"Tool validation failed: {validation.reason}",
                     metadata={
@@ -177,6 +210,8 @@ class ToolRegistry:
                         "warnings": validation.warnings,
                     },
                 )
+                _emit_post_tool_execute(result)
+                return result
         else:
             validation = None
         try:
@@ -188,9 +223,7 @@ class ToolRegistry:
             ):
                 result = await entry.adapter(name, args)
             else:
-                result = await asyncio.get_running_loop().run_in_executor(
-                    None, lambda: entry.adapter(name, args)
-                )
+                result = entry.adapter(name, args)
         except Exception as exc:
             result = ToolResult(
                 success=False,
@@ -204,6 +237,7 @@ class ToolRegistry:
                 "command_permission_class": validation.command_permission_class,
                 "command_family": validation.command_family,
             }
+        _emit_post_tool_execute(result)
         self._trace(
             "tool_executed",
             {

@@ -3,8 +3,14 @@
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from uuid import NAMESPACE_URL, uuid5
 
 from opencas.embeddings.models import EmbeddingRecord
+
+
+def qdrant_point_id(source_hash: str) -> str:
+    """Return a stable UUID point id for a cache source hash."""
+    return str(uuid5(NAMESPACE_URL, f"opencas:embedding:{source_hash}"))
 
 
 class QdrantVectorBackend:
@@ -24,6 +30,10 @@ class QdrantVectorBackend:
         self._client: Any = None
         self._available = False
 
+    @property
+    def available(self) -> bool:
+        return self._available and self._client is not None
+
     async def connect(self) -> "QdrantVectorBackend":
         try:
             from qdrant_client import AsyncQdrantClient
@@ -38,7 +48,7 @@ class QdrantVectorBackend:
             self._client = AsyncQdrantClient(url=self.url, headers=headers or None)
             collections = await self._client.get_collections()
             exists = any(c.name == self.collection for c in collections.collections)
-            self._available = exists or (self.dimension is not None)
+            self._available = exists
         except Exception:
             self._available = False
         return self
@@ -103,7 +113,7 @@ class QdrantVectorBackend:
                 collection_name=self.collection,
                 points=[
                     PointStruct(
-                        id=record.source_hash,
+                        id=qdrant_point_id(record.source_hash),
                         vector=record.vector,
                         payload=payload,
                     )
@@ -147,13 +157,27 @@ class QdrantVectorBackend:
                 )
             query_filter = Filter(must=conditions) if conditions else None
 
-            results = await self._client.search(
-                collection_name=self.collection,
-                query_vector=list(vector),
-                query_filter=query_filter,
-                limit=limit,
-                with_payload=True,
-            )
+            search = getattr(self._client, "search", None)
+            if callable(search):
+                results = await search(
+                    collection_name=self.collection,
+                    query_vector=list(vector),
+                    query_filter=query_filter,
+                    limit=limit,
+                    with_payload=True,
+                )
+            else:
+                query_points = getattr(self._client, "query_points", None)
+                if not callable(query_points):
+                    return []
+                response = await query_points(
+                    collection_name=self.collection,
+                    query=list(vector),
+                    query_filter=query_filter,
+                    limit=limit,
+                    with_payload=True,
+                )
+                results = getattr(response, "points", response)
             hits: List[str] | List[Tuple[str, float]] = []
             for r in results:
                 payload = r.payload or {}

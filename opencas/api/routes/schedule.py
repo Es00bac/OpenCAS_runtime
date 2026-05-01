@@ -192,6 +192,31 @@ def build_schedule_router(runtime: Any) -> APIRouter:
         items = await service.calendar_range(start=start_dt, end=end_dt)
         return {"count": len(items), "items": items, "start": start_dt.isoformat(), "end": end_dt.isoformat()}
 
+    @router.get("/agenda")
+    async def agenda(
+        horizon_hours: float = 24.0,
+        upcoming_limit: int = 8,
+        recent_limit: int = 8,
+    ) -> Dict[str, Any]:
+        service = _service()
+        if service is None:
+            return {
+                "available": False,
+                "error": "Schedule service not available",
+                "counts": {"active": 0, "due_now": 0, "upcoming": 0, "recent_runs": 0},
+                "due_now": [],
+                "upcoming": [],
+                "recent_runs": [],
+                "next": None,
+            }
+        payload = await service.temporal_agenda(
+            horizon_hours=horizon_hours,
+            upcoming_limit=upcoming_limit,
+            recent_limit=recent_limit,
+        )
+        payload["available"] = True
+        return payload
+
     @router.get("/runs")
     async def list_runs(schedule_id: Optional[str] = None, limit: int = 100) -> Dict[str, Any]:
         store = _store()

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from typing import Any
 
 from opencas.autonomy.models import ActionRiskTier
@@ -11,6 +12,7 @@ from opencas.tools.adapters.google_workspace import (
     GoogleWorkspaceToolAdapter,
     google_workspace_cli_available,
 )
+from opencas.tools.adapters.initiative_contact import InitiativeContactToolAdapter
 from opencas.tools.adapters.phone import PhoneToolAdapter
 from opencas.workspace.tool_adapter import (
     GetFileGistSchema,
@@ -26,13 +28,28 @@ from .tool_registration_specs import ToolRegistrationSpec, register_tool_specs
 def register_advanced_integration_tools(runtime: Any) -> None:
     mcp_registry = getattr(runtime.ctx, "mcp_registry", None)
     if mcp_registry is not None and runtime.ctx.config.mcp_auto_register:
+        async def _auto_register_mcp_tools() -> None:
+            try:
+                tools = await runtime._discover_and_register_mcp_tools()
+                runtime._trace("mcp_auto_registered", {"tool_count": len(tools)})
+            except Exception as exc:  # pragma: no cover - exercised by runtime failure paths
+                runtime._trace("mcp_auto_register_failed", {"error": str(exc)})
+
         try:
-            tools = asyncio.run_coroutine_threadsafe(
-                runtime._discover_and_register_mcp_tools(), asyncio.get_running_loop()
-            ).result()
-            runtime._trace("mcp_auto_registered", {"tool_count": len(tools)})
-        except Exception as exc:
-            runtime._trace("mcp_auto_register_failed", {"error": str(exc)})
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        if loop is not None and getattr(loop, "_thread_id", None) == threading.get_ident():
+            loop.create_task(_auto_register_mcp_tools())
+        elif loop is not None:
+            asyncio.run_coroutine_threadsafe(_auto_register_mcp_tools(), loop)
+        else:
+            # If no running loop, registration happens inline during startup.
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_auto_register_mcp_tools())
+            finally:
+                loop.close()
 
     register_tool_specs(
         runtime,
@@ -112,14 +129,14 @@ def register_advanced_integration_tools(runtime: Any) -> None:
             ),
             ToolRegistrationSpec(
                 name="phone_call_owner",
-                description="Place an outbound phone call to the trusted owner number only. Use this when the assistant genuinely needs to reach the operator by voice.",
+                description="Place an outbound phone call to the trusted owner number only. Use this when the OpenCAS agent genuinely needs to reach the operator by voice.",
                 risk_tier=ActionRiskTier.EXTERNAL_WRITE,
                 schema={
                     "type": "object",
                     "properties": {
                         "message": {
                             "type": "string",
-                            "description": "What the assistant should say when the owner answers.",
+                            "description": "What the OpenCAS agent should say when the owner answers.",
                         },
                         "reason": {
                             "type": "string",
@@ -127,6 +144,49 @@ def register_advanced_integration_tools(runtime: Any) -> None:
                         },
                     },
                     "required": [],
+                },
+            ),
+        ],
+    )
+
+    initiative_contact = InitiativeContactToolAdapter(runtime)
+    register_tool_specs(
+        runtime,
+        initiative_contact,
+        [
+            ToolRegistrationSpec(
+                name="initiative_contact_status",
+                description="Inspect OpenCAS's policy-limited owner contact state, recent events, and daily contact count.",
+                risk_tier=ActionRiskTier.READONLY,
+                schema={"type": "object", "properties": {}, "required": []},
+            ),
+            ToolRegistrationSpec(
+                name="initiative_contact_owner",
+                description="Send a policy-limited owner notification through the trusted initiative-contact channel. Use when the OpenCAS agent genuinely wants to reach out or thinks the operator should know something.",
+                risk_tier=ActionRiskTier.EXTERNAL_WRITE,
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "message": {
+                            "type": "string",
+                            "description": "Message to send to the owner.",
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Short reason for the contact request.",
+                        },
+                        "urgency": {
+                            "type": "string",
+                            "enum": ["low", "normal", "high", "critical"],
+                            "description": "Urgency used by the contact policy.",
+                        },
+                        "channel": {
+                            "type": "string",
+                            "enum": ["auto", "telegram", "phone"],
+                            "description": "Preferred delivery channel. Auto defaults to Telegram.",
+                        },
+                    },
+                    "required": ["message"],
                 },
             ),
         ],

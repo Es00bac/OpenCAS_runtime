@@ -215,6 +215,21 @@ def build_bootstrap_config(state: WizardState) -> BootstrapConfig:
             field_name="Telegram pairing TTL",
         ),
         telegram_api_base_url=state.telegram_api_base_url.strip() or "https://api.telegram.org",
+        cycle_interval=_parse_int(
+            state.cycle_interval,
+            default=600,
+            field_name="Creative cycle interval",
+        ),
+        daydream_interval=_parse_int(
+            state.daydream_interval,
+            default=720,
+            field_name="Daydream interval",
+        ),
+        baa_heartbeat_interval=_parse_int(
+            state.baa_heartbeat_interval,
+            default=120,
+            field_name="BAA heartbeat interval",
+        ),
         sandbox=SandboxConfig(
             mode=SandboxMode(state.sandbox_mode),
             allowed_roots=[Path(root) for root in _split_items(state.sandbox_allowed_roots)],

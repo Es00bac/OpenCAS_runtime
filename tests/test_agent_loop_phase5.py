@@ -75,6 +75,30 @@ async def test_rebuild_identity_updates_self_model(runtime: AgentRuntime) -> Non
 
 
 @pytest.mark.asyncio
+async def test_rebuild_identity_preview_does_not_update_self_model(
+    runtime: AgentRuntime,
+) -> None:
+    ep = Episode(
+        kind=EpisodeKind.OBSERVATION,
+        content="I am steady and want to build reliable systems.",
+        identity_core=True,
+    )
+    await runtime.memory.save_episode(ep)
+    before = runtime.ctx.identity.self_model.narrative
+
+    result = await runtime.rebuild_identity(
+        seed_episode_ids=[str(ep.episode_id)],
+        term_limits={"thread": 1},
+        apply=False,
+    )
+
+    assert result["applied"] is False
+    assert result.get("narrative") is not None
+    assert result["validation"]["ok"] is True
+    assert runtime.ctx.identity.self_model.narrative == before
+
+
+@pytest.mark.asyncio
 async def test_self_knowledge_registry_round_trip(runtime: AgentRuntime) -> None:
     # Record a high-confidence self-belief via ToM
     await runtime.tom.record_belief(BeliefSubject.SELF, "focused", confidence=0.8)

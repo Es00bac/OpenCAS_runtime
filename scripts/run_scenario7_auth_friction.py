@@ -55,7 +55,7 @@ def main() -> int:
     request_id = f"scenario7-{uuid4().hex}"
 
     dummy_env_path = output_dir / "dummy.env"
-    dummy_env_path.write_text('GEMINI_API_KEY="dummy-key-for-scenario7-auth-friction"\n', encoding="utf-8")
+    dummy_env_path.write_text('GEMINI_API_KEY="broken_key_for_scenario7_auth_friction"\n', encoding="utf-8")
 
     dummy_config_path = output_dir / "dummy_config.json"
     real_config_path = Path.home() / ".open_llm_auth" / "config.json"

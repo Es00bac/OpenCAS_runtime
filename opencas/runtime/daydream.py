@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from typing import List, Optional, Tuple
 
 from opencas.api import LLMClient
@@ -11,11 +10,11 @@ from opencas.autonomy import WorkObject, WorkStage
 from opencas.daydream import DaydreamReflection, DaydreamStore
 from opencas.daydream.spark_evaluator import SparkEvaluator
 from opencas.identity import IdentityManager
+from opencas.identity.text_hygiene import sanitize_identity_text
 from opencas.memory import MemoryStore
 from opencas.relational import RelationalEngine
 from opencas.somatic import SomaticManager
 from opencas.telemetry import EventKind, Tracer
-from opencas.somatic.models import PrimaryEmotion
 
 
 class DaydreamGenerator:
@@ -77,6 +76,7 @@ class DaydreamGenerator:
         except Exception as exc:
             self._trace("generation_failed", {"error": str(exc)})
             reflections = []
+        reflections = [self._sanitize_reflection(reflection) for reflection in reflections]
 
         work_objects: List[WorkObject] = []
         for reflection in reflections:
@@ -128,15 +128,22 @@ class DaydreamGenerator:
             um = self.identity.user_model
             id_parts: List[str] = []
             if sm.current_goals:
-                id_parts.append("My current goals: " + ", ".join(sm.current_goals))
+                id_parts.append(
+                    "My current goals: " + ", ".join(self._sanitize_text(g) for g in sm.current_goals if self._sanitize_text(g))
+                )
             if sm.values:
-                id_parts.append("My values: " + ", ".join(sm.values))
+                id_parts.append("My values: " + ", ".join(self._sanitize_text(v) for v in sm.values if self._sanitize_text(v)))
             if sm.traits:
-                id_parts.append("My traits: " + ", ".join(sm.traits))
+                id_parts.append("My traits: " + ", ".join(self._sanitize_text(t) for t in sm.traits if self._sanitize_text(t)))
             if sm.current_intention:
-                id_parts.append(f"My current intention: {sm.current_intention}")
+                id_parts.append(f"My current intention: {self._sanitize_text(sm.current_intention)}")
             if um.inferred_goals:
-                id_parts.append("Inferred user goals: " + ", ".join(um.inferred_goals[:3]))
+                id_parts.append(
+                    "Inferred user goals: "
+                    + ", ".join(
+                        self._sanitize_text(g) for g in um.inferred_goals[:3] if self._sanitize_text(g)
+                    )
+                )
             if id_parts:
                 parts.append("Identity\n" + "\n".join(f"- {p}" for p in id_parts))
 
@@ -144,7 +151,11 @@ class DaydreamGenerator:
         if self.somatic:
             s = self.somatic.state
             coloring: List[str] = []
-            coloring.append(f"Overall state: valence={s.valence:.2f}, arousal={s.arousal:.2f}, fatigue={s.fatigue:.2f}, tension={s.tension:.2f}")
+            coloring.append(
+                "Overall state: "
+                f"valence={s.valence:.2f}, arousal={s.arousal:.2f}, "
+                f"fatigue={s.fatigue:.2f}, tension={s.tension:.2f}"
+            )
             if s.fatigue > 0.65:
                 coloring.append("I am fatigued. Keep thoughts brief and concrete.")
             if s.tension > 0.4:
@@ -177,7 +188,9 @@ class DaydreamGenerator:
             if recent_refs:
                 parts.append(
                     "Recent private thoughts to avoid repeating verbatim:\n"
-                    + "\n".join(f"- {r.spark_content[:120]}" for r in recent_refs)
+                    + "\n".join(
+                        f"- {self._sanitize_text(r.spark_content)[:120]}" for r in recent_refs
+                    )
                 )
 
         # Memory seeds with identity-core episodes and graph neighbors
@@ -187,7 +200,7 @@ class DaydreamGenerator:
             # Find identity-core episodes among recent
             for ep in await self.memory.list_episodes(limit=20):
                 if ep.identity_core and ep.content:
-                    identity_core_snippets.append(ep.content)
+                    identity_core_snippets.append(self._sanitize_text(ep.content))
                 if len(identity_core_snippets) >= 2:
                     break
             # Graph neighbors from most recent episode
@@ -198,7 +211,7 @@ class DaydreamGenerator:
                     nid = edge.target_id if edge.source_id == str(recent_eps[0].episode_id) else edge.source_id
                     nep = await self.memory.get_episode(nid)
                     if nep and nep.content:
-                        neighbor_snippets.append(nep.content)
+                        neighbor_snippets.append(self._sanitize_text(nep.content))
                     if len(neighbor_snippets) >= 2:
                         break
 
@@ -221,7 +234,12 @@ class DaydreamGenerator:
         if goals:
             parts.append("Current goals:\n" + "\n".join(f"- {g}" for g in goals))
         if memory_snippets:
-            parts.append("Recent memories:\n" + "\n".join(f"- {s}" for s in memory_snippets))
+            parts.append(
+                "Recent memories:\n"
+                + "\n".join(
+                    f"- {self._sanitize_text(s)}" for s in memory_snippets if self._sanitize_text(s)
+                )
+            )
         parts.append(f"Somatic tension: {tension:.2f}")
         parts.append(
             "Generate 1-3 short imaginative sparks (ideas, questions, or associations) "
@@ -254,22 +272,23 @@ class DaydreamGenerator:
                     sparks = []
                 reflections: List[DaydreamReflection] = []
                 for spark in sparks:
+                    tension_hints = self._coerce_tension_hints(parsed.get("tension_hints", []))
                     reflections.append(
                         DaydreamReflection(
-                            spark_content=str(spark),
-                            recollection=parsed.get("recollection", ""),
-                            interpretation=parsed.get("interpretation", ""),
-                            synthesis=parsed.get("synthesis", ""),
-                            open_question=parsed.get("open_question"),
-                            changed_self_view=parsed.get("changed_self_view", ""),
-                            tension_hints=parsed.get("tension_hints", []),
+                            spark_content=self._sanitize_text(str(spark)),
+                            recollection=self._sanitize_text(parsed.get("recollection", "")),
+                            interpretation=self._sanitize_text(parsed.get("interpretation", "")),
+                            synthesis=self._sanitize_text(parsed.get("synthesis", "")),
+                            open_question=self._sanitize_text(parsed.get("open_question")),
+                            changed_self_view=self._sanitize_text(parsed.get("changed_self_view", "")),
+                            tension_hints=tension_hints,
                         )
                     )
                 return reflections
         except json.JSONDecodeError:
             pass
         # Fallback: treat entire content as a single spark
-        return [DaydreamReflection(spark_content=text)]
+        return [DaydreamReflection(spark_content=self._sanitize_text(text))]
 
     def _trace(self, event: str, payload: dict) -> None:
         if self.tracer:
@@ -278,3 +297,31 @@ class DaydreamGenerator:
                 f"DaydreamGenerator: {event}",
                 payload,
             )
+
+    def _sanitize_text(self, value: str) -> str:
+        return sanitize_identity_text(value)
+
+    def _sanitize_reflection(self, reflection: DaydreamReflection) -> DaydreamReflection:
+        reflection.spark_content = self._sanitize_text(reflection.spark_content)
+        reflection.recollection = self._sanitize_text(reflection.recollection)
+        reflection.interpretation = self._sanitize_text(reflection.interpretation)
+        reflection.synthesis = self._sanitize_text(reflection.synthesis)
+        reflection.open_question = self._sanitize_text(reflection.open_question)
+        if not reflection.open_question:
+            reflection.open_question = None
+        reflection.changed_self_view = self._sanitize_text(reflection.changed_self_view)
+        reflection.tension_hints = self._coerce_tension_hints(reflection.tension_hints)
+        return reflection
+
+    @staticmethod
+    def _coerce_tension_hints(value: object) -> List[str]:
+        if not isinstance(value, list):
+            return []
+        hints: List[str] = []
+        for hint in value:
+            if not isinstance(hint, str):
+                continue
+            sanitized_hint = sanitize_identity_text(hint)
+            if sanitized_hint:
+                hints.append(sanitized_hint)
+        return hints

@@ -233,6 +233,12 @@ def register_browser_routes(
                 "url": payload.url,
                 "wait_until": payload.wait_until,
                 "timeout_ms": payload.timeout_ms,
+                "source_trace": {
+                    "action": "browser_navigate",
+                    "url": payload.url,
+                    "wait_until": payload.wait_until,
+                    "timeout_ms": payload.timeout_ms,
+                },
             },
             refresh=payload.refresh,
             url_hint=lambda result, _observed: result.get("url"),

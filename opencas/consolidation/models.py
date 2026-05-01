@@ -49,3 +49,7 @@ class ConsolidationResult(BaseModel):
     commitment_clusters_formed: int = 0
     commitment_work_objects_created: int = 0
     commitments_extracted_from_chat: int = 0
+    budget: Dict[str, Any] = Field(default_factory=dict)
+    budget_exhausted: bool = False
+    budget_reason: str | None = None
+    llm_calls_used: int = 0

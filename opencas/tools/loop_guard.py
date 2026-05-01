@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 class ToolLoopGuard:
@@ -18,7 +18,8 @@ class ToolLoopGuard:
     # task-execution mode; background loops should yield via focus mode.
     FOCUS_MODE_DEPTH: int = 8
 
-    def __init__(self) -> None:
+    def __init__(self, *, max_rounds: Optional[int] = None) -> None:
+        self.max_rounds = max(1, int(max_rounds or self.MAX_ROUNDS))
         self._sessions: Dict[str, Dict[str, Any]] = {}
 
     def record_call(
@@ -31,9 +32,9 @@ class ToolLoopGuard:
         state = self._sessions.setdefault(session_id, {"count": 0, "recent": []})
         state["count"] += 1
 
-        if state["count"] > self.MAX_ROUNDS:
+        if state["count"] > self.max_rounds:
             return (
-                f"Tool loop circuit breaker: exceeded {self.MAX_ROUNDS} "
+                f"Tool loop circuit breaker: exceeded {self.max_rounds} "
                 "consecutive tool calls in this session."
             )
 

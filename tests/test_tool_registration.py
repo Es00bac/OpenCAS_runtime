@@ -68,11 +68,15 @@ def test_register_runtime_default_tools_exposes_expected_surface(
     assert "google_workspace_auth_status" in tool_names
     assert "phone_get_status" in tool_names
     assert "phone_call_owner" in tool_names
+    assert "initiative_contact_owner" in tool_names
+    assert "initiative_contact_status" in tool_names
     assert runtime.tools.get("browser_start").risk_tier.value == "readonly"
     assert runtime.tools.get("browser_click").risk_tier.value == "external_write"
     assert runtime.tools.get("google_workspace_gmail_headlines").risk_tier.value == "readonly"
     assert runtime.tools.get("phone_get_status").risk_tier.value == "readonly"
     assert runtime.tools.get("phone_call_owner").risk_tier.value == "external_write"
+    assert runtime.tools.get("initiative_contact_owner").risk_tier.value == "external_write"
+    assert runtime.tools.get("initiative_contact_status").risk_tier.value == "readonly"
 
 
 def test_register_runtime_default_tools_emits_core_capabilities(
@@ -106,6 +110,8 @@ def test_register_runtime_default_tools_emits_core_capabilities(
     gmail_headlines = runtime.capability_registry.get("core:google_workspace_gmail_headlines")
     phone_status = runtime.capability_registry.get("core:phone_get_status")
     phone_call = runtime.capability_registry.get("core:phone_call_owner")
+    contact_status = runtime.capability_registry.get("core:initiative_contact_status")
+    contact_owner = runtime.capability_registry.get("core:initiative_contact_owner")
 
     assert fs_read is not None
     assert fs_read.display_name == "fs_read_file"
@@ -133,6 +139,14 @@ def test_register_runtime_default_tools_emits_core_capabilities(
     assert phone_call is not None
     assert phone_call.tool_names == ["phone_call_owner"]
     assert phone_call.metadata["risk_tier"] == "external_write"
+
+    assert contact_status is not None
+    assert contact_status.tool_names == ["initiative_contact_status"]
+    assert contact_status.metadata["risk_tier"] == "readonly"
+
+    assert contact_owner is not None
+    assert contact_owner.tool_names == ["initiative_contact_owner"]
+    assert contact_owner.metadata["risk_tier"] == "external_write"
 
 
 def test_initialize_runtime_execution_attaches_registry_and_emits_capabilities(tmp_path: Path) -> None:

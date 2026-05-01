@@ -18,7 +18,10 @@ def extract_anchor_terms(query: str) -> List[str]:
     """Extract quoted or capitalized anchor terms from a query."""
     terms: List[str] = []
     terms.extend(re.findall(r'"([^"]+)"', query))
-    for match in re.finditer(r"[A-Z][a-z]+(?:\s+[A-Z][a-z]+)+", query):
+    for match in re.finditer(
+        r"[A-Z][A-Za-z]+(?:\s+(?:[A-Z][A-Za-z]+|\d{2,4}))+",
+        query,
+    ):
         terms.append(match.group(0))
     return terms
 

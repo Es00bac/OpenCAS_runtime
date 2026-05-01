@@ -1,0 +1,17 @@
+{
+  "manifest_version": 1,
+  "id": "json_tools",
+  "name": "JSON Tools",
+  "description": "Query and validate JSON structures.",
+  "version": "1.0.0",
+  "entrypoint": "main.py",
+  "capabilities": [
+    {
+      "capability_id": "plugin:json_tools.main",
+      "display_name": "JSON Tools",
+      "kind": "tool",
+      "description": "Dotted-path query and lightweight schema validation.",
+      "tool_names": ["json_query", "json_validate"]
+    }
+  ]
+}

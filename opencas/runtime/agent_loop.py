@@ -41,6 +41,7 @@ from opencas.identity import IdentityRebuilder
 
 from opencas.daydream import (
     ConflictRegistry,
+    DaydreamReflection,
     DaydreamStore,
     ReflectionEvaluator,
     ReflectionResolver,
@@ -60,6 +61,11 @@ from .conversation_turns import (
     persist_tool_loop_messages,
     persist_user_turn,
 )
+from .conversation_recovery import (
+    complete_conversation_turn_marker,
+    start_conversation_turn_marker,
+)
+from .continuity_breadcrumbs import current_runtime_focus, record_burst_continuity
 from .cycle_phases import (
     drain_executive_cycle_queue,
     enqueue_promoted_cycle_work,
@@ -109,6 +115,9 @@ from .phone_runtime import (
     autoconfigure_runtime_phone,
     call_owner_via_runtime_phone,
     configure_runtime_phone,
+    configure_runtime_phone_menu_config,
+    get_runtime_phone_call_detail,
+    get_runtime_recent_phone_calls,
     handle_runtime_phone_media_stream,
     get_runtime_phone_status,
     handle_runtime_phone_gather_webhook,
@@ -162,6 +171,7 @@ class AgentRuntime:
         # Activity tracking — what the runtime is currently doing (operator-visible)
         self._activity: str = "idle"
         self._activity_since: datetime = datetime.now(timezone.utc)
+        self._last_user_turn_at: Optional[datetime] = None
         self._last_consolidation_result: Optional[Dict[str, Any]] = None
 
     def _set_activity(self, activity: str) -> None:
@@ -197,8 +207,22 @@ class AgentRuntime:
     async def phone_status(self) -> Dict[str, Any]:
         return await get_runtime_phone_status(self)
 
+    async def recent_phone_calls(self, *, limit: int = 10) -> Dict[str, Any]:
+        return await get_runtime_recent_phone_calls(self, limit=limit)
+
+    async def phone_call_detail(self, call_sid: str) -> Dict[str, Any]:
+        return await get_runtime_phone_call_detail(self, call_sid=call_sid)
+
     async def configure_phone(self, settings: PhoneRuntimeConfig) -> Dict[str, Any]:
         return await configure_runtime_phone(self, settings)
+
+    async def configure_phone_session_profiles(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        from opencas.runtime.phone_runtime import configure_runtime_phone_session_profiles
+
+        return await configure_runtime_phone_session_profiles(self, payload)
+
+    async def configure_phone_menu_config(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return await configure_runtime_phone_menu_config(self, payload)
 
     async def autoconfigure_phone(
         self,
@@ -226,6 +250,34 @@ class AgentRuntime:
 
     async def call_owner_via_phone(self, *, message: str, reason: str = "") -> Dict[str, Any]:
         return await call_owner_via_runtime_phone(self, message=message, reason=reason)
+
+    async def initiative_contact_owner(
+        self,
+        *,
+        message: str,
+        reason: str = "",
+        urgency: str = "normal",
+        channel: str = "auto",
+    ) -> Dict[str, Any]:
+        return await self.initiative_contact.request_contact(
+            message=message,
+            reason=reason,
+            urgency=urgency,  # type: ignore[arg-type]
+            source="runtime",
+            channel=channel,  # type: ignore[arg-type]
+        )
+
+    def initiative_contact_status(self) -> Dict[str, Any]:
+        return self.initiative_contact.status()
+
+    async def maybe_run_initiative_contact(self) -> Dict[str, Any]:
+        return await self.initiative_contact.run_once()
+
+    def desktop_context_status(self) -> Dict[str, Any]:
+        return self.desktop_context.status()
+
+    async def maybe_run_desktop_context(self) -> Dict[str, Any]:
+        return await self.desktop_context.run_once()
 
     async def handle_phone_voice_webhook(
         self,
@@ -335,56 +387,117 @@ class AgentRuntime:
     ) -> str:
         """Process one conversational turn while delegating phase logic to runtime helpers."""
         self._set_activity("conversing")
+        self._last_user_turn_at = datetime.now(timezone.utc)
         sid = session_id or self.ctx.config.session_id or "default"
         persisted_user_meta = dict(user_meta or {})
+        turn_marker_id: Optional[str] = None
+        try:
+            try:
+                marker = start_conversation_turn_marker(
+                    self.ctx.config.state_dir,
+                    session_id=sid,
+                    user_input=user_input,
+                    user_meta=persisted_user_meta,
+                )
+                turn_marker_id = str(marker.get("marker_id") or "") or None
+            except Exception as exc:
+                self._trace(
+                    "conversation_turn_marker_start_error",
+                    {"session_id": sid, "error": str(exc)},
+                )
 
-        # Refusal is handled first so unsafe turns never leak into the tool loop.
-        from opencas.refusal.models import ConversationalRequest
-        conv_request = ConversationalRequest(text=user_input, session_id=sid)
-        refusal = self.refusal_gate.evaluate(conv_request)
-        if refusal.refused:
-            return await handle_refusal_turn(
+            try:
+                await record_burst_continuity(
+                    self,
+                    trigger="conversation_burst_started",
+                    phase="start",
+                    intent=f"Conversation burst for {user_input[:80]}",
+                    focus=current_runtime_focus(self, user_input),
+                    next_step="process the turn and update executive state",
+                    note="conversation turn",
+                )
+            except Exception as exc:
+                self._trace("continuity_breadcrumb_converse_error", {"session_id": sid, "error": str(exc)})
+
+            # Refusal is handled first so unsafe turns never leak into the tool loop.
+            from opencas.refusal.models import ConversationalRequest
+            conv_request = ConversationalRequest(text=user_input, session_id=sid)
+            refusal = self.refusal_gate.evaluate(conv_request)
+            if refusal.refused:
+                response = await handle_refusal_turn(
+                    self,
+                    session_id=sid,
+                    user_input=user_input,
+                    user_meta=persisted_user_meta,
+                    refusal=refusal,
+                )
+                if turn_marker_id:
+                    try:
+                        complete_conversation_turn_marker(
+                            self.ctx.config.state_dir,
+                            turn_marker_id,
+                            outcome="refusal_response_persisted",
+                        )
+                    except Exception as exc:
+                        self._trace(
+                            "conversation_turn_marker_complete_error",
+                            {"session_id": sid, "marker_id": turn_marker_id, "error": str(exc)},
+                        )
+                return response
+
+            await persist_user_turn(
                 self,
                 session_id=sid,
                 user_input=user_input,
                 user_meta=persisted_user_meta,
-                refusal=refusal,
             )
+            artifacts = await execute_conversation_tool_loop(
+                self,
+                session_id=sid,
+                user_input=user_input,
+            )
+            await persist_tool_loop_messages(
+                self,
+                session_id=sid,
+                artifacts=artifacts,
+            )
+            await finalize_assistant_turn(
+                self,
+                session_id=sid,
+                user_input=user_input,
+                content=artifacts.content,
+                manifest=artifacts.manifest,
+            )
+            if turn_marker_id:
+                try:
+                    complete_conversation_turn_marker(
+                        self.ctx.config.state_dir,
+                        turn_marker_id,
+                        outcome="assistant_response_persisted",
+                    )
+                except Exception as exc:
+                    self._trace(
+                        "conversation_turn_marker_complete_error",
+                        {"session_id": sid, "marker_id": turn_marker_id, "error": str(exc)},
+                    )
 
-        await persist_user_turn(
-            self,
-            session_id=sid,
-            user_input=user_input,
-            user_meta=persisted_user_meta,
-        )
-        artifacts = await execute_conversation_tool_loop(
-            self,
-            session_id=sid,
-            user_input=user_input,
-        )
-        await persist_tool_loop_messages(
-            self,
-            session_id=sid,
-            artifacts=artifacts,
-        )
-        await finalize_assistant_turn(
-            self,
-            session_id=sid,
-            user_input=user_input,
-            content=artifacts.content,
-            manifest=artifacts.manifest,
-        )
-
-        self._trace(
-            "converse",
-            {
-                "session_id": sid,
-                "input_len": len(user_input),
-                "token_estimate": artifacts.manifest.token_estimate,
-            },
-        )
-        self.boredom.record_activity()
-        return artifacts.content
+            self._trace(
+                "converse",
+                {
+                    "session_id": sid,
+                    "input_len": len(user_input),
+                    "token_estimate": artifacts.manifest.token_estimate,
+                },
+            )
+            self.boredom.record_activity()
+            if self.ctx.somatic is not None:
+                try:
+                    self.ctx.somatic.decay()
+                except Exception:
+                    pass
+            return artifacts.content
+        finally:
+            self._set_activity("idle")
 
     async def run_daydream(self) -> Dict[str, Any]:
         """Generate daydreams when idle or tense."""
@@ -397,91 +510,139 @@ class AgentRuntime:
     async def run_cycle(self) -> Dict[str, Any]:
         """Run one creative/execution cycle."""
         self._set_activity("cycling")
-        await self.executive.restore_queue()
-        result = self.creative.run_cycle()
-
-        # Keep run_cycle() focused on phase ordering; the helper module owns the
-        # promotion/intervention/drain details and their local invariants.
-        promoted_tasks = await enqueue_promoted_cycle_work(self)
-
-        daydream_work_objects: list[WorkObject] = []
-        reflections: list[str] = []
-
-        # Relational: record creative collaboration when work is promoted
-        if promoted_tasks > 0 and hasattr(self.ctx, "relational") and self.ctx.relational:
-            await self.ctx.relational.record_creative_collab(success=True)
-
-        # Somatic update for creative work and daydreaming
-        if promoted_tasks > 0:
-            self.ctx.somatic.bump_from_work(
-                intensity=min(0.25, promoted_tasks * 0.05), success=True
+        try:
+            current_focus = current_runtime_focus(self, "cycle")
+            await record_burst_continuity(
+                self,
+                trigger="cycle_burst_started",
+                phase="start",
+                intent=f"Cycle burst for {current_focus}",
+                focus=current_focus,
+                next_step="promote work, evaluate workspace, and drain the executive queue",
+                note="creative cycle",
             )
-        if reflections:
-            await self._maybe_record_somatic_snapshot(
-                source="daydream",
-                trigger_event_id=str(reflections[-1].reflection_id)
-                if reflections
-                else None,
+        except Exception as exc:
+            self._trace("continuity_breadcrumb_cycle_error", {"error": str(exc)})
+        try:
+            await self.executive.restore_queue()
+            result = self.creative.run_cycle()
+
+            # Generate daydreams, evaluate reflections, and promote keepers to the
+            # creative ladder so they can be enqueued in the same cycle.
+            daydream_result = await self._run_daydream_inner()
+            daydream_work_objects: list[WorkObject] = daydream_result.get(
+                "daydream_work_objects", []
             )
-        elif promoted_tasks > 0:
-            await self._maybe_record_somatic_snapshot(source="creative_cycle")
+            reflections: list[DaydreamReflection] = daydream_result.get(
+                "reflections_list", []
+            )
 
-        # Harness objective cycle
-        harness_result: Dict[str, Any] = {}
-        if self.harness:
-            try:
-                harness_result = await self.harness.run_objective_cycle(max_active_loops=3)
-            except Exception as exc:
-                self._trace("harness_cycle_error", {"error": str(exc)})
+            # Keep run_cycle() focused on phase ordering; the helper module owns the
+            # promotion/intervention/drain details and their local invariants.
+            promoted_tasks = await enqueue_promoted_cycle_work(self)
 
-        # Build executive workspace and evaluate intervention policy
-        workspace_outcome = await evaluate_workspace_intervention(self)
-        intervention_decision = workspace_outcome.decision if workspace_outcome else None
+            # Relational: record creative collaboration when work is promoted
+            if promoted_tasks > 0 and hasattr(self.ctx, "relational") and self.ctx.relational:
+                await self.ctx.relational.record_creative_collab(success=True)
 
-        # Drain executive queue: submit ready work to BAA
-        drained_count = await drain_executive_cycle_queue(self)
+            # Somatic update for creative work and daydreaming
+            if promoted_tasks > 0:
+                self.ctx.somatic.bump_from_work(
+                    intensity=min(0.25, promoted_tasks * 0.05), success=True
+                )
+            if reflections:
+                await self._maybe_record_somatic_snapshot(
+                    source="daydream",
+                    trigger_event_id=str(reflections[-1].reflection_id)
+                    if reflections
+                    else None,
+                )
+            elif promoted_tasks > 0:
+                await self._maybe_record_somatic_snapshot(source="creative_cycle")
 
-        keepers = sum(1 for r in reflections if getattr(r, "keeper", False))
-        self._trace(
-            "run_cycle",
-            {
-                "promoted": result["promoted"],
-                "demoted": result["demoted"],
+            # Harness objective cycle
+            harness_result: Dict[str, Any] = {}
+            if self.harness:
+                try:
+                    harness_result = await self.harness.run_objective_cycle(max_active_loops=3)
+                except Exception as exc:
+                    self._trace("harness_cycle_error", {"error": str(exc)})
+
+            # Build executive workspace and evaluate intervention policy
+            workspace_outcome = await evaluate_workspace_intervention(self)
+            intervention_decision = workspace_outcome.decision if workspace_outcome else None
+
+            # Drain executive queue: submit ready work to BAA
+            drained_count = await drain_executive_cycle_queue(self)
+
+            keepers = sum(1 for r in reflections if getattr(r, "keeper", False))
+            self._trace(
+                "run_cycle",
+                {
+                    "promoted": result["promoted"],
+                    "demoted": result["demoted"],
+                    "enqueued": promoted_tasks,
+                    "daydreams": len(daydream_work_objects),
+                    "reflections": len(reflections),
+                    "keepers": keepers,
+                    "drained": drained_count,
+                    "harness": harness_result,
+                    "intervention": intervention_decision.kind.value if intervention_decision else None,
+                },
+            )
+            return {
+                "creative": result,
                 "enqueued": promoted_tasks,
                 "daydreams": len(daydream_work_objects),
                 "reflections": len(reflections),
                 "keepers": keepers,
                 "drained": drained_count,
                 "harness": harness_result,
-                "intervention": intervention_decision.kind.value if intervention_decision else None,
-            },
-        )
-        return {
-            "creative": result,
-            "enqueued": promoted_tasks,
-            "daydreams": len(daydream_work_objects),
-            "reflections": len(reflections),
-            "keepers": keepers,
-            "drained": drained_count,
-            "harness": harness_result,
-            "intervention": intervention_decision.model_dump(mode="json") if intervention_decision else None,
-        }
+                "intervention": intervention_decision.model_dump(mode="json") if intervention_decision else None,
+            }
+        finally:
+            self._set_activity("idle")
 
-    async def maybe_compact_session(self, session_id: str, tail_size: int = 10) -> None:
+    async def maybe_compact_session(
+        self,
+        session_id: str,
+        tail_size: int = 10,
+        min_removed_count: int = 1,
+    ) -> Any:
         """Compact old episodes for a session if there are enough of them."""
-        await maybe_compact_runtime_session(self, session_id, tail_size=tail_size)
+        return await maybe_compact_runtime_session(
+            self,
+            session_id,
+            tail_size=tail_size,
+            min_removed_count=min_removed_count,
+        )
 
-    async def run_consolidation(self) -> Dict[str, Any]:
+    async def run_consolidation(self, *, budget: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Run the nightly consolidation engine."""
-        return await run_runtime_consolidation(self)
+        return await run_runtime_consolidation(self, budget=budget)
 
     def check_metacognition(self) -> Dict[str, Any]:
         """Run a metacognitive consistency check via ToM."""
         return build_runtime_metacognition_status(self)
 
-    async def rebuild_identity(self) -> Dict[str, Any]:
-        """Rebuild identity from autobiographical memory and apply to self-model."""
-        return await rebuild_runtime_identity(self)
+    async def rebuild_identity(
+        self,
+        *,
+        seed_episode_ids: Optional[List[str]] = None,
+        min_created_at: Optional[datetime] = None,
+        expand_graph: bool = True,
+        term_limits: Optional[Dict[str, int]] = None,
+        apply: bool = True,
+    ) -> Dict[str, Any]:
+        """Rebuild identity from autobiographical memory, optionally as a preview."""
+        return await rebuild_runtime_identity(
+            self,
+            seed_episode_ids=seed_episode_ids,
+            min_created_at=min_created_at,
+            expand_graph=expand_graph,
+            term_limits=term_limits,
+            apply=apply,
+        )
 
     async def _build_tool_use_context(self, session_id: str) -> ToolUseContext:
         """Create a ToolUseContext, restoring active plan state if present."""
@@ -502,9 +663,16 @@ class AgentRuntime:
     def _make_mcp_register_adapter(self):
         return make_mcp_register_adapter(self)
 
-    async def execute_tool(self, name: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    async def execute_tool(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        *,
+        session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Execute a tool through the registry after self-approval."""
-        return await execute_runtime_tool(self, name, args)
+        return await execute_runtime_tool(self, name, args, session_id=session_id, task_id=task_id)
 
     async def install_plugin(self, path: Path | str) -> Optional[Any]:
         """Install a plugin from a directory or manifest file."""
@@ -526,9 +694,24 @@ class AgentRuntime:
         """Submit a repair task to the bounded assistant agent and return a future."""
         return await submit_runtime_repair(self, task)
 
-    async def handle_action(self, request: ActionRequest) -> Dict[str, Any]:
+    async def handle_action(
+        self,
+        request: ActionRequest,
+        *,
+        session_id: Optional[str] = None,
+        task_id: Optional[str] = None,
+        tool_name: Optional[str] = None,
+        args: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         """Evaluate an action through the self-approval ladder."""
-        return await handle_runtime_action(self, request)
+        return await handle_runtime_action(
+            self,
+            request,
+            session_id=session_id,
+            task_id=task_id,
+            tool_name=tool_name,
+            args=args,
+        )
 
     async def _continuity_check(self) -> None:
         """Phase 9: Continuous Present — run at boot to decay score and generate monologue."""
@@ -536,13 +719,17 @@ class AgentRuntime:
 
     async def run_autonomous(
         self,
-        cycle_interval: int = 300,
+        cycle_interval: int = 600,
+        daydream_interval: int = 720,
+        baa_heartbeat_interval: int = 120,
         consolidation_interval: int = 86400,
     ) -> None:
         """Start background scheduler and block until interrupted."""
         await run_autonomous_runtime(
             self,
             cycle_interval=cycle_interval,
+            daydream_interval=daydream_interval,
+            baa_heartbeat_interval=baa_heartbeat_interval,
             consolidation_interval=consolidation_interval,
         )
 
@@ -550,7 +737,9 @@ class AgentRuntime:
         self,
         host: str = "127.0.0.1",
         port: int = 8080,
-        cycle_interval: int = 300,
+        cycle_interval: int = 600,
+        daydream_interval: int = 720,
+        baa_heartbeat_interval: int = 120,
         consolidation_interval: int = 86400,
     ) -> None:
         """Run scheduler + FastAPI server together, shutting down gracefully on signal."""
@@ -559,7 +748,22 @@ class AgentRuntime:
             host=host,
             port=port,
             cycle_interval=cycle_interval,
+            daydream_interval=daydream_interval,
+            baa_heartbeat_interval=baa_heartbeat_interval,
             consolidation_interval=consolidation_interval,
+        )
+
+    async def import_bulma(
+        self,
+        bulma_state_dir: Path,
+        checkpoint_path: Optional[Path] = None,
+        curated_workspace_dir: Optional[Path] = None,
+    ) -> Any:
+        """Reject the retired OpenBulma v4 one-time importer."""
+        raise RuntimeError(
+            "The OpenBulma v4 importer has been decommissioned after the one-time "
+            "the OpenCAS agent cutover. Restore it from git history only for an explicit "
+            "forensic migration task."
         )
 
     async def _maybe_record_somatic_snapshot(
@@ -624,6 +828,7 @@ class AgentRuntime:
         kind: EpisodeKind,
         session_id: Optional[str] = None,
         role: Optional[str] = None,
+        affect: Optional[Any] = None,
     ) -> Episode:
         return await record_runtime_episode(
             self,
@@ -631,6 +836,7 @@ class AgentRuntime:
             kind,
             session_id=session_id,
             role=role,
+            affect=affect,
         )
 
     async def _link_episode_to_previous(self, episode: Episode) -> None:

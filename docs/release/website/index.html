@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenCAS Release</title>
+    <meta
+      name="description"
+      content="OpenCAS release site for the current runtime: memory, voice, phone, schedule, platform, logs, and the operator control plane."
+    />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+    <link rel="stylesheet" href="media-player.css">
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-shell">
+        <a class="brand" href="index.html">
+          <span class="brand-mark mono">O</span>
+          <span>OpenCAS Release</span>
+        </a>
+        <nav class="nav-links">
+          <a href="installation.html">Installation</a>
+          <a href="usage.html">Usage</a>
+          <a href="features.html">Features</a>
+          <a href="terminology.html">Terminology</a>
+          <a href="import.html">Import</a>
+          <a href="api/">API</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="site-shell">
+      <section class="hero">
+        <div class="hero-grid">
+          <div class="hero-copy">
+            <span class="eyebrow">Release site</span>
+            <h1>OpenCAS is a local-state autonomous agent with memory, voice, phone, and a real control plane.</h1>
+            <p class="lede">
+              It keeps state locally, routes models through <code>open_llm_auth</code>, and exposes the parts operators actually touch: chat, schedule, platform, logs, telemetry, and the dashboard tabs behind them.
+            </p>
+            <div class="hero-actions">
+              <a class="btn primary" href="usage.html">Read usage</a>
+              <a class="btn" href="api/">Open API</a>
+              <a class="btn" href="features.html">See features</a>
+            </div>
+            <div class="hero-badges">
+              <span class="pill">Persistent memory</span>
+              <span class="pill">Voice + phone lanes</span>
+              <span class="pill">Schedule + platform</span>
+              <span class="pill">Logs + telemetry</span>
+              <span class="pill">Tool-use memory</span>
+              <span class="pill">Project return</span>
+            </div>
+          </div>
+
+          <aside class="hero-panel">
+            <div class="terminal-bar">
+              <span class="mono">signal/status</span>
+              <div class="terminal-dots" aria-hidden="true">
+                <span></span><span></span><span></span>
+              </div>
+            </div>
+            <div class="signal-grid">
+              <article class="signal-card">
+                <div class="metric">13</div>
+                <div class="metric-label">Dashboard tabs</div>
+                <p class="signal-note">Overview, Health, Chat, Operations, Schedule, Usage, Daydream, Memory, Identity, Executive, Platform, System, and Logs.</p>
+              </article>
+              <article class="signal-card">
+                <div class="metric">8+</div>
+                <div class="metric-label">Operator surfaces</div>
+                <p class="signal-note">Chat, voice, phone, schedule, platform, telemetry, Telegram, and the WebSocket bridge.</p>
+              </article>
+              <article class="signal-card">
+                <div class="metric">RRF</div>
+                <div class="metric-label">Memory fusion</div>
+                <p class="signal-note">Semantic, keyword, recency, salience, graph, emotional resonance, temporal echo, and reliability work together.</p>
+              </article>
+              <article class="signal-card">
+                <div class="metric">BAA</div>
+                <div class="metric-label">Bounded execution</div>
+                <p class="signal-note">Queue-limited background work with receipts, retries, salvage state, and provenance-aware recovery.</p>
+              </article>
+            </div>
+            <div class="callout">
+              <strong>Truthful release note.</strong> OpenCAS is local-state and operator-owned, but normal chat, voice, and embedding lanes still route through configured providers unless you replace them.
+            </div>
+          </aside>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="eyebrow">What is live</span>
+          <h2>Current surfaces, not aspirational ones.</h2>
+          <p class="section-lead">The release bundle is meant to describe the running system exactly as it exists now, including the newer control-plane pieces.</p>
+        </div>
+        <div class="grid cols-2">
+          <article class="content-card">
+            <h3>Memory and continuity</h3>
+            <p>SQLite-backed episodic and distilled memory, graph edges, retrieval inspection, artifact-backed recall, and continuous identity state.</p>
+          </article>
+          <article class="content-card">
+            <h3>Operator control plane</h3>
+            <p>Dashboard-backed chat, operations, schedule, usage, platform, system, and logs views with API and WebSocket access behind them.</p>
+          </article>
+          <article class="content-card">
+            <h3>Channels</h3>
+            <p>Dashboard chat, voice capture/synthesis, Twilio-backed phone handling, Telegram, and the live `/ws` bridge.</p>
+          </article>
+          <article class="content-card">
+            <h3>Platform and trust</h3>
+            <p>Capability inventory, extension install/update/uninstall flows, bundle inspection, and plugin trust policy control.</p>
+          </article>
+          <article class="content-card">
+            <h3>Tool and project intelligence</h3>
+            <p>Semantic tool routing, compact tool-use memory, adaptive tool budgets, task-specific objective contracts, and project-return records for unfinished work.</p>
+          </article>
+          <article class="content-card">
+            <h3>Opt-in context</h3>
+            <p>Telegram media context and desktop-context capture can add grounded evidence when explicitly configured.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="eyebrow">Dashboard map</span>
+          <h2>Rooms in the current control deck.</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Tab</th>
+                <th>What it shows</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Overview</td><td>System summary and quick status</td></tr>
+              <tr><td>Health</td><td>Doctor checks and health event feed</td></tr>
+              <tr><td>Chat</td><td>Conversational interface with session and lane metadata</td></tr>
+              <tr><td>Operations</td><td>PTY/browser/process sessions, receipts, work, commitments, plans, qualification</td></tr>
+              <tr><td>Schedule</td><td>Scheduled tasks and events, calendar view, run history</td></tr>
+              <tr><td>Usage</td><td>Token usage, cost, and latency over time</td></tr>
+              <tr><td>Daydream</td><td>Daydream sparks, keeper history, conflict log</td></tr>
+              <tr><td>Memory</td><td>Episode and distilled memory browser, retrieval inspection, atlas view</td></tr>
+              <tr><td>Identity</td><td>Self-model, user model, somatic state, relational state</td></tr>
+              <tr><td>Executive</td><td>Goals, task queue, executive snapshot</td></tr>
+              <tr><td>Platform</td><td>Capability inventory, extension lifecycle, and trust control</td></tr>
+              <tr><td>System</td><td>Bootstrap configuration, effective model routing, phone, and Telegram setup</td></tr>
+              <tr><td>Logs</td><td>Runtime telemetry event stream</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="eyebrow">Docs map</span>
+          <h2>Find the part you need fast.</h2>
+        </div>
+        <div class="doc-grid">
+          <a class="doc-card" href="installation.html">
+            <h3>Installation</h3>
+            <p>Clone, configure, and launch the current editable source-checkout layout.</p>
+          </a>
+          <a class="doc-card" href="usage.html">
+            <h3>Usage</h3>
+            <p>How to run the dashboard, voice/chat, schedule, phone, platform, and logs surfaces.</p>
+          </a>
+          <a class="doc-card" href="features.html">
+            <h3>Features</h3>
+            <p>Subsystem summary with the current memory, autonomy, channels, platform, and observability features.</p>
+          </a>
+          <a class="doc-card" href="api/">
+            <h3>API Reference</h3>
+            <p>HTTP and WebSocket routes for the live server, including chat, phone, schedule, telemetry, and platform endpoints.</p>
+          </a>
+          <a class="doc-card" href="architecture/index.html">
+            <h3>Architecture</h3>
+            <p>Subsystem boundaries, runtime loops, persistence, and the current control-plane shape.</p>
+          </a>
+          <a class="doc-card" href="terminology.html">
+            <h3>Terminology</h3>
+            <p>The vocabulary used in the docs, dashboard, and source code.</p>
+          </a>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>Release truth</h3>
+        <ul class="list">
+          <li>OpenCAS is local-state and operator-owned.</li>
+          <li>Chat, voice, and embedding lanes normally use configured providers through <code>open_llm_auth</code>.</li>
+          <li>The current repo is best described as a local-state autonomous agent with provider-flexible model execution and first-class operator control planes.</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="site-shell">
+        <div><a href="../README.md">Markdown source</a></div>
+        <div><a href="../features.md">Features source</a></div>
+      </div>
+    </footer>
+
+    <script src="media-player.js"></script>
+  </body>
+</html>

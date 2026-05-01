@@ -32,7 +32,6 @@ class WorkspaceIndexerToolAdapter:
     """Tool adapter for semantic workspace file gisting and discovery."""
 
     def __init__(self, service: WorkspaceIndexService) -> None:
-        
         self.service = service
 
     def schema(self) -> List[Dict[str, Any]]:
@@ -49,7 +48,10 @@ class WorkspaceIndexerToolAdapter:
                 "type": "function",
                 "function": {
                     "name": "workspace_search_file_gists",
-                    "description": "Semantically search the workspace for files related to a query using gist embeddings.",
+                    "description": (
+                        "Semantically search the workspace for files related to a query "
+                        "using gist embeddings."
+                    ),
                     "parameters": SearchFileGistsSchema.model_json_schema(),
                 },
             },
@@ -57,7 +59,10 @@ class WorkspaceIndexerToolAdapter:
                 "type": "function",
                 "function": {
                     "name": "workspace_list_directory_gists",
-                    "description": "List all files in a directory along with their 1-line gists to understand a subsystem.",
+                    "description": (
+                        "List all files in a directory along with their 1-line gists "
+                        "to understand a subsystem."
+                    ),
                     "parameters": ListDirectoryGistsSchema.model_json_schema(),
                 },
             },
@@ -78,8 +83,12 @@ class WorkspaceIndexerToolAdapter:
             result = await self.service.get_gist_for_path(path, refresh_if_stale=args.refresh_if_stale)
             if not result:
                 return ToolResult(
-                    status="error",
-                    message=f"No gist found for {path}. The file may not exist, be ignored, or indexing hasn't finished.",
+                    success=False,
+                    output=(
+                        f"No gist found for {path}. The file may not exist, "
+                        "be ignored, or indexing hasn't finished."
+                    ),
+                    metadata={"path": str(path)},
                 )
             
             output = {
@@ -123,12 +132,20 @@ class WorkspaceIndexerToolAdapter:
                     "gist": r.gist_text,
                     "needs_further_reading": r.needs_further_reading,
                 })
-            
-            return ToolResult(success=True, output=json.dumps({"directory": str(path), "files": formatted}, indent=2), metadata={})
+
+            return ToolResult(
+                success=True,
+                output=json.dumps({"directory": str(path), "files": formatted}, indent=2),
+                metadata={},
+            )
 
         elif name == "workspace_refresh_index":
             args = RefreshWorkspaceIndexSchema(**arguments)
             await self.service.full_scan(force=args.force)
-            return ToolResult(status="success", output="Workspace index refresh triggered.")
+            return ToolResult(
+                success=True,
+                output="Workspace index refresh triggered.",
+                metadata={},
+            )
 
         raise ValueError(f"Unknown tool: {name}")

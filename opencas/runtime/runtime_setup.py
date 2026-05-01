@@ -11,8 +11,12 @@ from typing import Any, Optional
 
 from opencas.autonomy.boredom import BoredomPhysics
 from opencas.autonomy.creative_ladder import CreativeLadder
+from opencas.autonomy.project_resume import ProjectResumeResolver
 from opencas.autonomy.self_approval import SelfApprovalLadder
 from opencas.autonomy.spark_router import SparkRouter
+from opencas.compaction import ConversationCompactor
+from opencas.consolidation import NightlyConsolidationEngine
+from opencas.context import ContextBuilder, MemoryRetriever
 from opencas.daydream import (
     ConflictRegistry,
     ReflectionEvaluator,
@@ -20,6 +24,7 @@ from opencas.daydream import (
     SelfCompassionMirror,
 )
 from opencas.daydream.spark_evaluator import SparkEvaluator
+from opencas.desktop_context import DesktopContextService
 from opencas.execution import (
     BoundedAssistantAgent,
     BrowserSupervisor,
@@ -27,22 +32,37 @@ from opencas.execution import (
     PtySupervisor,
     ReliabilityCoordinator,
 )
-from opencas.context import ContextBuilder, MemoryRetriever
-from opencas.compaction import ConversationCompactor
-from opencas.consolidation import NightlyConsolidationEngine
+from opencas.governance import (
+    AutoReviewerSubagent,
+    AutoReviewMode,
+    AutoReviewPolicy,
+    normalize_auto_review_mode,
+)
 from opencas.identity import IdentityRebuilder
+from opencas.initiative_contact import InitiativeContactService
 from opencas.memory.fabric.graph import EpisodeGraph
+from opencas.phone_config import PhoneRuntimeConfig
 from opencas.platform import CapabilityRegistry
 from opencas.somatic import SomaticModulators
-from opencas.telemetry import Tracer
-from opencas.tools import ToolRegistry, ToolUseLoop
-from opencas.tom import ToMEngine
-from opencas.phone_config import PhoneRuntimeConfig
 from opencas.telegram_config import TelegramRuntimeConfig
+from opencas.tom import ToMEngine
+from opencas.tools import ToolRegistry, ToolUseLoop
 
 from .daydream import DaydreamGenerator
 from .phone_runtime import initialize_runtime_phone
+from .provenance_hooks import register_runtime_provenance_hooks
+from .shadow_registry_hooks import register_runtime_shadow_registry_hooks
 from .telegram_runtime import initialize_runtime_telegram
+
+
+def build_runtime_auto_review_policy(runtime: Any, context: Any) -> AutoReviewPolicy:
+    """Build the approval auto-review policy from runtime configuration."""
+    raw_mode = getattr(getattr(context, "config", None), "approval_mode", AutoReviewMode.DEFAULT.value)
+    mode = normalize_auto_review_mode(raw_mode)
+    reviewer = None
+    if mode is AutoReviewMode.AUTO_REVIEW:
+        reviewer = AutoReviewerSubagent(llm=getattr(runtime, "llm", None))
+    return AutoReviewPolicy(mode=mode, reviewer=reviewer)
 
 
 def initialize_runtime_autonomy(runtime: Any, context: Any) -> None:
@@ -68,6 +88,7 @@ def initialize_runtime_autonomy(runtime: Any, context: Any) -> None:
         ledger=getattr(context, "ledger", None),
         web_trust=getattr(context, "web_trust", None),
     )
+    runtime.auto_review = build_runtime_auto_review_policy(runtime, context)
     runtime.refusal_gate = ConversationalRefusalGate(
         approval=runtime.approval,
         hook_bus=runtime.ctx.hook_bus,
@@ -127,6 +148,9 @@ def initialize_runtime_execution(runtime: Any, context: Any) -> None:
         runtime.tools = runtime.plugin_lifecycle.tools
     else:
         runtime.tools = ToolRegistry(tracer=runtime.tracer, hook_bus=runtime.ctx.hook_bus)
+    runtime.tools.runtime = runtime
+    register_runtime_provenance_hooks(runtime)
+    register_runtime_shadow_registry_hooks(runtime)
     runtime._register_default_tools()
     runtime._register_skills()
     runtime.baa = BoundedAssistantAgent(
@@ -177,6 +201,13 @@ def initialize_runtime_memory_surfaces(runtime: Any, context: Any) -> None:
         episode_graph=runtime.episode_graph,
         somatic_manager=context.somatic,
         relational_engine=context.relational,
+        affective_examinations=getattr(context, "affective_examinations", None),
+    )
+    runtime.project_resume = ProjectResumeResolver(
+        memory=runtime.memory,
+        work_store=getattr(context, "work_store", None),
+        plan_store=getattr(context, "plan_store", None),
+        harness_store=getattr(getattr(context, "harness", None), "store", None),
     )
     runtime.modulators = SomaticModulators(context.somatic.state)
     runtime.builder = ContextBuilder(
@@ -189,12 +220,18 @@ def initialize_runtime_memory_surfaces(runtime: Any, context: Any) -> None:
         modulators=runtime.modulators,
         relational=getattr(context, "relational", None),
         tom=runtime.tom,
+        project_resume_resolver=runtime.project_resume,
+        affective_examinations=getattr(context, "affective_examinations", None),
+        schedule_service=getattr(context, "schedule_service", None),
+        daydream_store=getattr(context, "daydream_store", None),
     )
     runtime.compactor = ConversationCompactor(
         memory=runtime.memory,
         llm=runtime.llm,
         tracer=runtime.tracer,
         context_store=runtime.ctx.context_store,
+        identity=context.identity,
+        embeddings=context.embeddings,
     )
     runtime.consolidation = NightlyConsolidationEngine(
         memory=runtime.memory,
@@ -210,6 +247,7 @@ def initialize_runtime_memory_surfaces(runtime: Any, context: Any) -> None:
     runtime.harness = getattr(context, "harness", None)
     if runtime.harness:
         runtime.harness.baa = runtime.baa
+        runtime.harness.project_resume_resolver = runtime.project_resume
 
 
 def initialize_runtime_channels(runtime: Any, context: Any) -> None:
@@ -220,3 +258,11 @@ def initialize_runtime_channels(runtime: Any, context: Any) -> None:
     runtime._phone_config = PhoneRuntimeConfig()
     runtime._phone = None
     initialize_runtime_phone(runtime, context.config.state_dir)
+    runtime.initiative_contact = InitiativeContactService(
+        runtime=runtime,
+        state_dir=context.config.state_dir,
+    )
+    runtime.desktop_context = DesktopContextService(
+        runtime=runtime,
+        state_dir=context.config.state_dir,
+    )

@@ -26,7 +26,14 @@ async def run_embedding_backfill(
     stage_callback: Any,
 ) -> None:
     try:
-        sample = await memory.list_episodes(compacted=False, limit=1000)
+        # Align distilled memories first (high priority, small volume)
+        memories = await memory.list_memories(limit=2000)
+        memories_count = await backfill.align_memory_embeddings(memories)
+        if memories_count > 0:
+            stage_callback("memory_backfill_complete", {"backfilled": memories_count})
+
+        # Align history episodes (larger volume, incremental)
+        sample = await memory.list_episodes(compacted=False, limit=5000)
         backfilled = await backfill.backfill_missing_embeddings(sample)
         if backfilled > 0:
             stage_callback("embedding_backfill_complete", {"backfilled": backfilled})
@@ -40,14 +47,17 @@ def resolve_embedding_model(config: Any, llm: Any) -> str:
     """Resolve the configured embedding model with a local fallback."""
     if config.embedding_model_id:
         return config.embedding_model_id
-    default_model = "google/gemini-embedding-2-preview"
-    if llm is not None:
-        try:
-            llm._resolve(default_model)
-            return default_model
-        except Exception:
-            pass
-    return "local-fallback"
+
+    # Default to the local high-fidelity Gemma model as requested.
+    # This runs on the local CPU (18 threads) and avoids Google Cloud quota.
+    return "google/embeddinggemma-300m"
+
+
+def resolve_embedding_dimensions(model_id: Optional[str]) -> Optional[int]:
+    """Return provider request dimensions for embedding models that require a pin."""
+    if model_id == "google/embeddinggemma-300m":
+        return 768
+    return None
 
 
 def runtime_guard(config: Any) -> None:

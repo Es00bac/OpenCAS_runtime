@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>OpenCAS Features</title>
+  <meta name="description" content="Current OpenCAS features: memory, retrieval, voice, phone, schedule, platform, telemetry, Telegram, and the operator dashboard.">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="media-player.css">
+</head>
+<body>
+  <header class="site-header">
+    <div class="site-shell">
+      <a class="brand" href="index.html">
+        <span class="brand-mark mono">O</span>
+        <span>OpenCAS Release</span>
+      </a>
+      <nav class="nav-links">
+        <a href="index.html">Home</a>
+        <a href="installation.html">Installation</a>
+        <a href="usage.html">Usage</a>
+        <a href="terminology.html">Terminology</a>
+        <a href="import.html">Import</a>
+        <a href="api/">API</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="site-shell">
+    <section class="page-hero">
+      <span class="eyebrow">Features</span>
+      <h1>Subsystems that are present in the current code.</h1>
+      <p class="section-lead">This page avoids aspirational claims and external comparisons. It describes the capabilities that exist now, including the newer voice, phone, schedule, platform, and telemetry surfaces.</p>
+    </section>
+
+    <div class="content-stack">
+      <section class="grid cols-3">
+        <article class="content-card">
+          <h3>Persistent memory</h3>
+          <p>SQLite-backed episodic and distilled memory, edge graph storage, semantic retrieval, and artifact-backed autobiographical recall.</p>
+        </article>
+        <article class="content-card">
+          <h3>Retrieval fusion</h3>
+          <p>Semantic, keyword, recency, salience, graph, emotional resonance, temporal echo, and reliability signals, plus somatic and relational adjustments.</p>
+        </article>
+        <article class="content-card">
+          <h3>Embeddings</h3>
+          <p>Provider-backed embeddings through <code>open_llm_auth</code>, with <code>google/embeddinggemma-300m</code> as the current default native 768-dimensional local lane.</p>
+        </article>
+      </section>
+
+      <section class="grid cols-3">
+        <article class="content-card">
+          <h3>Somatic state</h3>
+          <p>Arousal, fatigue, tension, valence, focus, energy, certainty, and a derived somatic tag that modulate pacing and retrieval.</p>
+        </article>
+        <article class="content-card">
+          <h3>Relational state</h3>
+          <p>Musubi tracking and user/self-model continuity surfaces that influence interpretation and tone.</p>
+        </article>
+        <article class="content-card">
+          <h3>Executive state</h3>
+          <p>Current intention, active goals, work queue, commitments, and persistent plans.</p>
+        </article>
+      </section>
+
+      <section class="grid cols-3">
+        <article class="content-card">
+          <h3>Creative ladder</h3>
+          <p>Promotion from spark to note, artifact, micro-task, project seed, project, and durable work.</p>
+        </article>
+        <article class="content-card">
+          <h3>Daydreaming</h3>
+          <p>Idle-time reflection, keeper selection, conflict tracking, and promotion of daydream-origin work.</p>
+        </article>
+        <article class="content-card">
+          <h3>Self-approval</h3>
+          <p>Risk-tiered approval, evidence-sensitive escalation, and durable approval history.</p>
+        </article>
+      </section>
+
+      <section class="grid cols-3">
+        <article class="content-card">
+          <h3>Execution and salvage</h3>
+          <p>Lane-limited BAA work, receipts, retry governance, and salvage-aware recovery that preserves blocked-vs-resumable state.</p>
+        </article>
+        <article class="content-card">
+          <h3>Scheduling</h3>
+          <p>Durable task and reminder schedules, calendar views, and run history without pretending every event is a chat turn.</p>
+        </article>
+        <article class="content-card">
+          <h3>Platform and trust</h3>
+          <p>Capability inventory, extension install/update flows, bundle inspection, and plugin trust policy control.</p>
+        </article>
+      </section>
+
+      <section class="grid cols-3">
+        <article class="content-card">
+          <h3>Tool-use memory</h3>
+          <p>Compact records of which tools worked for similar tasks, paired with semantic tool routing so the agent can consult a relevant toolbox on demand.</p>
+        </article>
+        <article class="content-card">
+          <h3>Project return</h3>
+          <p>Unfinished work can preserve its artifact, blocked state, attempt history, and next intended step so it can be resumed deliberately later.</p>
+        </article>
+        <article class="content-card">
+          <h3>Desktop context</h3>
+          <p>An opt-in plugin packages explicit desktop context for grounded assistance without making hidden observation a default behavior.</p>
+        </article>
+      </section>
+
+      <section class="grid cols-3">
+        <article class="content-card">
+          <h3>Chat and voice</h3>
+          <p>Session history, lane metadata, microphone transcription, and spoken reply synthesis in the dashboard chat surface.</p>
+        </article>
+        <article class="content-card">
+          <h3>Phone bridge</h3>
+          <p>Twilio-backed owner and caller handling with workspace separation, screening, and recent-call inspection.</p>
+        </article>
+        <article class="content-card">
+          <h3>Telegram</h3>
+          <p>Persisted Telegram configuration, pairing and DM policy control, typing indicators, edited replies, and media attachment context.</p>
+        </article>
+      </section>
+
+      <section class="page-card">
+        <h3>Operator surfaces</h3>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Surface</th>
+                <th>Current capability</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr><td>Chat</td><td>Session history, active lane, somatic context, per-message lane metadata, voice controls, and message send.</td></tr>
+              <tr><td>Operations</td><td>Receipts, tasks, work, commitments, plans, qualification, and live process control.</td></tr>
+              <tr><td>Schedule</td><td>Durable schedule items, calendar view, triggering, and run history.</td></tr>
+              <tr><td>Usage</td><td>Token telemetry, dominant sources/models, provider notes, and process hygiene context.</td></tr>
+              <tr><td>Platform</td><td>Capabilities, extensions, trust policies, and bundle inspection.</td></tr>
+              <tr><td>Logs</td><td>Runtime telemetry event browsing and filtering.</td></tr>
+              <tr><td>Memory</td><td>Atlas, projections, neighborhood detail, search, and retrieval inspection.</td></tr>
+              <tr><td>System</td><td>Effective config, Telegram setup/status, and phone configuration.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>Release reel</h3>
+        <p>
+          The embedded media still walks through the whole OpenCAS surface — from cold boot to the durable work stream finale. Use the floating button in the lower corner to watch it while you browse the docs.
+        </p>
+        <div class="media-grid">
+          <figure class="media-thumb">
+            <img src="images/hero_banner.png" alt="OpenCAS Hero Banner" loading="lazy">
+            <figcaption>OpenCAS Hero Banner</figcaption>
+          </figure>
+          <figure class="media-thumb">
+            <img src="images/video_thumbnail.png" alt="Durable Work Stream Video Thumbnail" loading="lazy">
+            <figcaption>Durable Work Stream Video</figcaption>
+          </figure>
+          <figure class="media-thumb">
+            <img src="images/01_cold_boot_overture.png" alt="Cold Boot Overture" loading="lazy">
+            <figcaption>Cold Boot Overture</figcaption>
+          </figure>
+          <figure class="media-thumb">
+            <img src="images/05_memory_fabric_feat_the_archivist.png" alt="Memory Fabric" loading="lazy">
+            <figcaption>Memory Fabric</figcaption>
+          </figure>
+          <figure class="media-thumb">
+            <img src="images/09_baa_heartbeat_feat_repairman_baa.png" alt="BAA Heartbeat" loading="lazy">
+            <figcaption>BAA Heartbeat</figcaption>
+          </figure>
+          <figure class="media-thumb">
+            <img src="images/15_durable_work_stream_finale.png" alt="Durable Work Stream Finale" loading="lazy">
+            <figcaption>Durable Work Stream (Finale)</figcaption>
+          </figure>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer class="footer">
+    <div class="site-shell">
+      <div><a href="../features.md">Markdown source</a></div>
+      <div><a href="index.html">Back to release index</a></div>
+    </div>
+  </footer>
+  <script src="media-player.js"></script>
+</body>
+</html>

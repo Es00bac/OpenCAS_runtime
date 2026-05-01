@@ -7,6 +7,7 @@ from .models import ExecutionPhase, ExecutionStage, PhaseRecord, RepairResult, R
 from .process_supervisor import ProcessSupervisor
 from .pty_supervisor import PtySupervisor
 from .reliability import ReliabilityCoordinator
+from .retry_governor import RetryGovernor
 from .store import TaskStore
 
 __all__ = [
@@ -21,5 +22,6 @@ __all__ = [
     "RepairExecutor",
     "RepairResult",
     "RepairTask",
+    "RetryGovernor",
     "TaskStore",
 ]

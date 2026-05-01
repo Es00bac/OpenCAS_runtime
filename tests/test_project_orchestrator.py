@@ -216,3 +216,66 @@ async def test_on_baa_completed_only_submits_newly_ready_dependents(stores):
     assert submitted == [str(rt3.task_id)]
     refreshed_wo3 = await work_store.get(str(wo3.work_id))
     assert refreshed_wo3.meta["repair_task_submitted"] is True
+
+
+@pytest.mark.asyncio
+async def test_project_orchestrator_injects_shadow_registry_guidance_into_plan_prompt(stores):
+    work_store, _ = stores
+    llm_calls = []
+    shadow_calls = []
+
+    class FakeLLM:
+        async def chat_completion(self, messages, **kwargs):
+            llm_calls.append({"messages": messages, "kwargs": kwargs})
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"tasks": [{"name": "revise chapter", "description": "make one narrow edit", "dependencies": []}], "summary": "narrow revision"}'
+                        }
+                    }
+                ]
+            }
+
+    class FakeShadowRegistry:
+        def build_planning_context(self, **kwargs):
+            shadow_calls.append(kwargs)
+            return {
+                "available": True,
+                "prompt_block": (
+                    "Related blocked-intention clusters:\n"
+                    "- 2x retry_blocked around retry:workspace/Chronicles/4246/chronicle_4246.md\n"
+                    "Safer alternatives:\n"
+                    "- Prefer one narrow edit tied to the canonical artifact, then rerun verification."
+                ),
+            }
+
+    orchestrator = ProjectOrchestrator(
+        llm=FakeLLM(),
+        baa=None,
+        work_store=work_store,
+        event_bus=None,
+        shadow_registry=FakeShadowRegistry(),
+    )
+    work = WorkObject(
+        content="Continue Chronicle 4246 from the existing manuscript.",
+        stage=WorkStage.PROJECT,
+        meta={
+            "resume_project": {
+                "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+            }
+        },
+    )
+
+    plan = await orchestrator._generate_plan(work)
+
+    assert plan.summary == "narrow revision"
+    assert shadow_calls == [
+        {
+            "objective": "Continue Chronicle 4246 from the existing manuscript.",
+            "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+        }
+    ]
+    prompt = llm_calls[0]["messages"][1]["content"]
+    assert "Related blocked-intention clusters:" in prompt
+    assert "Prefer one narrow edit tied to the canonical artifact" in prompt

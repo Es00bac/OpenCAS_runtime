@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -14,6 +15,12 @@ from opencas.api.chat_service import (
     perform_chat_turn,
     store_uploaded_file,
 )
+from opencas.bootstrap.task_beacon import (
+    build_task_beacon,
+    public_task_beacon_payload,
+    runtime_task_beacon_fragments,
+)
+from opencas.bootstrap.live_objective import read_tasklist_live_objective
 from opencas.api.voice_service import (
     VoiceSynthesisResult,
     VoiceTranscriptionResult,
@@ -76,7 +83,7 @@ class ChatVoiceInput(BaseModel):
 
 class ChatVoiceSynthesisRequest(BaseModel):
     text: str
-    prefer_local: bool = False
+    prefer_local: bool = True
     expressive: bool = False
 
 
@@ -116,7 +123,7 @@ class ChatSendRequest(BaseModel):
     attachments: List[ChatAttachmentInput] = Field(default_factory=list)
     voice_input: Optional[ChatVoiceInput] = None
     speak_response: bool = False
-    voice_prefer_local: bool = False
+    voice_prefer_local: bool = True
     voice_expressive: bool = False
 
 
@@ -139,10 +146,23 @@ class ChatContextSummaryResponse(BaseModel):
     session_id: str
     somatic: Optional[Dict[str, Any]] = None
     lane: Dict[str, Any] = Field(default_factory=dict)
+    last_lane: Dict[str, Any] = Field(default_factory=dict)
     executive: Dict[str, Any] = Field(default_factory=dict)
     current_work: Optional[Dict[str, Any]] = None
     tasks: Dict[str, Any] = Field(default_factory=dict)
+    task_beacon: Dict[str, Any] = Field(default_factory=dict)
     consolidation: Dict[str, Any] = Field(default_factory=dict)
+
+
+_CURRENT_WORK_STAGES = {"micro_task", "project_seed", "project"}
+_TASKLIST_ENTRY_RE = re.compile(r"^- `(?:PR|TASK)-[A-Z0-9-]+` (?P<title>.+)$")
+_TASKLIST_STALE_SECTIONS = {
+    "Recently Completed",
+    "Completed 2026-04-15 Continuation Slices",
+    "Additional Completed Readiness Slices",
+    "Earlier Completed Readiness And Capability Slices",
+    "Archived Completions",
+}
 
 
 def _human_title(text: Optional[str], fallback: str = "Untitled") -> str:
@@ -167,6 +187,77 @@ def _task_ui_status(stage: str, status: str) -> str:
     if stage_key:
         return stage_key.replace("_", " ")
     return status_key.replace("_", " ") if status_key else "unknown"
+
+
+def _is_current_work_candidate(item: Dict[str, Any]) -> bool:
+    stage = str(item.get("stage") or "").strip().lower()
+    return stage in _CURRENT_WORK_STAGES
+
+
+def _current_work_from_items(work_items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for item in work_items:
+        if not _is_current_work_candidate(item):
+            continue
+        return {
+            "work_id": item.get("work_id"),
+            "title": _human_title(item.get("meta", {}).get("title") or item.get("content"), "Current work"),
+            "stage": item.get("stage"),
+            "project_id": item.get("project_id"),
+            "blocked_by": item.get("blocked_by") or [],
+        }
+    return None
+
+
+def _current_work_from_queue_items(queue_items: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    for item in queue_items:
+        state = str(item.get("state") or "").strip().lower()
+        bearing = str(item.get("bearing") or "").strip().lower()
+        is_active = bool(item.get("is_active"))
+        if not is_active and state != "active":
+            continue
+        title = item.get("title") or item.get("content") or item.get("objective")
+        return {
+            "work_id": item.get("work_id"),
+            "title": _human_title(title, "Current work"),
+            "stage": item.get("stage"),
+            "project_id": item.get("project_id"),
+            "blocked_by": item.get("blocked_by") or [],
+            "bearing": bearing or None,
+            "source": "executive_queue",
+        }
+    return None
+
+
+def _runtime_intention_source(runtime: Any) -> Optional[str]:
+    executive = getattr(runtime, "executive", None) or getattr(getattr(runtime, "ctx", None), "executive", None)
+    return getattr(executive, "intention_source", None)
+
+
+def _normalize_tasklist_title(value: Any) -> str:
+    return " ".join(str(value or "").strip().lower().split())
+
+
+def _tasklist_section_for_title(workspace_root: Any, title: Any) -> Optional[str]:
+    normalized_title = _normalize_tasklist_title(title)
+    if not normalized_title or workspace_root is None:
+        return None
+    tasklist_path = Path(workspace_root) / "TaskList.md"
+    if not tasklist_path.exists():
+        return None
+    section = ""
+    try:
+        lines = tasklist_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    for raw_line in lines:
+        line = raw_line.rstrip()
+        if line.startswith("## "):
+            section = line.strip().lstrip("#").strip()
+            continue
+        match = _TASKLIST_ENTRY_RE.match(line.strip())
+        if match and _normalize_tasklist_title(match.group("title")) == normalized_title:
+            return section or None
+    return None
 
 
 def _normalize_session_status(status: str) -> str:
@@ -302,20 +393,41 @@ def build_chat_router(runtime: Any) -> APIRouter:
             except Exception:
                 somatic = None
 
-        lane: Dict[str, Any] = build_runtime_lane_meta(runtime)
+        lane: Dict[str, Any] = build_runtime_lane_meta(runtime, prefer_current=False)
+        last_lane: Dict[str, Any] = build_runtime_lane_meta(runtime, prefer_current=True)
+        if last_lane == lane:
+            last_lane = {}
 
         workflow = await runtime.workflow_status(limit=task_limit)
+        workspace_root = getattr(getattr(runtime.ctx, "config", None), "workspace_root", None)
+        task_beacon = public_task_beacon_payload(
+            build_task_beacon(
+                workspace_root,
+                limit_per_state=1,
+                live_fragments=runtime_task_beacon_fragments(runtime),
+            ),
+            include_details=True,
+            include_items=True,
+        )
         work_items = workflow.get("work", {}).get("items", []) or []
-        current_work = None
-        if work_items:
-            item = work_items[0]
-            current_work = {
-                "work_id": item.get("work_id"),
-                "title": _human_title(item.get("meta", {}).get("title") or item.get("content"), "Current work"),
-                "stage": item.get("stage"),
-                "project_id": item.get("project_id"),
-                "blocked_by": item.get("blocked_by") or [],
-            }
+        current_work = _current_work_from_items(work_items)
+        executive_payload = workflow.get("executive", {}) or {}
+        effective_intention = executive_payload.get("intention")
+        intention_source = _runtime_intention_source(runtime) or "workflow"
+        tasklist_live_objective = read_tasklist_live_objective(workspace_root)
+        if current_work is None:
+            current_work = _current_work_from_queue_items(
+                ((executive_payload.get("queue") or {}).get("items") or [])
+            )
+            if current_work is not None:
+                effective_intention = current_work["title"]
+                intention_source = "active_queue"
+            elif tasklist_live_objective:
+                effective_intention = tasklist_live_objective
+                intention_source = "tasklist_live_objective"
+            elif _tasklist_section_for_title(workspace_root, effective_intention) in _TASKLIST_STALE_SECTIONS:
+                effective_intention = None
+                intention_source = "stale_tasklist_completed"
 
         task_entries = []
         task_counts = {"active": 0, "waiting": 0, "completed": 0, "failed": 0, "total": 0}
@@ -359,18 +471,21 @@ def build_chat_router(runtime: Any) -> APIRouter:
             session_id=sid,
             somatic=somatic,
             lane=lane,
+            last_lane=last_lane,
             executive={
-                "intention": workflow.get("executive", {}).get("intention"),
-                "active_goals": workflow.get("executive", {}).get("active_goals", []),
-                "recommend_pause": workflow.get("executive", {}).get("recommend_pause", False),
-                "queued_work_count": workflow.get("executive", {}).get("queued_work_count", 0),
-                "capacity_remaining": workflow.get("executive", {}).get("capacity_remaining", 0),
+                "intention": effective_intention,
+                "intention_source": intention_source,
+                "active_goals": executive_payload.get("active_goals", []),
+                "recommend_pause": executive_payload.get("recommend_pause", False),
+                "queued_work_count": executive_payload.get("queued_work_count", 0),
+                "capacity_remaining": executive_payload.get("capacity_remaining", 0),
             },
             current_work=current_work,
             tasks={
                 "counts": task_counts,
                 "items": task_entries,
             },
+            task_beacon=task_beacon,
             consolidation=workflow.get("consolidation", {}),
         )
 
@@ -400,10 +515,10 @@ def build_chat_router(runtime: Any) -> APIRouter:
     @r.post("/voice/transcribe", response_model=ChatVoiceTranscriptionResponse)
     async def transcribe_voice(
         file: UploadFile = File(...),
-        prefer_local: bool = Form(False),
+        prefer_local: bool = Form(True),
         language_code: Optional[str] = Form(None),
     ) -> ChatVoiceTranscriptionResponse:
-        audio_bytes = await file.read()
+        audio_bytes = file.file.read()
         result = await transcribe_audio(
             upload_dir,
             audio_bytes=audio_bytes,

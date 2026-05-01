@@ -57,6 +57,9 @@ def build_candidate_map(
                     "temporal_echo": 0.0,
                     "reliability": 0.8,
                     "relational_score": 0.0,
+                    "affective_pressure_score": 0.0,
+                    "affective_pressure_reason": "",
+                    "affective_action_pressure": "",
                 }
             candidate_map[key][score_key] = result.score
 
@@ -121,7 +124,13 @@ async def expand_candidate_graph(
         if candidate_map[key]["graph_score"] == 0.0
     ]
     graph_results = await retriever._expand_graph(seed_results, decay=0.8)
-    populate_graph_candidates(retriever, candidate_map, graph_results, now)
+    populate_graph_candidates(
+        retriever,
+        candidate_map,
+        graph_results,
+        now,
+        seed_keys={(result.source_type, result.source_id) for result in seed_results},
+    )
     return normalize_candidate_signals(candidate_map, include_graph=True)
 
 
@@ -158,7 +167,7 @@ def fuse_candidates(
 
     for key in keys:
         candidate = candidate_map[key]
-        base_score = sum(weights[name] * candidate[name] for name in weights)
+        base_score = sum(weights[name] * candidate.get(name, 0.0) for name in weights)
 
         somatic_bonus = 0.0
         if adjustment is not None:
@@ -224,6 +233,9 @@ def fuse_candidates(
                 "temporal_echo": round(float(candidate.get("temporal_echo", 0.0)), 6),
                 "reliability": round(float(candidate.get("reliability", 0.0)), 6),
                 "relational_score": round(float(candidate.get("relational_score", 0.0)), 6),
+                "affective_pressure_score": round(float(candidate.get("affective_pressure_score", 0.0)), 6),
+                "affective_action_pressure": candidate.get("affective_action_pressure", ""),
+                "affective_pressure_reason": candidate.get("affective_pressure_reason", ""),
                 "base_score": round(float(base_score), 6),
                 "somatic_bonus": round(float(somatic_bonus), 6),
                 "reliability_multiplier": round(float(reliability_multiplier), 6),
@@ -256,7 +268,9 @@ def fuse_candidates(
 def _normalize(values: List[float]) -> List[float]:
     if not values:
         return values
+    min_value = min(values)
     max_value = max(values)
-    if max_value <= 0.0:
-        return [0.0] * len(values)
-    return [value / max_value for value in values]
+    span = max_value - min_value
+    if span == 0.0:
+        return [0.5] * len(values)
+    return [(value - min_value) / span for value in values]

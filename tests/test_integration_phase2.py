@@ -51,6 +51,7 @@ async def test_executive_capacity_enforces_limit(runtime: AgentRuntime) -> None:
     for i in range(5):
         runtime.executive.enqueue(WorkObject(content=str(i), stage=WorkStage.SPARK))
     assert runtime.executive.is_overloaded is True
+    assert runtime.executive.capacity_remaining == 0
 
     overflow = WorkObject(content="overflow", stage=WorkStage.MICRO_TASK)
     assert runtime.executive.enqueue(overflow) is False

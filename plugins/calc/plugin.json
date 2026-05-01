@@ -1,0 +1,17 @@
+{
+  "manifest_version": 1,
+  "id": "calc",
+  "name": "Calculator",
+  "description": "Safe arithmetic expression evaluator and unit conversions.",
+  "version": "1.0.0",
+  "entrypoint": "main.py",
+  "capabilities": [
+    {
+      "capability_id": "plugin:calc.main",
+      "display_name": "Calculator",
+      "kind": "tool",
+      "description": "Math and unit conversion utilities.",
+      "tool_names": ["calculate", "unit_convert"]
+    }
+  ]
+}

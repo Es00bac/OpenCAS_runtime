@@ -70,6 +70,7 @@ class Memory(BaseModel):
     access_count: int = 0
     last_accessed: Optional[datetime] = None
     identity_mutagen: bool = False
+    confidence_score: float = Field(default=0.8, ge=0.0, le=1.0)
 
 
 class EpisodeEdge(BaseModel):

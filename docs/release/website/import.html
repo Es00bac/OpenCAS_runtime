@@ -1,0 +1,148 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>OpenCAS Release - Legacy Import Notes</title>
+    <meta
+      name="description"
+      content="Legacy OpenBulma v4 migration notes for OpenCAS. This page documents the historical transition and the current safety boundary around the disabled legacy importer."
+    />
+    <link rel="icon" href="favicon.svg" type="image/svg+xml" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="media-player.css" />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="site-shell">
+        <a class="brand" href="index.html">
+          <span class="brand-mark mono">O</span>
+          <span>OpenCAS Release</span>
+        </a>
+        <nav class="nav-links">
+          <a href="index.html">Home</a>
+          <a href="installation.html">Installation</a>
+          <a href="usage.html">Usage</a>
+          <a href="features.html">Features</a>
+          <a href="terminology.html">Terminology</a>
+          <a href="import.html" aria-current="page">Import</a>
+          <a href="api/">API</a>
+        </nav>
+      </div>
+    </header>
+
+    <main class="site-shell">
+      <section class="page-hero">
+        <span class="eyebrow">Legacy reference</span>
+        <h1>OpenBulma migration is historical context, not a live workflow.</h1>
+        <p class="lede">
+          OpenCAS is the current system. The old legacy importer remains forbidden until the project explicitly removes that restriction, so this page exists to explain the transition rather than to offer a button to run it.
+        </p>
+        <div class="hero-actions">
+          <a class="btn primary" href="features.html">Review features</a>
+          <a class="btn" href="usage.html">Read usage</a>
+          <a class="btn" href="installation.html">Install guide</a>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="eyebrow">What it means</span>
+          <h2>What the old migration path covered.</h2>
+          <p class="section-lead">The historical transition moved durable state into OpenCAS concepts, but the live site now treats those concepts as first-class features, not as a one-off import event.</p>
+        </div>
+
+        <div class="grid cols-2">
+          <article class="content-card">
+            <h3>Memory and identity</h3>
+            <p>Episodic memory, distilled recall, self-model state, user-model state, and relational trust history now live inside OpenCAS runtime stores.</p>
+          </article>
+          <article class="content-card">
+            <h3>Creative continuity</h3>
+            <p>Daydream sparks, keeper promotion, work objects, qualification receipts, and salvageable execution state are current system features, not migration leftovers.</p>
+          </article>
+          <article class="content-card">
+            <h3>Operational surfaces</h3>
+            <p>Dashboard tabs for chat, operations, schedule, platform, system, usage, memory, identity, executive, and logs are the current control plane.</p>
+          </article>
+          <article class="content-card">
+            <h3>Channels and routing</h3>
+            <p>Voice, phone, Telegram, and the `/ws` bridge are part of the present-day operator surface, with models routed through `open_llm_auth`.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="eyebrow">Safety boundary</span>
+          <h2>What not to do.</h2>
+        </div>
+        <div class="page-card">
+          <ul class="list">
+            <li>Do not run the legacy importer or any deprecated import entrypoint.</li>
+            <li>Do not treat the old legacy state directory as a live runtime dependency.</li>
+            <li>Do not expect this page to launch an automated migration from the website.</li>
+            <li>If legacy data must be mapped, do it manually into the current OpenCAS stores and verify the result with the dashboard.</li>
+          </ul>
+        </div>
+      </section>
+
+      <section class="section">
+        <div class="section-head">
+          <span class="eyebrow">Current truth</span>
+          <h2>OpenCAS replaced the old stack with a broader one.</h2>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>Then</th>
+                <th>Now</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Legacy importer flow</td>
+                <td>Disabled; retained only as historical reference</td>
+              </tr>
+              <tr>
+                <td>Local state migration as the main story</td>
+                <td>Persistent memory, scheduling, platform trust, and observability as ongoing features</td>
+              </tr>
+              <tr>
+                <td>Single-purpose agent shell</td>
+                <td>Operator dashboard with live tabs for chat, schedule, logs, platform, and system setup</td>
+              </tr>
+              <tr>
+                <td>Static guidance only</td>
+                <td>Living release docs that match the running code and the deployed site</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="page-card">
+        <h3>Useful links</h3>
+        <ul class="list">
+          <li><a href="features.html">Features</a> for the current system map.</li>
+          <li><a href="usage.html">Usage</a> for dashboard and runtime entry points.</li>
+          <li><a href="api/">API reference</a> for the live routes.</li>
+        </ul>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <div class="site-shell">
+        <div><a href="../README.md">Markdown source</a></div>
+        <div><a href="../features.md">Features source</a></div>
+      </div>
+    </footer>
+  </body>
+</html>

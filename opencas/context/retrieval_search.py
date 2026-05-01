@@ -107,21 +107,34 @@ async def keyword_search(retriever, query: str, limit: int) -> List[RetrievalRes
     """FTS keyword search over Episode records."""
     recall_intent = retriever.detect_personal_recall_intent(query)
     search_terms = retriever._keyword_queries_for(query, recall_intent=recall_intent)
-    merged: Dict[str, RetrievalResult] = {}
+    merged: Dict[Tuple[str, str], RetrievalResult] = {}
     for term_index, term in enumerate(search_terms):
         episodes = await retriever.memory.search_episodes_by_content(term, limit=limit)
+        memories = await retriever.memory.search_memories_by_content(term, limit=limit)
         base = 1.0 if term_index == 0 else 0.8
         for rank, ep in enumerate(episodes):
             score = max(0.2, base - (0.05 * rank))
-            key = str(ep.episode_id)
+            key = ("episode", str(ep.episode_id))
             existing = merged.get(key)
             if existing is None or score > existing.score:
                 merged[key] = RetrievalResult(
                     source_type="episode",
-                    source_id=key,
+                    source_id=key[1],
                     content=ep.content,
                     score=score,
                     episode=ep,
+                )
+        for rank, mem in enumerate(memories):
+            score = max(0.2, base - (0.05 * rank))
+            key = ("memory", str(mem.memory_id))
+            existing = merged.get(key)
+            if existing is None or score > existing.score:
+                merged[key] = RetrievalResult(
+                    source_type="memory",
+                    source_id=key[1],
+                    content=mem.content,
+                    score=score,
+                    memory=mem,
                 )
     results = sorted(merged.values(), key=lambda item: item.score, reverse=True)
     return results[:limit]
@@ -274,12 +287,22 @@ def populate_graph_candidates(
     candidate_map: Dict[Tuple[str, str], Dict[str, object]],
     graph_results: List[RetrievalResult],
     now: datetime,
+    *,
+    seed_keys: Optional[set[Tuple[str, str]]] = None,
 ) -> None:
     """Merge expanded graph results into an existing candidate map."""
+    seed_keys = seed_keys or set()
     for result in graph_results:
         key = (result.source_type, result.source_id)
         if key in candidate_map:
-            candidate_map[key]["graph_score"] = result.score
+            # Search-seeded items already earned their direct relevance score.
+            # Reserve graph_score for true neighbor expansion so the seed node
+            # does not crowd out its weakest connected neighbor after normalization.
+            if key not in seed_keys:
+                candidate_map[key]["graph_score"] = max(
+                    float(candidate_map[key].get("graph_score", 0.0)),
+                    float(result.score or 0.0),
+                )
             continue
         ep = getattr(result, "episode", None)
         mem = getattr(result, "memory", None)

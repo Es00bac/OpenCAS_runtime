@@ -69,6 +69,7 @@ class RelationalEngine:
         presence: float = 0.0,
         attunement: float = 0.0,
         note: Optional[str] = None,
+        continuity_breadcrumb: Optional[str] = None,
     ) -> MusubiState:
         """Set the baseline musubi state."""
         prev = self._derive_musubi_from_dimensions()
@@ -79,9 +80,17 @@ class RelationalEngine:
                 ResonanceDimension.PRESENCE.value: max(-1.0, min(1.0, presence)),
                 ResonanceDimension.ATTUNEMENT.value: max(-1.0, min(1.0, attunement)),
             },
+            continuity_breadcrumb=continuity_breadcrumb,
             source_tag="initialize",
         )
         self._state.musubi = self._derive_musubi_from_dimensions(self._state.dimensions)
+        await self.store.save_state(self._state)
+        breadcrumb = self._ensure_continuity_breadcrumb(
+            "initialize",
+            note=note,
+            continuity_breadcrumb=continuity_breadcrumb,
+        )
+        self._state.continuity_breadcrumb = breadcrumb
         await self.store.save_state(self._state)
         record = MusubiRecord(
             musubi_before=prev,
@@ -90,6 +99,7 @@ class RelationalEngine:
             dimension_deltas=dict(self._state.dimensions),
             trigger_event="initialize",
             note=note,
+            continuity_breadcrumb=breadcrumb,
         )
         await self.store.append_record(record)
         self._trace("relational_initialized", {
@@ -107,7 +117,16 @@ class RelationalEngine:
             delta[ResonanceDimension.PRESENCE.value] = 0.05
         else:
             delta[ResonanceDimension.PRESENCE.value] = -0.03
-        await self._apply_deltas(delta, "heartbeat", f"session_active={session_active}")
+        breadcrumb = self._ensure_continuity_breadcrumb(
+            "heartbeat",
+            note=f"session_active={session_active}",
+        )
+        await self._apply_deltas(
+            delta,
+            "heartbeat",
+            note=f"session_active={session_active}",
+            continuity_breadcrumb=breadcrumb,
+        )
         self._trace("heartbeat", {"session_active": session_active, "musubi": self._state.musubi})
         return self._state
 
@@ -156,11 +175,17 @@ class RelationalEngine:
         delta[ResonanceDimension.TRUST.value] = trust_shift
 
         note = f"episode_kind={episode.kind.value}, outcome={outcome}"
+        breadcrumb = self._ensure_continuity_breadcrumb(
+            "interaction",
+            note=note,
+            episode_id=str(episode.episode_id),
+        )
         await self._apply_deltas(
             delta,
             "interaction",
             note=note,
             episode_id=str(episode.episode_id),
+            continuity_breadcrumb=breadcrumb,
         )
         self._trace("record_interaction", {
             "episode_id": str(episode.episode_id),
@@ -176,10 +201,15 @@ class RelationalEngine:
             ResonanceDimension.RESONANCE.value: 0.10 if success else -0.05,
             ResonanceDimension.ATTUNEMENT.value: 0.05 if success else -0.02,
         }
+        breadcrumb = self._ensure_continuity_breadcrumb(
+            "creative_collab",
+            note=f"success={success}",
+        )
         await self._apply_deltas(
             delta,
             "creative_collab",
             note=f"success={success}",
+            continuity_breadcrumb=breadcrumb,
         )
         self._trace("creative_collab", {"success": success, "musubi": self._state.musubi})
         return self._state
@@ -190,12 +220,48 @@ class RelationalEngine:
         delta = {
             ResonanceDimension.TRUST.value: 0.08 if respected else -0.12,
         }
+        trigger = "boundary_respected" if respected else "boundary_violated"
+        breadcrumb = self._ensure_continuity_breadcrumb(
+            trigger,
+            note="trust adjusted based on boundary handling",
+        )
         await self._apply_deltas(
             delta,
-            "boundary_respected" if respected else "boundary_violated",
+            trigger,
+            continuity_breadcrumb=breadcrumb,
         )
         self._trace("boundary_respected", {"respected": respected, "musubi": self._state.musubi})
         return self._state
+
+    async def record_burst_event(
+        self,
+        trigger: str,
+        continuity_breadcrumb: str,
+        *,
+        state_continuity_breadcrumb: Optional[str] = None,
+        note: Optional[str] = None,
+        episode_id: Optional[str] = None,
+    ) -> None:
+        """Record an explicit burst lifecycle marker in musubi history."""
+        await self._apply_deltas(
+            {},
+            trigger,
+            note=note,
+            episode_id=episode_id,
+            continuity_breadcrumb=continuity_breadcrumb,
+            state_continuity_breadcrumb=state_continuity_breadcrumb,
+        )
+
+    async def list_recent_continuity_breadcrumbs(self, limit: int = 5) -> List[str]:
+        """Return the most recent non-empty musubi continuity breadcrumbs."""
+        limit = max(1, min(limit, 50))
+        records = await self.store.list_history(limit=limit)
+        return [record.continuity_breadcrumb for record in records if record.continuity_breadcrumb]
+
+    async def list_recent_burst_records(self, limit: int = 5) -> List[MusubiRecord]:
+        """Return the most recent musubi records, including their stored notes."""
+        limit = max(1, min(limit, 50))
+        return await self.store.list_history(limit=limit)
 
     def to_memory_salience_modifier(self, has_user_collab_tag: bool = False) -> float:
         """Return a modifier to apply to memory salience based on musubi.
@@ -257,6 +323,8 @@ class RelationalEngine:
         trigger: str,
         note: Optional[str] = None,
         episode_id: Optional[str] = None,
+        continuity_breadcrumb: Optional[str] = None,
+        state_continuity_breadcrumb: Optional[str] = None,
     ) -> None:
         async with self._lock:
             assert self._state is not None
@@ -270,6 +338,18 @@ class RelationalEngine:
             self._state.musubi = self._derive_musubi_from_dimensions(self._state.dimensions)
             self._state.updated_at = datetime.now(timezone.utc)
             self._state.source_tag = trigger
+            resolved_breadcrumb = self._ensure_continuity_breadcrumb(
+                trigger,
+                note=note,
+                continuity_breadcrumb=continuity_breadcrumb,
+                episode_id=episode_id,
+                action="explicit musubi checkpoint",
+            )
+            self._state.continuity_breadcrumb = (
+                state_continuity_breadcrumb.strip()
+                if state_continuity_breadcrumb and state_continuity_breadcrumb.strip()
+                else resolved_breadcrumb
+            )
             await self.store.save_state(self._state)
             record = MusubiRecord(
                 musubi_before=prev_musubi,
@@ -279,8 +359,31 @@ class RelationalEngine:
                 trigger_event=trigger,
                 note=note,
                 episode_id=episode_id,
+                continuity_breadcrumb=resolved_breadcrumb,
             )
             await self.store.append_record(record)
+
+    def _ensure_continuity_breadcrumb(
+        self,
+        trigger: str,
+        *,
+        note: Optional[str] = None,
+        continuity_breadcrumb: Optional[str] = None,
+        episode_id: Optional[str] = None,
+        action: str = "relational update",
+    ) -> str:
+        if continuity_breadcrumb:
+            return continuity_breadcrumb.strip()
+        intent = note or trigger
+        if episode_id:
+            intent = f"{intent} (episode_id={episode_id})"
+        if not intent:
+            intent = trigger
+        decision = f"{action} for trigger={trigger}"
+        return (
+            f"{datetime.now(timezone.utc).isoformat()} | intent: {intent} | decision: {decision} "
+            f"| next_step: monitor relationship signal and continue"
+        )
 
     @staticmethod
     def _derive_musubi_from_dimensions(dimensions: Optional[Dict[str, float]] = None) -> float:

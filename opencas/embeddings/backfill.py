@@ -35,7 +35,7 @@ class EmbeddingBackfill:
             records = await self._embed_batch(batch)
             for ep, record in zip(batch, records):
                 ep.embedding_id = record.source_hash
-            await self.store.save_episodes_batch(batch)
+                await self.store.update_episode_embedding(str(ep.episode_id), record.source_hash)
             updated += len(batch)
         return updated
 
@@ -52,32 +52,23 @@ class EmbeddingBackfill:
             records = await self._embed_memories_batch(batch)
             for memory, record in zip(batch, records):
                 memory.embedding_id = record.source_hash
-            for memory in batch:
-                await self.store.save_memory(memory)
+                await self.store.update_memory_embedding(str(memory.memory_id), record.source_hash)
             updated += len(batch)
         return updated
 
     async def _embed_batch(self, episodes: List[Episode]) -> List:
         """Compute EmbeddingRecords for a list of episodes."""
-        results = []
-        for ep in episodes:
-            record = await self.embeddings.embed(
-                ep.content,
-                task_type="memory_episode",
-            )
-            results.append(record)
-        return results
+        return await self.embeddings.embed_batch(
+            [ep.content for ep in episodes],
+            task_type="memory_episode",
+        )
 
     async def _embed_memories_batch(self, memories: List["Memory"]) -> List:
         """Compute EmbeddingRecords for a list of distilled memories."""
-        results = []
-        for memory in memories:
-            record = await self.embeddings.embed(
-                memory.content,
-                task_type="memory_distilled",
-            )
-            results.append(record)
-        return results
+        return await self.embeddings.embed_batch(
+            [memory.content for memory in memories],
+            task_type="memory_distilled",
+        )
 
     async def _stale_episodes(self, episodes: List["Episode"]) -> List["Episode"]:
         return [
@@ -97,4 +88,7 @@ class EmbeddingBackfill:
         record = await self.embeddings.cache.get(embedding_id)
         if record is None:
             return True
-        return record.model_id != self.embeddings.model_id
+        if record.model_id != self.embeddings.model_id:
+            return True
+        expected_dimension = self.embeddings.expected_dimension
+        return expected_dimension is not None and record.dimension != expected_dimension

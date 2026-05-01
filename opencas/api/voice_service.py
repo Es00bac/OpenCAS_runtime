@@ -18,11 +18,8 @@ from typing import Any, Dict, Optional
 import httpx
 from fastapi import HTTPException
 
-_ELEVENLABS_ENV_PATH = Path(
-    os.environ.get("OPENCAS_ELEVENLABS_ENV_FILE")
-    or os.environ.get("ELEVENLABS_ENV_FILE")
-    or (Path.home() / ".opencasenv" / ".env")
-).expanduser()
+_ELEVENLABS_ENV_PATH = Path(os.getenv("OPENCAS_ELEVENLABS_ENV_PATH", ".opencas/provider_material/.env")).expanduser()
+_ELEVENLABS_VOICE_ID = "gJx1vCzNCD1EQHT212Ls"
 _ELEVENLABS_STT_MODEL = "scribe_v2"
 _ELEVENLABS_FAST_MODEL = "eleven_flash_v2_5"
 _ELEVENLABS_EXPRESSIVE_MODEL = "eleven_v3"
@@ -31,6 +28,15 @@ _EDGE_TTS_VOICE_ALIASES = {
     "aira": "en-US-AriaNeural",
     "aria": "en-US-AriaNeural",
 }
+
+
+def _is_no_transcript_error(error: Exception) -> bool:
+    message = str(error).strip().lower()
+    return (
+        "did not return transcript text" in message
+        or "did not emit a transcript file" in message
+        or "no speech detected" in message
+    )
 
 
 @dataclass
@@ -120,20 +126,12 @@ def _resolve_edge_voice(name: str = _EDGE_TTS_PREFERRED_VOICE) -> str:
     return _EDGE_TTS_VOICE_ALIASES.get(cleaned.lower(), cleaned)
 
 
-def _configured_elevenlabs_voice_id() -> str:
-    return (
-        _extract_env_value("OPENCAS_ELEVENLABS_VOICE_ID")
-        or _extract_env_value("ELEVENLABS_VOICE_ID")
-        or ""
-    )
-
-
 def voice_status() -> VoiceStatus:
     return VoiceStatus(
         elevenlabs_available=bool(_extract_env_value("ELEVENLABS_API_KEY")),
         local_stt_available=shutil.which("whisper") is not None and shutil.which("ffmpeg") is not None,
         local_tts_available=shutil.which("edge-tts") is not None,
-        elevenlabs_voice_id=_configured_elevenlabs_voice_id(),
+        elevenlabs_voice_id=_ELEVENLABS_VOICE_ID,
         local_voice_name=_EDGE_TTS_PREFERRED_VOICE,
         local_voice_resolved=_resolve_edge_voice(),
         expressive_supported=True,
@@ -172,7 +170,7 @@ async def transcribe_audio(
     audio_bytes: bytes,
     filename: str,
     media_type: Optional[str] = None,
-    prefer_local: bool = False,
+    prefer_local: bool = True,
     language_code: Optional[str] = None,
 ) -> VoiceTranscriptionResult:
     stored_audio = _store_generated_bytes(
@@ -189,7 +187,15 @@ async def transcribe_audio(
         except Exception as exc:  # pragma: no cover - exercised with mocks/live env
             remote_error = str(exc)
     if status.local_stt_available:
-        result = await _transcribe_with_whisper(Path(stored_audio["path"]), stored_audio, language_code=language_code)
+        try:
+            result = await _transcribe_with_whisper(Path(stored_audio["path"]), stored_audio, language_code=language_code)
+        except RuntimeError as exc:
+            if _is_no_transcript_error(exc):
+                raise HTTPException(
+                    status_code=422,
+                    detail="No speech was detected in the recording. Try again with a clearer utterance or higher microphone volume.",
+                ) from exc
+            raise
         if remote_error:
             result.warning = f"ElevenLabs fallback triggered: {remote_error}"
         return result
@@ -203,7 +209,7 @@ async def synthesize_speech(
     upload_dir: Path,
     *,
     text: str,
-    prefer_local: bool = False,
+    prefer_local: bool = True,
     expressive: bool = False,
 ) -> VoiceSynthesisResult:
     status = voice_status()
@@ -325,14 +331,11 @@ async def _synthesize_with_elevenlabs(upload_dir: Path, text: str, *, expressive
     api_key = _extract_env_value("ELEVENLABS_API_KEY")
     if not api_key:
         raise RuntimeError("ELEVENLABS_API_KEY is not configured")
-    voice_id = _configured_elevenlabs_voice_id()
-    if not voice_id:
-        raise RuntimeError("ELEVENLABS_VOICE_ID is not configured")
     model_id = _ELEVENLABS_EXPRESSIVE_MODEL if expressive and len(text) <= 5000 else _ELEVENLABS_FAST_MODEL
     timeout = httpx.Timeout(120.0, connect=15.0)
     async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
-            f"https://api.elevenlabs.io/v1/text-to-speech/{voice_id}",
+            f"https://api.elevenlabs.io/v1/text-to-speech/{_ELEVENLABS_VOICE_ID}",
             headers={"xi-api-key": api_key, "Content-Type": "application/json"},
             params={"output_format": "mp3_44100_128"},
             json={"text": text, "model_id": model_id},
@@ -350,8 +353,8 @@ async def _synthesize_with_elevenlabs(upload_dir: Path, text: str, *, expressive
         model=model_id,
         expressive=bool(expressive and model_id == _ELEVENLABS_EXPRESSIVE_MODEL),
         audio_attachment=attachment,
-        voice_id=voice_id,
-        voice_name="Configured ElevenLabs voice",
+        voice_id=_ELEVENLABS_VOICE_ID,
+        voice_name="ElevenLabs gJx1vCzNCD1EQHT212Ls",
     )
 
 

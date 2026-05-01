@@ -27,6 +27,18 @@ def _make_mock_runtime():
     runtime.ctx = MagicMock()
     runtime.ctx.config = MagicMock()
     runtime.ctx.config.state_dir = "/tmp/opencas-test-state"
+    # Null out all operator-action sink/store/read candidates so that both
+    # select_registry_sink and _load_recent_from_registry_store fall through to
+    # the JSONL file path instead of capturing a phantom MagicMock attribute.
+    _action_sink_names = (
+        "operator_action_sink", "operator_action_store",
+        "registry_sink", "registry_store",
+        "operator_action_log_sink", "registry_log_sink",
+        "log_sink", "sink",
+    )
+    for _name in _action_sink_names:
+        setattr(runtime.ctx, _name, None)
+        setattr(runtime.ctx.config, _name, None)
 
     # Process supervisor
     runtime.process_supervisor = MagicMock()
@@ -41,7 +53,7 @@ def _make_mock_runtime():
                 "pid": 4242,
                 "scope_key": "qualification",
                 "command": "python scripts/run_qualification_cycle.py --agent-check-label integrated_operator_workflow",
-                "cwd": "/tmp/opencas-repo",
+                "cwd": "/tmp/opencas-public-fixture",
                 "metadata": {
                     "kind": "qualification_rerun",
                     "source_label": "integrated_operator_workflow",
@@ -410,6 +422,19 @@ def test_get_qualification_summary() -> None:
     assert data["recent_rerun_history"][1]["process_id"] == "proc-000"
     assert data["remediation_rollup"]["found"] is True
     assert data["remediation_rollup"]["items"][0]["recommended_action"] == "continue_testing"
+
+
+def test_default_qualification_artifact_paths_follow_dev_notes_layout() -> None:
+    from opencas.api.routes import operations
+
+    assert (
+        operations.QUALIFICATION_SUMMARY_PATH
+        == operations.REPO_ROOT / "dev-notes" / "qualification" / "live_validation_summary.json"
+    )
+    assert (
+        operations.QUALIFICATION_REMEDIATION_PATH
+        == operations.REPO_ROOT / "dev-notes" / "qualification" / "qualification_remediation_rollup.json"
+    )
 
 
 def test_get_qualification_label_detail() -> None:
@@ -1741,6 +1766,7 @@ def test_get_task_detail() -> None:
         "context": {"note": "promoted"},
     }])
     runtime.ctx.tasks.list_all = AsyncMock(return_value=[task])
+    runtime.ctx.tasks.list_provenance_events = AsyncMock(return_value=[])
     app = _make_test_app(runtime)
     client = TestClient(app)
 
@@ -1753,6 +1779,7 @@ def test_get_task_detail() -> None:
     assert data["task"]["status"] == "executing"
     assert data["task"]["duplicate_objective_count"] == 1
     assert data["task"]["result"]["ok"] is True
+    assert data["task"]["retry_governor"] == {"active": False}
     assert data["transitions"][0]["to_stage"] == "executing"
 
 

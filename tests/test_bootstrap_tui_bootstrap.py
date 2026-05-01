@@ -105,6 +105,9 @@ def test_build_bootstrap_config_covers_current_bootstrap_surface():
     state.telegram_poll_interval_seconds = "2.5"
     state.telegram_pairing_ttl_seconds = "7200"
     state.telegram_api_base_url = "https://telegram.example.com"
+    state.cycle_interval = "600"
+    state.daydream_interval = "720"
+    state.baa_heartbeat_interval = "120"
     state.sandbox_mode = "allow-list"
     state.sandbox_allowed_roots = "/tmp/workspace, /tmp/shared"
     state.user_name = "Casey"
@@ -141,6 +144,9 @@ def test_build_bootstrap_config_covers_current_bootstrap_surface():
     assert config.telegram_poll_interval_seconds == 2.5
     assert config.telegram_pairing_ttl_seconds == 7200
     assert config.telegram_api_base_url == "https://telegram.example.com"
+    assert config.cycle_interval == 600
+    assert config.daydream_interval == 720
+    assert config.baa_heartbeat_interval == 120
     assert config.sandbox is not None
     assert config.sandbox.mode == SandboxMode.ALLOW_LIST
     assert config.sandbox.allowed_roots == [Path("/tmp/workspace"), Path("/tmp/shared")]

@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>OpenCAS Dashboard</title>
+  <link rel="icon" href="dashboard/static/favicon.svg" type="image/svg+xml" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
@@ -11,9 +12,10 @@
   <script defer src="https://unpkg.com/alpinejs@3.14.3/dist/cdn.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
-  <link rel="stylesheet" href="/dashboard/static/css/app.css" />
-  <script src="/dashboard/static/js/http_helpers.js"></script>
-  <script src="/dashboard/static/js/operations_helpers.js"></script>
+  <link rel="stylesheet" href="dashboard/static/css/app.css?v=10" />
+  <script src="dashboard/static/js/http_helpers.js"></script>
+  <script src="dashboard/static/js/operations_helpers.js"></script>
+  <script src="dashboard/static/js/task_beacon.js"></script>
   <script>
     /* Global Chart.js cyberpunk theme */
     document.addEventListener('DOMContentLoaded', function() {
@@ -22,6 +24,9 @@
         Chart.defaults.borderColor = 'rgba(0, 229, 255, 0.06)';
         Chart.defaults.font.family = "'JetBrains Mono', 'IBM Plex Mono', monospace";
         Chart.defaults.font.size = 10;
+        Chart.defaults.animation = false;
+        Chart.defaults.transitions.active.animation.duration = 0;
+        Chart.defaults.transitions.resize.animation.duration = 0;
         Chart.defaults.plugins.legend.labels.boxWidth = 10;
         Chart.defaults.plugins.legend.labels.padding = 14;
         Chart.defaults.plugins.tooltip.backgroundColor = 'rgba(8, 12, 20, 0.95)';
@@ -39,6 +44,22 @@
         Chart.defaults.scale.grid = { color: 'rgba(0, 229, 255, 0.04)' };
       }
     });
+
+    window.initDynamicPanels = function(root) {
+      if (!root || typeof htmx === 'undefined') return;
+      window.requestAnimationFrame(() => {
+        try {
+          htmx.process(root);
+        } catch (error) {
+          console.debug('htmx.process failed for dynamic panel root', error);
+        }
+        root.querySelectorAll('[hx-get]').forEach((el) => {
+          if (el.dataset.dynamicLoadPrimed === 'true') return;
+          el.dataset.dynamicLoadPrimed = 'true';
+          htmx.trigger(el, 'load');
+        });
+      });
+    };
   </script>
 </head>
 <body
@@ -47,11 +68,11 @@
 
   <div class="app">
     <aside class="sidebar">
-      <div class="brand">OpenCAS</div>
+      <div class="brand" aria-label="OpenCAS">OpenCAS</div>
       <nav>
+        <button :class="tab==='chat' && 'active'" @click="tab='chat'">Chat</button>
         <button :class="tab==='overview' && 'active'" @click="tab='overview'">Overview</button>
         <button :class="tab==='health' && 'active'" @click="tab='health'">Health</button>
-        <button :class="tab==='chat' && 'active'" @click="tab='chat'">Chat</button>
         <button :class="tab==='operations' && 'active'" @click="tab='operations'">Operations</button>
         <button :class="tab==='schedule' && 'active'" @click="tab='schedule'">Schedule</button>
         <button :class="tab==='usage' && 'active'" @click="tab='usage'">Usage</button>
@@ -61,13 +82,16 @@
         <button :class="tab==='executive' && 'active'" @click="tab='executive'">Executive</button>
         <button :class="tab==='platform' && 'active'" @click="tab='platform'">Platform</button>
         <button :class="tab==='system' && 'active'" @click="tab='system'">System</button>
+        <button :class="tab==='shadow' && 'active'" @click="tab='shadow'">Shadow</button>
+        <button :class="tab==='logs' && 'active'" @click="tab='logs'">Logs</button>
       </nav>
       <div class="sidebar-footer">OpenCAS v0.6 // Phase 6</div>
     </aside>
 
     <main class="main">
       <!-- Overview -->
-      <section x-show="tab === 'overview'" x-cloak>
+      <template x-if="tab === 'overview'">
+      <section x-cloak x-init="$nextTick(() => window.initDynamicPanels && window.initDynamicPanels($el))">
         <h2>Overview</h2>
         <div class="overview-card-grid">
           <div class="card"
@@ -111,6 +135,30 @@
             <div class="card-body"><span class="muted">Loading…</span></div>
           </div>
           <div class="card"
+            hx-get="/api/monitor/meaningful-loop"
+            hx-trigger="load, every 20s"
+            hx-swap="innerHTML"
+            hx-target="find .card-body">
+            <div class="card-title">Meaningful Loop</div>
+            <div class="card-body"><span class="muted">Loading…</span></div>
+          </div>
+          <div class="card"
+            hx-get="/api/monitor/affective-examinations?limit=6&decay_state=active"
+            hx-trigger="load, every 30s"
+            hx-swap="innerHTML"
+            hx-target="find .card-body">
+            <div class="card-title">Affective Examinations</div>
+            <div class="card-body"><span class="muted">Loading…</span></div>
+          </div>
+          <div class="card"
+            hx-get="/api/monitor/shadow-registry"
+            hx-trigger="load, every 20s"
+            hx-swap="innerHTML"
+            hx-target="find .card-body">
+            <div class="card-title">Shadow Registry</div>
+            <div class="card-body"><span class="muted">Loading…</span></div>
+          </div>
+          <div class="card"
             data-panel="qualification-card"
             hx-get="/api/operations/qualification"
             hx-trigger="load, every 60s"
@@ -141,9 +189,11 @@
           </div>
         </div>
       </section>
+      </template>
 
       <!-- Health -->
-      <section x-show="tab === 'health'" x-cloak>
+      <template x-if="tab === 'health'">
+      <section x-cloak x-init="$nextTick(() => window.initDynamicPanels && window.initDynamicPanels($el))">
         <h2>Health Checks</h2>
         <div class="panel"
           hx-get="/api/monitor/health"
@@ -159,9 +209,11 @@
           <p class="muted">Loading history…</p>
         </div>
       </section>
+      </template>
 
       <!-- Chat -->
-      <section x-show="tab === 'chat'" x-cloak x-data="chatApp()" x-init="initChat()">
+      <template x-if="tab === 'chat'">
+      <section x-cloak x-data="chatApp()" x-init="initChat()">
         <h2>Chat</h2>
         <div class="panel mb-4">
           <div class="health-header">
@@ -379,9 +431,9 @@
                   <button type="button" class="btn" :class="voiceListening ? 'primary' : ''" :disabled="sending || !sessionId || !voiceCaptureSupported()" @click="toggleVoiceCapture()" x-text="voiceListening ? 'Stop Mic' : 'Mic'"></button>
                   <label class="field-label compact">Voice path
                     <select class="input" x-model="voiceMode">
-                      <option value="auto">Auto</option>
-                      <option value="elevenlabs">ElevenLabs first</option>
-                      <option value="local">Local fallback</option>
+                      <option value="local">Edge TTS / Whisper (Default)</option>
+                      <option value="elevenlabs">ElevenLabs</option>
+                      <option value="auto">Auto (Legacy)</option>
                     </select>
                   </label>
                   <label class="field-label compact inline-check">
@@ -415,12 +467,15 @@
               <button type="button" class="btn" :disabled="sending || !sessionId" @click="$refs.fileInput.click()" title="Attach file">+</button>
               <button type="submit" class="btn primary" :disabled="sending || !sessionId" x-text="sending ? 'Sending…' : 'Send'"></button>
             </form>
+
           </div>
         </div>
       </section>
+      </template>
 
       <!-- Operations -->
-      <section x-show="tab === 'operations'" x-cloak>
+      <template x-if="tab === 'operations'">
+      <section x-cloak x-init="$nextTick(() => window.initDynamicPanels && window.initDynamicPanels($el))">
         <h2>Operations</h2>
         <div class="grid-2">
           <div class="panel scroll"
@@ -503,9 +558,11 @@
           </div>
         </div>
       </section>
+      </template>
 
       <!-- Schedule -->
-      <section x-show="tab === 'schedule'" x-cloak x-data="scheduleApp()" x-init="initSchedule()">
+      <template x-if="tab === 'schedule'">
+      <section x-cloak x-data="scheduleApp()" x-init="initSchedule()">
         <h2>Schedule</h2>
         <div class="toolbar">
           <button class="btn primary" @click="refreshAll()" :disabled="loading" x-text="loading ? 'Refreshing...' : 'Refresh'"></button>
@@ -524,6 +581,10 @@
           </select>
         </div>
         <div class="grid-2">
+          <div class="panel scroll grid-span-2">
+            <h3>Temporal Awareness</h3>
+            <div x-html="renderAgenda()"></div>
+          </div>
           <div class="panel scroll">
             <h3>Create or Edit</h3>
             <form @submit.prevent="saveSchedule()" class="content-stack">
@@ -599,9 +660,11 @@
           </div>
         </div>
       </section>
+      </template>
 
       <!-- Usage -->
-      <section x-show="tab === 'usage'" x-cloak x-data="usageApp()" x-init="initUsage()">
+      <template x-if="tab === 'usage'">
+      <section x-cloak x-data="usageApp()" x-init="initUsage()">
         <h2>Usage</h2>
         <div class="toolbar">
           <label class="field-label">
@@ -782,9 +845,11 @@
           </div>
         </div>
       </section>
+      </template>
 
       <!-- Daydream -->
-      <section x-show="tab === 'daydream'" x-cloak x-data="daydreamApp()" x-init="initDaydream()">
+      <template x-if="tab === 'daydream'">
+      <section x-cloak x-data="daydreamApp()" x-init="initDaydream()">
         <h2>Daydream</h2>
         <div class="toolbar">
           <label class="field-label">
@@ -844,9 +909,11 @@
           </div>
         </div>
       </section>
+      </template>
 
       <!-- Memory -->
-      <section x-show="tab === 'memory'" x-cloak x-data="memoryApp()" x-init="initMemory()">
+      <template x-if="tab === 'memory'">
+      <section x-cloak x-data="memoryApp()" x-init="initMemory()">
         <div class="section-heading">
           <div>
             <h2>Memory Atlas</h2>
@@ -865,23 +932,25 @@
             <h4>Atlas Controls</h4>
             <div class="control-grid">
               <label class="field-label">Search / focus query
-                <input class="input" type="text" x-model="query" placeholder="planning drift, auth errors, operator, etc." />
+                <input class="input" type="text" x-model="query" @change="loadLandscape()" @keydown.enter.prevent="loadLandscape()" placeholder="planning drift, auth errors, the owner, etc." />
               </label>
               <label class="field-label">Session filter
-                <input class="input" type="text" x-model="sessionId" placeholder="optional session id" />
+                <input class="input" type="text" x-model="sessionId" @change="loadLandscape()" @keydown.enter.prevent="loadLandscape()" placeholder="optional session id" />
               </label>
               <label class="field-label">Kind
-                <select class="input" x-model="kind">
+                <select class="input" x-model="kind" @change="loadLandscape()">
                   <option value="">All kinds</option>
                   <option value="turn">turn</option>
                   <option value="observation">observation</option>
                   <option value="action">action</option>
+                  <option value="artifact">artifact</option>
                   <option value="compaction">compaction</option>
                   <option value="consolidation">consolidation</option>
+                  <option value="procedural">procedural</option>
                 </select>
               </label>
               <label class="field-label">Emotion
-                <select class="input" x-model="emotion">
+                <select class="input" x-model="emotion" @change="loadLandscape()">
                   <option value="">All emotions</option>
                   <template x-for="option in emotionOptions()" :key="option">
                     <option :value="option" x-text="option"></option>
@@ -889,16 +958,16 @@
                 </select>
               </label>
               <label class="field-label">Node limit
-                <input class="input" type="number" min="20" max="300" step="10" x-model.number="limit" />
+                <input class="input" type="number" min="20" max="500" step="10" x-model.number="limit" @change="loadLandscape()" />
               </label>
               <label class="field-label">Max age (days)
-                <input class="input" type="number" min="0" step="1" x-model="maxAgeDays" placeholder="all history" />
+                <input class="input" type="number" min="0" step="1" x-model="maxAgeDays" @change="loadLandscape()" placeholder="all history" />
               </label>
               <label class="field-label">Edge threshold
-                <input class="input" type="number" min="0" max="1" step="0.01" x-model.number="minEdgeConfidence" />
+                <input class="input" type="number" min="0" max="1" step="0.01" x-model.number="minEdgeConfidence" @change="loadLandscape()" />
               </label>
               <label class="field-label">Edge kind
-                <select class="input" x-model="edgeKind">
+                <select class="input" x-model="edgeKind" @change="loadLandscape()">
                   <option value="">All edge kinds</option>
                   <template x-for="option in edgeKindOptions()" :key="option">
                     <option :value="option" x-text="option"></option>
@@ -906,7 +975,7 @@
                 </select>
               </label>
               <label class="field-label">Projection
-                <select class="input" x-model="projectionMethod">
+                <select class="input" x-model="projectionMethod" @change="loadLandscape()">
                   <option value="auto">auto</option>
                   <option value="umap">umap</option>
                   <option value="pca">pca</option>
@@ -919,6 +988,7 @@
                   <option value="kind">kind</option>
                   <option value="embedding_model">embedding model</option>
                   <option value="salience">salience</option>
+                  <option value="somatic_tag">somatic tag</option>
                 </select>
               </label>
               <label class="field-label">View
@@ -943,7 +1013,7 @@
                 </select>
               </label>
               <label class="field-label">Memory nodes
-                <select class="input" x-model="includeMemories">
+                <select class="input" x-model="includeMemories" @change="loadLandscape()">
                   <option value="true">include distilled memories</option>
                   <option value="false">episodes only</option>
                 </select>
@@ -993,6 +1063,7 @@
               <button class="tab-pill" :class="activeLowerPanel === 'timeline' ? 'active' : ''" @click="setLowerPanel('timeline')">Timeline</button>
               <button class="tab-pill" :class="activeLowerPanel === 'retrieval' ? 'active' : ''" @click="setLowerPanel('retrieval')">Retrieval Inspector</button>
               <button class="tab-pill" :class="activeLowerPanel === 'value' ? 'active' : ''" @click="setLowerPanel('value')">Memory Value</button>
+              <button class="tab-pill" :class="activeLowerPanel === 'somatic' ? 'active' : ''" @click="setLowerPanel('somatic')">Somatic &amp; Relational</button>
             </div>
           </div>
 
@@ -1040,11 +1111,21 @@
           <div class="memory-tab-body scroll" x-show="activeLowerPanel === 'value'">
             <div x-html="memoryValueMarkup()"></div>
           </div>
+
+          <div class="memory-tab-body scroll" x-show="activeLowerPanel === 'somatic'">
+            <p class="muted">Live somatic vitals and relational state — both modulate memory retrieval scoring in real time. Refresh to see the current values.</p>
+            <div class="inline-actions mt-2 mb-4">
+              <button class="btn" @click="loadSomaticState(); loadMusubiState()" :disabled="somaticLoading || musubiLoading">Refresh</button>
+            </div>
+            <div x-html="somaticMarkup()"></div>
+          </div>
         </div>
       </section>
+      </template>
 
       <!-- Identity -->
-      <section x-show="tab === 'identity'" x-cloak>
+      <template x-if="tab === 'identity'">
+      <section x-cloak x-init="$nextTick(() => window.initDynamicPanels && window.initDynamicPanels($el))">
         <h2>Identity</h2>
         <div class="grid-2">
           <div class="panel"
@@ -1077,11 +1158,19 @@
             hx-swap="innerHTML">
             <p class="muted">Loading somatic state…</p>
           </div>
+          <div class="panel"
+            hx-get="/api/identity/tom"
+            hx-trigger="load, every 30s"
+            hx-swap="innerHTML">
+            <p class="muted">Loading theory-of-mind state…</p>
+          </div>
         </div>
       </section>
+      </template>
 
       <!-- Executive -->
-      <section x-show="tab === 'executive'" x-cloak>
+      <template x-if="tab === 'executive'">
+      <section x-cloak x-init="$nextTick(() => window.initDynamicPanels && window.initDynamicPanels($el))">
         <h2>Executive State</h2>
         <div class="grid-2">
           <div class="panel"
@@ -1104,9 +1193,11 @@
           </div>
         </div>
       </section>
+      </template>
 
       <!-- Platform -->
-      <section x-show="tab === 'platform'" x-cloak class="system-shell" x-data="platformApp()" x-init="initPlatform()">
+      <template x-if="tab === 'platform'">
+      <section x-cloak class="system-shell" x-data="platformApp()" x-init="initPlatform(); $nextTick(() => window.initDynamicPanels && window.initDynamicPanels($el))">
         <h2>Platform</h2>
         <div class="toolbar">
           <input
@@ -1290,9 +1381,11 @@
           </div>
         </div>
       </section>
+      </template>
 
       <!-- System -->
-      <section x-show="tab === 'system'" x-cloak class="system-shell">
+      <template x-if="tab === 'system'">
+      <section x-cloak class="system-shell" x-init="$nextTick(() => window.initDynamicPanels && window.initDynamicPanels($el))">
         <h2>System Control Plane</h2>
         <div class="system-grid">
           <div class="panel scroll panel-span-6 panel-row-2"
@@ -1314,6 +1407,24 @@
             hx-trigger="load, every 15s"
             hx-swap="innerHTML">
             <p class="muted">Loading runtime state…</p>
+          </div>
+          <div class="panel scroll panel-span-5"
+            hx-get="/api/monitor/meaningful-loop"
+            hx-trigger="load, every 20s"
+            hx-swap="innerHTML">
+            <p class="muted">Loading meaningful-loop status…</p>
+          </div>
+          <div class="panel scroll panel-span-5"
+            hx-get="/api/monitor/affective-examinations?limit=20"
+            hx-trigger="load, every 30s"
+            hx-swap="innerHTML">
+            <p class="muted">Loading affective examinations…</p>
+          </div>
+          <div class="panel scroll panel-span-5"
+            hx-get="/api/monitor/shadow-registry"
+            hx-trigger="load, every 20s"
+            hx-swap="innerHTML">
+            <p class="muted">Loading Shadow Registry…</p>
           </div>
           <div class="panel panel-span-5"
           data-panel="config-overview"
@@ -1337,6 +1448,452 @@
           </div>
         </div>
       </section>
+      </template>
+
+      <!-- Shadow Registry -->
+      <template x-if="tab === 'shadow'">
+      <section x-cloak class="system-shell" x-init="$nextTick(() => window.initDynamicPanels && window.initDynamicPanels($el))">
+        <h2>Shadow Explorer</h2>
+        <div class="system-grid">
+          <div class="panel scroll panel-span-5 panel-row-2"
+            hx-get="/api/monitor/shadow-registry"
+            hx-trigger="load, every 20s"
+            hx-swap="innerHTML">
+            <p class="muted">Loading Shadow Registry clusters…</p>
+          </div>
+          <div id="shadow-registry-detail" class="panel scroll panel-span-7 panel-row-2">
+            <p class="muted">Select a recurring cluster to inspect raw blocked-intention entries.</p>
+          </div>
+        </div>
+      </section>
+      </template>
+
+      <!-- Logs / Telemetry -->
+      <template x-if="tab === 'logs'">
+      <section x-cloak x-data="logViewer()" x-init="init()" class="logs-shell">
+        <h2>Agent Telemetry Logs</h2>
+
+        <!-- Stats bar -->
+        <div class="logs-stats-bar" x-show="stats.total_events > 0">
+          <div class="logs-stat"><span class="logs-stat-value" x-text="stats.total_events"></span><span class="logs-stat-label">Total</span></div>
+          <div class="logs-stat"><span class="logs-stat-value" x-text="stats.events_last_hour"></span><span class="logs-stat-label">Last Hour</span></div>
+          <div class="logs-stat"><span class="logs-stat-value" x-text="stats.events_last_24h"></span><span class="logs-stat-label">Last 24h</span></div>
+          <div class="logs-stat"><span class="logs-stat-value" x-text="events.length"></span><span class="logs-stat-label">Loaded</span></div>
+        </div>
+
+        <!-- Filter bar -->
+        <div class="logs-filter-bar">
+          <div class="logs-filter-group">
+            <label class="logs-filter-label">Event Kinds</label>
+            <div class="logs-kind-chips">
+              <template x-for="k in kinds" :key="k.kind">
+                <button
+                  class="logs-kind-chip"
+                  :class="selectedKinds.includes(k.kind) ? 'active' : ''"
+                  :style="`--chip-color: ${kindColor(k.kind)}`"
+                  @click="toggleKind(k.kind)">
+                  <span class="logs-kind-dot" :style="`background: ${kindColor(k.kind)}`"></span>
+                  <span x-text="k.label"></span>
+                  <span class="logs-kind-count" x-text="k.count"></span>
+                </button>
+              </template>
+            </div>
+          </div>
+          <div class="logs-filter-group logs-filter-group-small">
+            <label class="logs-filter-label">Session</label>
+            <select x-model="selectedSession" @change="loadEvents()" class="logs-select">
+              <option value="">All sessions</option>
+              <template x-for="sid in sessions" :key="sid">
+                <option :value="sid" x-text="sid.substring(0, 24) + (sid.length > 24 ? '...' : '')"></option>
+              </template>
+            </select>
+          </div>
+          <div class="logs-filter-group logs-filter-group-small">
+            <label class="logs-filter-label">Search</label>
+            <input type="text" x-model="searchText" @input.debounce.300ms="applyFilters()" placeholder="Filter messages..." class="logs-input" />
+          </div>
+          <div class="logs-filter-actions">
+            <button class="logs-btn" @click="clearFilters()" title="Clear all filters">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+              Clear
+            </button>
+            <button class="logs-btn" :class="paused ? 'warn' : 'ok'" @click="togglePause()" title="Pause/resume polling">
+              <span x-text="paused ? 'Resume' : 'Pause'"></span>
+            </button>
+            <button class="logs-btn" @click="loadEvents()" title="Refresh now">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+            </button>
+          </div>
+        </div>
+
+        <!-- Active filters display -->
+        <div class="logs-active-filters" x-show="selectedKinds.length > 0 || selectedSession || searchText">
+          <span class="muted">Active:</span>
+          <template x-for="k in selectedKinds" :key="k">
+            <span class="logs-filter-tag" :style="`border-color: ${kindColor(k)}; color: ${kindColor(k)}`">
+              <span x-text="k.replace(/_/g, ' ')"></span>
+              <button @click="toggleKind(k)">&times;</button>
+            </span>
+          </template>
+          <span class="logs-filter-tag" x-show="selectedSession" style="border-color: var(--cyan); color: var(--cyan)">
+            Session: <span x-text="selectedSession.substring(0, 16)"></span>
+            <button @click="selectedSession = ''; loadEvents()">&times;</button>
+          </span>
+          <span class="logs-filter-tag" x-show="searchText" style="border-color: var(--amber); color: var(--amber)">
+            "<span x-text="searchText"></span>"
+            <button @click="searchText = ''; applyFilters()">&times;</button>
+          </span>
+        </div>
+
+        <!-- Log stream -->
+        <div class="logs-stream-container" x-ref="streamContainer">
+          <div class="logs-stream-header">
+            <span class="muted" x-text="filteredEvents.length + ' events'"></span>
+            <span class="logs-live-indicator"
+                  :class="{
+                    'live': streamConnected && !paused,
+                    'paused': paused,
+                    'warn': streamError && !paused
+                  }">
+              <span class="logs-live-dot"></span>
+              <span x-text="paused ? 'Paused' : (streamError ? 'Reconnecting' : (streamConnected ? 'Connected' : 'Connecting'))"></span>
+            </span>
+          </div>
+          <div class="logs-stream" x-ref="logStream">
+            <template x-for="e in filteredEvents" :key="e.event_id">
+              <div class="logs-event" :class="expandedEventId === e.event_id ? 'expanded' : ''">
+                <div class="logs-event-header" @click="toggleExpand(e.event_id)">
+                  <span class="logs-event-time" x-text="formatTime(e.timestamp)"></span>
+                  <span class="logs-event-kind" :style="`color: ${kindColor(e.kind)}; border-color: ${kindColor(e.kind)}`" x-text="e.kind.replace(/_/g, ' ')"></span>
+                  <span class="logs-event-message" x-text="e.message || '(no message)'"></span>
+                  <span class="logs-event-session" x-show="e.session_id" x-text="e.session_id ? e.session_id.substring(0, 8) + '...' : ''" title="Session ID"></span>
+                  <span class="logs-event-expand">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+                  </span>
+                </div>
+                <div class="logs-event-body" x-show="expandedEventId === e.event_id" x-transition>
+                  <div class="logs-event-meta">
+                    <div><span class="muted">Event ID:</span> <code x-text="e.event_id"></code></div>
+                    <div><span class="muted">Kind:</span> <code x-text="e.kind"></code></div>
+                    <div x-show="e.session_id"><span class="muted">Session:</span> <code x-text="e.session_id"></code></div>
+                    <div x-show="e.span_id"><span class="muted">Span:</span> <code x-text="e.span_id"></code></div>
+                    <div x-show="e.parent_span_id"><span class="muted">Parent Span:</span> <code x-text="e.parent_span_id"></code></div>
+                  </div>
+                  <div class="logs-event-payload">
+                    <div class="muted">Payload:</div>
+                    <pre x-html="formatPayload(e.payload)"></pre>
+                  </div>
+                </div>
+              </div>
+            </template>
+            <div x-show="filteredEvents.length === 0" class="logs-empty">
+              <p class="muted">No events match the current filters.</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- Log viewer JS -->
+        <script>
+          function logViewer() {
+            return {
+              events: [],
+              kinds: [],
+              sessions: [],
+              stats: { total_events: 0, events_last_hour: 0, events_last_24h: 0 },
+              selectedKinds: [],
+              selectedSession: '',
+              searchText: '',
+              paused: false,
+              expandedEventId: null,
+              eventSource: null,
+              streamConnected: false,
+              streamError: false,
+              reconnectDelay: 1000,
+              reconnectTimer: null,
+              limit: 200,
+
+              async init() {
+                await this.loadKinds();
+                await this.loadSessions();
+                await this.loadStats();
+                await this.loadEvents();
+                this.startStreaming();
+              },
+              destroy() {
+                this.stopStreaming();
+              },
+
+              get filteredEvents() {
+                let result = this.events;
+                if (this.selectedKinds.length > 0) {
+                  result = result.filter(e => this.selectedKinds.includes(e.kind));
+                }
+                if (this.selectedSession) {
+                  result = result.filter(e => e.session_id === this.selectedSession);
+                }
+                if (this.searchText) {
+                  const q = this.searchText.toLowerCase();
+                  result = result.filter(e =>
+                    (e.message || '').toLowerCase().includes(q) ||
+                    JSON.stringify(e.payload).toLowerCase().includes(q)
+                  );
+                }
+                // Newest first
+                return result.slice().reverse();
+              },
+
+              async loadEvents() {
+                const params = new URLSearchParams({ limit: String(this.limit) });
+                if (this.selectedKinds.length > 0) params.set('kinds', this.selectedKinds.join(','));
+                if (this.selectedSession) params.set('session_id', this.selectedSession);
+                if (this.searchText) params.set('search', this.searchText);
+                try {
+                  const res = await fetch('/api/telemetry/events?' + params.toString());
+                  const data = await res.json();
+                  const incoming = data.events || [];
+
+                  if (this.events.length === 0) {
+                    this.events = incoming;
+                    return;
+                  }
+
+                  // Merge without flashing: keep existing, add new, remove aged-out
+                  const mergedMap = new Map();
+                  for (const e of this.events) mergedMap.set(e.event_id, e);
+                  for (const e of incoming) mergedMap.set(e.event_id, e);
+
+                  let merged = Array.from(mergedMap.values());
+                  merged.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+
+                  // Trim oldest if over limit
+                  while (merged.length > this.limit) merged.shift();
+
+                  this.events = merged;
+                } catch (err) {
+                  console.error('Failed to load telemetry events:', err);
+                }
+              },
+
+              async loadKinds() {
+                try {
+                  const res = await fetch('/api/telemetry/kinds');
+                  const data = await res.json();
+                  this.kinds = (data.kinds || []).filter(k => k.count > 0);
+                } catch (err) {
+                  console.error('Failed to load kinds:', err);
+                }
+              },
+
+              async loadSessions() {
+                try {
+                  const res = await fetch('/api/telemetry/sessions?limit=30');
+                  const data = await res.json();
+                  this.sessions = data.sessions || [];
+                } catch (err) {
+                  console.error('Failed to load sessions:', err);
+                }
+              },
+
+              async loadStats() {
+                try {
+                  const res = await fetch('/api/telemetry/stats');
+                  this.stats = await res.json();
+                } catch (err) {
+                  console.error('Failed to load stats:', err);
+                }
+              },
+
+              startStreaming() {
+                this.stopStreaming();
+                if (this.paused) return;
+
+                const params = new URLSearchParams();
+                if (this.selectedKinds.length > 0) params.set('kinds', this.selectedKinds.join(','));
+                if (this.selectedSession) params.set('session_id', this.selectedSession);
+
+                const url = '/api/telemetry/stream?' + params.toString();
+                this.eventSource = new EventSource(url);
+                this.streamError = false;
+
+                this.eventSource.onopen = () => {
+                  this.streamConnected = true;
+                  this.streamError = false;
+                  this.reconnectDelay = 1000;
+                };
+
+                this.eventSource.onmessage = (event) => {
+                  if (!event.data) return;
+                  try {
+                    const e = JSON.parse(event.data);
+                    // Avoid duplicates
+                    if (this.events.some(x => x.event_id === e.event_id)) return;
+                    this.events.push(e);
+                    // Trim oldest if over limit
+                    while (this.events.length > this.limit) this.events.shift();
+                    this.events.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+                    // Refresh stats periodically on new events
+                    if (Math.random() < 0.05) this.loadStats();
+                  } catch (err) {
+                    console.error('Failed to parse streamed event:', err);
+                  }
+                };
+
+                this.eventSource.onerror = () => {
+                  this.streamConnected = false;
+                  this.streamError = true;
+                  this.stopStreaming();
+                  // Auto-reconnect with exponential backoff up to 30s
+                  this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
+                  this.reconnectTimer = setTimeout(() => {
+                    if (!this.paused) this.startStreaming();
+                  }, this.reconnectDelay);
+                };
+              },
+
+              stopStreaming() {
+                if (this.eventSource) {
+                  this.eventSource.close();
+                  this.eventSource = null;
+                }
+                if (this.reconnectTimer) {
+                  clearTimeout(this.reconnectTimer);
+                  this.reconnectTimer = null;
+                }
+                this.streamConnected = false;
+              },
+
+              toggleKind(kind) {
+                if (this.selectedKinds.includes(kind)) {
+                  this.selectedKinds = this.selectedKinds.filter(k => k !== kind);
+                } else {
+                  this.selectedKinds.push(kind);
+                }
+                this.loadEvents();
+                // Restart stream with new kind filter
+                this.startStreaming();
+              },
+
+              clearFilters() {
+                this.selectedKinds = [];
+                this.selectedSession = '';
+                this.searchText = '';
+                this.loadEvents();
+                this.startStreaming();
+              },
+
+              applyFilters() {
+                if (this.selectedKinds.length > 0 || this.selectedSession) {
+                  this.loadEvents();
+                }
+              },
+
+              toggleExpand(eventId) {
+                this.expandedEventId = this.expandedEventId === eventId ? null : eventId;
+              },
+
+              togglePause() {
+                this.paused = !this.paused;
+                if (this.paused) {
+                  this.stopStreaming();
+                } else {
+                  this.startStreaming();
+                }
+              },
+
+              formatTime(iso) {
+                try {
+                  const d = new Date(iso);
+                  return d.toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+                } catch {
+                  return iso;
+                }
+              },
+
+              formatPayload(payload) {
+                if (payload === null || payload === undefined) {
+                  return '<span class="json-null">null</span>';
+                }
+                if (typeof payload !== 'object') {
+                  return '<span class="json-string">' + escapeHtml(String(payload)) + '</span>';
+                }
+                return this._renderObject(payload, 0);
+              },
+
+              _renderObject(obj, depth) {
+                const indent = '  '.repeat(depth);
+                const lines = [];
+                const isArray = Array.isArray(obj);
+
+                if (isArray) {
+                  if (obj.length === 0) return '<span class="json-bracket">[]</span>';
+                  lines.push('<span class="json-bracket">[</span>');
+                  for (let i = 0; i < obj.length; i++) {
+                    const item = this._renderValue(obj[i], depth + 1);
+                    const comma = i < obj.length - 1 ? '<span class="json-comma">,</span>' : '';
+                    lines.push(indent + '  <span class="json-index">' + i + '</span><span class="json-colon">:</span> ' + item + comma);
+                  }
+                  lines.push(indent + '<span class="json-bracket">]</span>');
+                } else {
+                  const keys = Object.keys(obj);
+                  if (keys.length === 0) return '<span class="json-bracket">{}</span>';
+                  lines.push('<span class="json-bracket">{</span>');
+                  for (let i = 0; i < keys.length; i++) {
+                    const k = keys[i];
+                    const v = this._renderValue(obj[k], depth + 1);
+                    const comma = i < keys.length - 1 ? '<span class="json-comma">,</span>' : '';
+                    lines.push(indent + '  <span class="json-key">' + escapeHtml(k) + '</span><span class="json-colon">:</span> ' + v + comma);
+                  }
+                  lines.push(indent + '<span class="json-bracket">}</span>');
+                }
+                return '<div class="json-tree">' + lines.map(l => '<div class="json-line" style="padding-left:' + (depth * 12) + 'px">' + l + '</div>').join('') + '</div>';
+              },
+
+              _renderValue(val, depth) {
+                if (val === null) return '<span class="json-null">null</span>';
+                if (val === undefined) return '<span class="json-null">undefined</span>';
+                const t = typeof val;
+                if (t === 'boolean') return '<span class="json-bool">' + val + '</span>';
+                if (t === 'number') return '<span class="json-number">' + val + '</span>';
+                if (t === 'string') {
+                  const max = 300;
+                  const s = val.length > max ? val.slice(0, max) + '... (' + val.length + ' chars)' : val;
+                  return '<span class="json-string">"' + escapeHtml(s) + '"</span>';
+                }
+                if (t === 'object') {
+                  if (depth > 4) return '<span class="json-dim">{...}</span>';
+                  return this._renderObject(val, depth);
+                }
+                return '<span class="json-string">' + escapeHtml(String(val)) + '</span>';
+              },
+
+              kindColor(kind) {
+                const colors = {
+                  'session_start': '#00e5ff',
+                  'session_end': '#008fa0',
+                  'turn': '#00ff88',
+                  'memory_write': '#a855f7',
+                  'memory_compact': '#7c3aed',
+                  'consolidation_run': '#f59e0b',
+                  'self_approval': '#00ff88',
+                  'escalation': '#ffe600',
+                  'tom_eval': '#ff0090',
+                  'creative_promotion': '#ff40b0',
+                  'bootstrap_stage': '#00e5ff',
+                  'diagnostic_run': '#40efff',
+                  'tool_call': '#f59e0b',
+                  'llm_call': '#00bfff',
+                  'error': '#ff3355',
+                  'warning': '#ff9900',
+                  'span_start': '#556677',
+                  'span_end': '#3a4858',
+                };
+                return colors[kind] || '#556677';
+              },
+            };
+          }
+        </script>
+      </section>
+      </template>
     </main>
   </div>
 
@@ -1355,10 +1912,18 @@
               evt.detail.serverResponse = renderBaa(data);
             } else if (url.startsWith('/api/monitor/embeddings')) {
               evt.detail.serverResponse = renderEmbeddings(data);
+            } else if (url.startsWith('/api/monitor/shadow-registry/cluster')) {
+              evt.detail.serverResponse = renderShadowRegistryClusterDetail(data);
+            } else if (url.startsWith('/api/monitor/shadow-registry')) {
+              evt.detail.serverResponse = tgt.closest('.card') ? renderShadowRegistryCard(data) : renderShadowRegistryPanel(data);
             } else if (url.startsWith('/api/monitor/health/history')) {
               evt.detail.serverResponse = renderHealthHistory(data);
             } else if (url.startsWith('/api/monitor/health')) {
               evt.detail.serverResponse = renderHealth(data);
+            } else if (url.startsWith('/api/monitor/meaningful-loop')) {
+              evt.detail.serverResponse = tgt.closest('.card') ? renderMeaningfulLoopCard(data) : renderMeaningfulLoopPanel(data);
+            } else if (url.startsWith('/api/monitor/affective-examinations')) {
+              evt.detail.serverResponse = tgt.closest('.card') ? renderAffectiveExaminationsCard(data) : renderAffectiveExaminationsPanel(data);
             } else if (url.startsWith('/api/monitor/runtime')) {
               evt.detail.serverResponse = tgt.closest('.card') ? renderRuntimeCard(data) : renderRuntimePanel(data);
             } else if (url.startsWith('/api/operations/qualification/reruns/')) {
@@ -1437,6 +2002,8 @@
               evt.detail.serverResponse = renderMusubi(data);
             } else if (url.startsWith('/api/identity/somatic')) {
               evt.detail.serverResponse = renderSomatic(data);
+            } else if (url.startsWith('/api/identity/tom')) {
+              evt.detail.serverResponse = renderTom(data);
             } else if (url.startsWith('/api/executive/snapshot')) {
               evt.detail.serverResponse = renderExecutiveSnapshot(data);
             } else if (url.startsWith('/api/executive/commitments')) {
@@ -1456,7 +2023,7 @@
         }
       });
 
-      // Memory dashboard globals live in /dashboard/static/js/memory_app.js.
+      // Memory dashboard globals live in dashboard/static/js/memory_app.js.
       function renderBaa(d) {
         return `<div class="stat-grid">
           <div><div class="stat-value">${d.queue_size}</div><div class="stat-label">Queue</div></div>
@@ -1466,12 +2033,291 @@
       }
       function renderEmbeddings(d) {
         const status = d.healthy ? '<span class="badge ok">OK</span>' : '<span class="badge warn">Slow</span>';
-        return `<div class="stat-grid">
+        let html = `<div class="stat-grid">
           <div><div class="stat-value">${d.total_records}</div><div class="stat-label">Records</div></div>
           <div><div class="stat-value">${d.latency_ms}ms</div><div class="stat-label">Latency</div></div>
           <div><div class="stat-value">${d.healthy ? 'healthy' : 'slow'}</div><div class="stat-label">Status ${status}</div></div>
         </div><p class="muted mt-3 wrap-code">${escapeHtml(d.model_id || '-')}</p>`;
+        const recent = d.recent_records || [];
+        if (!recent.length) {
+          return html + '<p class="muted mt-3">No recent embedding records are visible.</p>';
+        }
+        html += '<h4 class="mt-4">Recent Embeddings</h4>';
+        html += '<table class="data-table"><thead><tr><th>When</th><th>Type</th><th>Source</th><th>Preview</th></tr></thead><tbody>';
+        for (const item of recent) {
+          const typeLabel = item.task_type || '-';
+          const sourceLabel = item.source || (item.degraded ? 'degraded' : '-');
+          html += `<tr>
+            <td>${escapeHtml(new Date(item.updated_at || item.created_at).toLocaleString())}</td>
+            <td>${escapeHtml(typeLabel)}</td>
+            <td>${escapeHtml(sourceLabel)}</td>
+            <td>${escapeHtml(item.preview || '-')}</td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        return html;
       }
+      function renderMeaningfulLoopCard(d) {
+        const counts = d.stop_counts || {};
+        const latest = d.latest_blocker || d.latest_artifact || d.latest_evidence || {};
+        return `<div class="stat-grid">
+          <div><div class="stat-value">${counts.progress_gate || 0}</div><div class="stat-label">Progress gates</div></div>
+          <div><div class="stat-value">${counts.retry_governor || 0}</div><div class="stat-label">Retry blocks</div></div>
+          <div><div class="stat-value">${counts.affective_pressure || 0}</div><div class="stat-label">Affective pressure</div></div>
+        </div><p class="muted mt-3">${escapeHtml(latest.reason || latest.path || latest.summary || 'No loop contract events yet.')}</p>`;
+      }
+      function renderMeaningfulLoopPanel(d) {
+        if (!d.available) {
+          return '<p class="muted">No meaningful-loop contract events are visible yet.</p>';
+        }
+        const counts = d.stop_counts || {};
+        let html = `<div class="health-header"><span class="badge warn">Meaningful Loop</span><span class="muted">latest output, blocker, and stop-cause state</span></div>`;
+        html += `<div class="stat-grid">
+          <div><div class="stat-value">${counts.progress_gate || 0}</div><div class="stat-label">Progress gates</div></div>
+          <div><div class="stat-value">${counts.retry_governor || 0}</div><div class="stat-label">Retry governor</div></div>
+          <div><div class="stat-value">${counts.approval_block || 0}</div><div class="stat-label">Approval blocks</div></div>
+          <div><div class="stat-value">${counts.affective_pressure || 0}</div><div class="stat-label">Affective pressure</div></div>
+          <div><div class="stat-value">${counts.completion || 0}</div><div class="stat-label">Completions</div></div>
+        </div>`;
+        const surfaces = [
+          ['Latest Artifact', d.latest_artifact?.path],
+          ['Latest Evidence', d.latest_evidence?.summary],
+          ['Latest Blocker', d.latest_blocker?.reason],
+          ['Latest Stop', d.latest_stop?.reason],
+        ].filter(item => item[1]);
+        if (surfaces.length) {
+          html += '<h4 class="mt-4">Current Surfaces</h4><table class="data-table"><thead><tr><th>Surface</th><th>Value</th></tr></thead><tbody>';
+          for (const [label, value] of surfaces) {
+            html += `<tr><td>${escapeHtml(label)}</td><td class="wrap-code">${escapeHtml(value)}</td></tr>`;
+          }
+          html += '</tbody></table>';
+        }
+        const tasks = d.recent_tasks || [];
+        if (tasks.length) {
+          html += '<h4 class="mt-4">Recent Tasks</h4><table class="data-table"><thead><tr><th>Task</th><th>Cause</th><th>Signal</th><th>Output Surface</th></tr></thead><tbody>';
+          for (const item of tasks.slice(0, 8)) {
+            const surface = item.latest_artifact || item.latest_evidence || item.latest_blocker || '-';
+            html += `<tr>
+              <td>${escapeHtml(item.title || item.task_id || '-')}<div class="muted mt-1"><code>${escapeHtml(item.task_id || '-')}</code></div></td>
+              <td>${escapeHtml(item.loop_stop_cause || '-')}</td>
+              <td>${escapeHtml(item.latest_meaningful_signal || '-')}</td>
+              <td class="wrap-code">${escapeHtml(surface)}</td>
+            </tr>`;
+          }
+          html += '</tbody></table>';
+        }
+        const pressures = d.affective_pressures || [];
+        if (pressures.length) {
+          html += '<h4 class="mt-4">Affective Pressure</h4><table class="data-table"><thead><tr><th>Pressure</th><th>Emotion</th><th>Reason</th></tr></thead><tbody>';
+          for (const item of pressures.slice(0, 6)) {
+            html += `<tr>
+              <td>${escapeHtml(item.action_pressure || '-')}</td>
+              <td>${escapeHtml(item.primary_emotion || '-')}</td>
+              <td>${escapeHtml(item.bounded_reason || item.source_excerpt || '-')}</td>
+            </tr>`;
+          }
+          html += '</tbody></table>';
+        }
+        return html;
+      }
+      function renderAffectiveExaminationsCard(d) {
+        if (!d.available) {
+          return '<p class="muted">Affective examination records are not available.</p>';
+        }
+        const counts = d.counts || {};
+        const latest = (d.items || [])[0] || {};
+        return `<div class="stat-grid">
+          <div><div class="stat-value">${d.count || 0}</div><div class="stat-label">Recent</div></div>
+          <div><div class="stat-value">${counts.unconsumed || 0}</div><div class="stat-label">Unconsumed</div></div>
+          <div><div class="stat-value">${counts.expired || 0}</div><div class="stat-label">Expired</div></div>
+        </div><p class="muted mt-3">${escapeHtml(latest.bounded_reason || latest.source_excerpt || 'No recent affective records.')}</p>`;
+      }
+      function renderAffectiveExaminationsPanel(d) {
+        if (!d.available) {
+          return '<p class="muted">Affective examination records are not available for this runtime.</p>';
+        }
+        const counts = d.counts || {};
+        let html = `<div class="health-header"><span class="badge warn">Affective Examinations</span><span class="muted">${d.count || 0} recent records</span></div>`;
+        html += `<div class="stat-grid">
+          <div><div class="stat-value">${counts.active || 0}</div><div class="stat-label">Active</div></div>
+          <div><div class="stat-value">${counts.expired || 0}</div><div class="stat-label">Expired</div></div>
+          <div><div class="stat-value">${counts.unconsumed || 0}</div><div class="stat-label">Unconsumed</div></div>
+        </div>`;
+        const items = d.items || [];
+        if (!items.length) {
+          return html + '<p class="muted mt-3">No affective examinations match the current filters.</p>';
+        }
+        html += '<table class="data-table mt-4"><thead><tr><th>When</th><th>Source</th><th>Emotion</th><th>Pressure</th><th>Consumed</th><th>Decay</th><th>Reason</th></tr></thead><tbody>';
+        for (const item of items.slice(0, 20)) {
+          html += `<tr>
+            <td>${escapeHtml(item.created_at ? new Date(item.created_at).toLocaleString() : '-')}</td>
+            <td>${escapeHtml(item.source_type || '-')}<div class="muted mt-1"><code>${escapeHtml(item.source_id || '-')}</code></div></td>
+            <td>${escapeHtml(item.primary_emotion || '-')}<div class="muted mt-1">${escapeHtml(String(item.confidence ?? '-'))}</div></td>
+            <td>${escapeHtml(item.action_pressure || '-')}</td>
+            <td>${escapeHtml(item.consumed_by || '-')}</td>
+            <td>${escapeHtml(item.decay_state || '-')}</td>
+            <td class="wrap-code">${escapeHtml(item.bounded_reason || item.source_excerpt || '-')}</td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        return html;
+      }
+      function renderShadowRegistryCard(d) {
+        if (!d.available) {
+          return `<div class="stat-grid">
+            <div><div class="stat-value">0</div><div class="stat-label">Entries</div></div>
+            <div><div class="stat-value">0</div><div class="stat-label">Clusters</div></div>
+          </div><p class="muted mt-3">Shadow Registry is not available.</p>`;
+        }
+        const topCluster = (d.top_clusters || [])[0] || {};
+        return `<div class="stat-grid">
+          <div><div class="stat-value">${d.total_entries || 0}</div><div class="stat-label">Entries</div></div>
+          <div><div class="stat-value">${d.active_clusters || 0}</div><div class="stat-label">Active clusters</div></div>
+          <div><div class="stat-value">${d.dismissed_clusters || 0}</div><div class="stat-label">Dismissed</div></div>
+          <div><div class="stat-value">${d.reason_counts?.retry_blocked || 0}</div><div class="stat-label">Retry blocks</div></div>
+        </div><p class="muted mt-3">${topCluster.intent_summary ? escapeHtml(topCluster.intent_summary) : 'No cluster data yet.'}</p>`;
+      }
+      function renderShadowRegistryPanel(d) {
+        if (!d.available) {
+          return '<p class="muted">Shadow Registry is not available for this runtime.</p>';
+        }
+        let html = `<div class="health-header"><span class="badge warn">Shadow Registry</span><span class="muted">${d.total_entries || 0} blocked intentions captured</span></div>`;
+        html += `<div class="stat-grid">
+          <div><div class="stat-value">${d.total_entries || 0}</div><div class="stat-label">Entries</div></div>
+          <div><div class="stat-value">${d.active_clusters || 0}</div><div class="stat-label">Active clusters</div></div>
+          <div><div class="stat-value">${d.dismissed_clusters || 0}</div><div class="stat-label">Dismissed</div></div>
+          <div><div class="stat-value">${d.reason_counts?.retry_blocked || 0}</div><div class="stat-label">Retry blocked</div></div>
+          <div><div class="stat-value">${d.reason_counts?.tool_loop_guard_blocked || 0}</div><div class="stat-label">Guard halted</div></div>
+        </div>`;
+        html += '<h4 class="mt-4">Recent Entries</h4>';
+        if (!(d.recent_entries || []).length) {
+          html += '<p class="muted">No blocked intentions captured yet.</p>';
+        } else {
+          html += '<table class="data-table"><thead><tr><th>When</th><th>Reason</th><th>Intent</th><th>Artifact</th></tr></thead><tbody>';
+          for (const item of d.recent_entries || []) {
+            html += `<tr>
+              <td>${escapeHtml(new Date(item.captured_at).toLocaleString())}</td>
+              <td>${escapeHtml(item.block_reason || '-')}</td>
+              <td>${escapeHtml(item.intent_summary || item.tool_name || '-')}</td>
+              <td>${escapeHtml(item.artifact || '-')}</td>
+            </tr>`;
+          }
+          html += '</tbody></table>';
+        }
+        html += '<h4 class="mt-4">Recurring Clusters</h4>';
+        if (!(d.top_clusters || []).length) {
+          html += '<p class="muted">No recurring clusters yet.</p>';
+        } else {
+          html += '<table class="data-table"><thead><tr><th>Count</th><th>Reason</th><th>Intent</th><th>Latest</th><th></th></tr></thead><tbody>';
+          for (const cluster of d.top_clusters || []) {
+            const triageLabel = cluster.triage_status === 'dismissed' ? 'dismissed' : 'active';
+            html += `<tr>
+              <td>${escapeHtml(String(cluster.count || 0))}</td>
+              <td>${escapeHtml(cluster.block_reason || '-')}</td>
+              <td>${escapeHtml(cluster.intent_summary || cluster.tool_name || '-')}<div class="muted mt-2">${escapeHtml(triageLabel)}${cluster.annotation ? ` · ${escapeHtml(cluster.annotation)}` : ''}</div></td>
+              <td>${escapeHtml(new Date(cluster.latest_captured_at).toLocaleString())}</td>
+              <td><button class="btn small" data-fingerprint="${escapeHtml(cluster.fingerprint || '')}" onclick="window.loadShadowRegistryCluster(this.dataset.fingerprint)">Inspect</button></td>
+            </tr>`;
+          }
+          html += '</tbody></table>';
+          const initialCluster = (d.top_clusters || [])[0]?.fingerprint;
+          if (initialCluster) {
+            html += `<div class="muted mt-3">Inspect a cluster for raw blocked-intention entries and recurrence detail.</div>`;
+            setTimeout(() => {
+              const detail = document.getElementById('shadow-registry-detail');
+              if (detail && !detail.dataset.shadowLoaded) {
+                detail.dataset.shadowLoaded = 'true';
+                window.loadShadowRegistryCluster(initialCluster);
+              }
+            }, 0);
+          }
+        }
+        return html;
+      }
+      function renderShadowRegistryClusterDetail(d) {
+        if (!d.available) {
+          return '<p class="muted">No cluster detail available for that fingerprint.</p>';
+        }
+        let html = `<div class="health-header"><span class="badge warn">Cluster Detail</span><span class="muted">${escapeHtml(d.intent_summary || d.tool_name || 'blocked intention cluster')}</span></div>`;
+        html += `<div class="stat-grid">
+          <div><div class="stat-value">${escapeHtml(String(d.count || 0))}</div><div class="stat-label">Entries</div></div>
+          <div><div class="stat-value">${escapeHtml(d.block_reason || '-')}</div><div class="stat-label">Reason</div></div>
+          <div><div class="stat-value">${escapeHtml(d.tool_name || '-')}</div><div class="stat-label">Tool</div></div>
+          <div><div class="stat-value">${escapeHtml(d.triage_status || 'active')}</div><div class="stat-label">Triage</div></div>
+        </div>`;
+        html += `<p class="muted mt-3 wrap-code">${escapeHtml(d.fingerprint || '-')}</p>`;
+        html += `<div class="form-grid mt-3">
+          <label>
+            <span class="muted">Operator note</span>
+            <textarea id="shadow-cluster-annotation" rows="3" placeholder="Record why this cluster is expected, deferred, or no longer useful for operator attention.">${escapeHtml(d.annotation || '')}</textarea>
+          </label>
+        </div>`;
+        html += `<div class="toolbar mt-3">
+          <button class="btn small" onclick="window.triageShadowRegistryCluster('${escapeHtml(d.fingerprint || '')}', { dismissed: false })">Restore Cluster</button>
+          <button class="btn small warn" onclick="window.triageShadowRegistryCluster('${escapeHtml(d.fingerprint || '')}', { dismissed: true })">Dismiss Cluster</button>
+          <button class="btn small" onclick="window.triageShadowRegistryCluster('${escapeHtml(d.fingerprint || '')}', {})">Save Note</button>
+        </div>`;
+        if (d.triaged_at || d.dismissed_at) {
+          html += `<p class="muted mt-3">Triage updated ${escapeHtml(d.triaged_at ? new Date(d.triaged_at).toLocaleString() : '-')} ${d.dismissed_at ? `· dismissed ${escapeHtml(new Date(d.dismissed_at).toLocaleString())}` : ''}</p>`;
+        }
+        html += '<h4 class="mt-4">Raw Entries</h4>';
+        if (!(d.entries || []).length) {
+          html += '<p class="muted">No blocked-intention entries are available for this cluster.</p>';
+          return html;
+        }
+        html += '<table class="data-table"><thead><tr><th>When</th><th>Reason</th><th>Intent</th><th>Context</th><th>Target</th><th>Artifact</th></tr></thead><tbody>';
+        for (const item of d.entries || []) {
+          html += `<tr>
+            <td>${escapeHtml(new Date(item.captured_at).toLocaleString())}</td>
+            <td>${escapeHtml(item.block_reason || '-')}</td>
+            <td>${escapeHtml(item.intent_summary || item.tool_name || '-')}</td>
+            <td>${escapeHtml(item.block_context || '-')}</td>
+            <td>${escapeHtml(item.target_kind || '-')}${item.target_id ? ` / ${escapeHtml(item.target_id)}` : ''}</td>
+            <td>${escapeHtml(item.artifact || '-')}</td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        return html;
+      }
+      window.loadShadowRegistryCluster = async function(fingerprint) {
+        const panel = document.getElementById('shadow-registry-detail');
+        if (!panel || !fingerprint) return;
+        window.shadowRegistrySelectedFingerprint = fingerprint;
+        panel.innerHTML = '<p class="muted">Loading cluster detail…</p>';
+        try {
+          const response = await fetch(`/api/monitor/shadow-registry/cluster?fingerprint=${encodeURIComponent(fingerprint)}`);
+          const data = await response.json();
+          panel.innerHTML = renderShadowRegistryClusterDetail(data);
+        } catch (error) {
+          panel.innerHTML = `<p class="muted">Failed to load cluster detail: ${escapeHtml(error?.message || 'unknown error')}</p>`;
+        }
+      };
+      window.triageShadowRegistryCluster = async function(fingerprint, options = {}) {
+        const panel = document.getElementById('shadow-registry-detail');
+        if (!panel || !fingerprint) return;
+        const annotationField = document.getElementById('shadow-cluster-annotation');
+        const annotation = annotationField ? annotationField.value : '';
+        panel.innerHTML = '<p class="muted">Saving cluster triage…</p>';
+        try {
+          const response = await fetch('/api/monitor/shadow-registry/cluster/triage', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              fingerprint,
+              annotation,
+              ...(Object.prototype.hasOwnProperty.call(options, 'dismissed') ? { dismissed: options.dismissed } : {}),
+            }),
+          });
+          const data = await response.json();
+          panel.innerHTML = renderShadowRegistryClusterDetail(data);
+          const summaryPanels = document.querySelectorAll('[hx-get="/api/monitor/shadow-registry"]');
+          if (window.htmx) {
+            summaryPanels.forEach((target) => window.htmx.ajax('GET', '/api/monitor/shadow-registry', { target, swap: 'innerHTML' }));
+          }
+        } catch (error) {
+          panel.innerHTML = `<p class="muted">Failed to save cluster triage: ${escapeHtml(error?.message || 'unknown error')}</p>`;
+        }
+      };
       function renderHealth(d) {
         const overall = d.overall === 'pass' ? 'ok' : d.overall === 'warn' ? 'warn' : 'fail';
         let html = `<div class="health-header"><span class="badge ${overall}">${d.overall.toUpperCase()}</span> <span class="muted">${d.failures} failures, ${d.warnings} warnings</span></div>`;
@@ -2856,9 +3702,8 @@
           sending: false,
           creating: false,
           voiceStatus: null,
-          voiceMode: 'auto',
-          voiceAutoSpeak: true,
-          voiceExpressive: true,
+          voiceMode: 'local',
+          voiceAutoSpeak: true,          voiceExpressive: true,
           voiceListening: false,
           voiceTranscribing: false,
           voiceThinking: false,
@@ -3090,12 +3935,26 @@
               const d = await http.fetchJsonOrNull(http.buildUrl('/api/chat/context-summary', {
                 session_id: this.sessionId || undefined,
               }));
-              if (d) { this.summary = d; return; }
-              this.summary = await this.loadLegacyContextSummary();
+              if (d) {
+                if (this.summary?.task_beacon && d.task_beacon && window.mergeTaskBeaconSummary) {
+                  d.task_beacon = window.mergeTaskBeaconSummary(this.summary.task_beacon, d.task_beacon);
+                }
+                this.summary = d;
+                return;
+              }
+              const legacySummary = await this.loadLegacyContextSummary();
+              if (this.summary?.task_beacon && legacySummary.task_beacon && window.mergeTaskBeaconSummary) {
+                legacySummary.task_beacon = window.mergeTaskBeaconSummary(this.summary.task_beacon, legacySummary.task_beacon);
+              }
+              this.summary = legacySummary;
             } catch (e) {
               console.error(e);
               try {
-                this.summary = await this.loadLegacyContextSummary();
+                const legacySummary = await this.loadLegacyContextSummary();
+                if (this.summary?.task_beacon && legacySummary.task_beacon && window.mergeTaskBeaconSummary) {
+                  legacySummary.task_beacon = window.mergeTaskBeaconSummary(this.summary.task_beacon, legacySummary.task_beacon);
+                }
+                this.summary = legacySummary;
               } catch (fallbackError) {
                 console.error(fallbackError);
                 this.summary = null;
@@ -3103,26 +3962,31 @@
             }
           },
           async loadLegacyContextSummary() {
-            const [somatic, executive, work, tasks] = await http.fetchJsonAllSettled([
+            const [somatic, executive, work, tasks, taskBeacon] = await http.fetchJsonAllSettled([
               '/api/identity/somatic',
               '/api/executive/snapshot',
               '/api/operations/work?limit=6',
               '/api/operations/tasks?limit=6',
+              '/api/monitor/task-beacon',
             ]);
             return {
               session_id: this.sessionId || 'default',
               somatic,
               executive: executive || {},
-              current_work: work?.items?.[0]
-                ? {
-                    work_id: work.items[0].work_id,
-                    title: work.items[0].title || work.items[0].content || 'Current work',
-                    stage: work.items[0].stage,
-                    project_id: work.items[0].project_id,
-                    blocked_by: work.items[0].blocked_by || [],
+              current_work: (() => {
+                const current = (work?.items || []).find((item) => ['micro_task', 'project_seed', 'project'].includes(String(item.stage || '').toLowerCase()));
+                return current
+                  ? {
+                    work_id: current.work_id,
+                    title: current.title || current.content || 'Current work',
+                    stage: current.stage,
+                    project_id: current.project_id,
+                    blocked_by: current.blocked_by || [],
                   }
-                : null,
+                  : null;
+              })(),
               tasks: tasks || { counts: { total: 0, active: 0, waiting: 0, completed: 0, failed: 0 }, items: [] },
+              task_beacon: taskBeacon || { available: false, headline: 'now 0 • next 0 • later 0', counts: { matched: 0, now: 0, next: 0, later: 0, total: 0 }, bucket_signature: 'now:0|next:0|later:0', view_model: { buckets: [] }, rules: [] },
             };
           },
           renderContextSummary() {
@@ -3166,7 +4030,8 @@
             html += '<h4 class="mt-4">Executive State</h4>';
             html += `<p class="muted">Intention: ${escapeHtml(executive.intention || 'none')}</p>`;
             html += `<p class="muted">Active goals: ${escapeHtml((executive.active_goals || []).join(' • ') || 'none')}</p>`;
-            html += `<p class="muted">Queued work ${executive.queued_work_count ?? 0} • capacity remaining ${executive.capacity_remaining ?? 0}${executive.recommend_pause ? ' • recommend pause' : ''}</p>`;
+            const queueCounts = executive.queue?.counts || {};
+            html += `<p class="muted">Queue ${queueCounts.total ?? executive.queued_work_count ?? 0} • active ${queueCounts.active ?? 0} • held ${queueCounts.held ?? 0} • ready ${queueCounts.ready ?? 0} • queued ${queueCounts.queued ?? 0} • waiting ${queueCounts.waiting ?? 0} • capacity remaining ${executive.capacity_remaining ?? 0}${executive.recommend_pause ? ' • recommend pause' : ''}</p>`;
             html += '<h4 class="mt-4">Consolidation</h4>';
             if (consolidation.available) {
               html += `<p class="muted">Last run ${formatDateTime(consolidation.timestamp)} • merged ${consolidation.commitments_consolidated ?? 0} • chat recovery ${consolidation.commitments_extracted_from_chat ?? 0} • work created ${consolidation.commitment_work_objects_created ?? 0}</p>`;
@@ -3190,6 +4055,10 @@
               });
               html += '</div>';
             }
+            const taskBeacon = summary.task_beacon || {};
+            html += (window.renderTaskBeaconSummary
+              ? window.renderTaskBeaconSummary(taskBeacon, escapeHtml)
+              : '<h4>Task Beacon</h4><p class="muted">Task beacon renderer unavailable.</p>');
             return html;
           },
           filteredMessages() {
@@ -3522,7 +4391,7 @@
           voiceStatusText() {
             if (this.voiceListening) return 'Listening for your voice…';
             if (this.voiceTranscribing) return 'Transcribing audio…';
-            if (this.voiceThinking) return 'The agent is thinking…';
+            if (this.voiceThinking) return 'the OpenCAS agent is thinking…';
             if (this.voiceSynthesizing) return 'Rendering speech…';
             if (this.voicePlaying) return 'Playing speech…';
             if (this.voiceError) return this.voiceError;
@@ -3687,6 +4556,7 @@
               form.append('language_code', 'en');
               const result = await http.fetchJson('/api/chat/voice/transcribe', {
                 method: 'POST',
+                credentials: 'include',
                 body: form,
               });
               this.pendingVoiceInput = result.voice_input;
@@ -3697,7 +4567,7 @@
               }
             } catch (error) {
               console.error(error);
-              this.voiceError = 'Transcription failed.';
+              this.voiceError = error instanceof Error ? error.message : 'Transcription failed.';
             }
             this.voiceTranscribing = false;
           },
@@ -3711,7 +4581,8 @@
                 this.currentVoiceAudio.pause();
                 this.currentVoiceAudio = null;
               }
-              const audio = new Audio(`${voiceOutput.url}${voiceOutput.url.includes('?') ? '&' : '?'}t=${Date.now()}`);
+              const audioUrl = http.resolveUrl(voiceOutput.url);
+              const audio = new Audio(`${audioUrl}${audioUrl.includes('?') ? '&' : '?'}t=${Date.now()}`);
               this.currentVoiceAudio = audio;
               this.voiceSynthesizing = false;
               this.voicePlaying = true;
@@ -3745,6 +4616,7 @@
               this.voiceSynthesizing = true;
               const result = await http.fetchJson('/api/chat/voice/synthesize', {
                 method: 'POST',
+                credentials: 'include',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                   text: message.content,
@@ -3977,7 +4849,7 @@
           },
         };
       }
-      // memoryApp() lives in /dashboard/static/js/memory_app.js.
+      // memoryApp() lives in dashboard/static/js/memory_app.js.
       function renderSessions(d) {
         if (!d.sessions.length) return '<p class="muted">No sessions.</p>';
         let html = '<table class="data-table"><thead><tr><th>Session</th><th>Messages</th><th>Last Active</th></tr></thead><tbody>';
@@ -4475,7 +5347,7 @@
           <div><div class="stat-value">${counts.failed ?? 0}</div><div class="stat-label">Failed</div></div>
         </div>`;
         if (!items.length) return html + '<p class="muted mt-4">No background tasks.</p>';
-        html += '<table class="data-table"><thead><tr><th>Task</th><th>Status</th><th>Source</th><th>Updated</th><th>Inspect</th></tr></thead><tbody>';
+        html += '<table class="data-table"><thead><tr><th>Task</th><th>Status</th><th>Loop</th><th>Source</th><th>Updated</th><th>Inspect</th></tr></thead><tbody>';
         for (const item of items) {
           const statusClass = item.status === 'completed'
             ? 'ok'
@@ -4490,6 +5362,7 @@
           html += `<tr>
             <td><div>${escapeHtml(item.title || '-')}</div>${dup}<div class="muted mt-1"><code>${escapeHtml(item.task_id || '-')}</code></div></td>
             <td><span class="badge ${statusClass}">${escapeHtml(item.status || 'unknown')}</span><div class="muted mt-1">${escapeHtml(item.stage || '-')}</div></td>
+            <td>${escapeHtml(item.loop_stop_cause || '-')}<div class="muted mt-1">${escapeHtml(item.latest_artifact || item.latest_evidence || item.latest_blocker || item.latest_meaningful_signal || '-')}</div></td>
             <td>${escapeHtml(item.source || '-')}</td>
             <td>${formatDateTime(item.updated_at)}</td>
             <td class="inline-actions"><button class="button-secondary" onclick="showOperationDetail('/api/operations/tasks/${encodeURIComponent(item.task_id)}')">View</button></td>
@@ -4516,6 +5389,17 @@
         html += `<p class="muted">Updated: ${formatDateTime(task.updated_at)} • Created: ${formatDateTime(task.created_at)}</p>`;
         if ((task.duplicate_objective_count || 1) > 1) {
           html += `<p class="muted">This objective appears <strong>${task.duplicate_objective_count}</strong> times in the task store.</p>`;
+        }
+        const loop = task.meaningful_loop || {};
+        if (loop.loop_stop_cause || loop.latest_artifact || loop.latest_evidence || loop.latest_blocker) {
+          html += '<h4 class="mt-4">Meaningful Loop</h4>';
+          html += `<table class="data-table"><tbody>
+            <tr><th>Stop Cause</th><td>${escapeHtml(loop.loop_stop_cause || '-')}</td></tr>
+            <tr><th>Signal</th><td>${escapeHtml(loop.latest_meaningful_signal || '-')}</td></tr>
+            <tr><th>Artifact</th><td class="wrap-code">${escapeHtml(loop.latest_artifact || '-')}</td></tr>
+            <tr><th>Evidence</th><td>${escapeHtml(loop.latest_evidence || '-')}</td></tr>
+            <tr><th>Blocker</th><td>${escapeHtml(loop.latest_blocker || '-')}</td></tr>
+          </tbody></table>`;
         }
         html += `<h4 class="mt-4">Objective</h4><pre class="json">${escapeHtml(task.objective || '')}</pre>`;
         if (transitions.length) {
@@ -4832,13 +5716,24 @@
       }
       function renderPhoneStatus(d) {
         const status = d.status || d || {};
+        window.__lastPhoneStatus = status;
         const owner = status.owner || {};
         const contacts = status.contacts || [];
         const webhookUrls = status.webhook_urls || {};
+        const sessionProfiles = status.session_profiles || {};
+        const ownerSession = sessionProfiles.owner_entry || {};
+        const publicSession = sessionProfiles.public_main || {};
+        const ownerPinSession = sessionProfiles.owner_pin || {};
+        const employerSession = sessionProfiles.employer || {};
+        const rejectSession = sessionProfiles.reject || {};
+        const menuSource = status.menu_config_source || {};
+        const menuConfig = status.menu_config || {};
+        const recentCalls = status.recent_calls || [];
+        const recentEvents = status.recent_events || [];
         const selectedNumber = status.selected_number || null;
         const phoneUiMessage = window.__phoneUiMessage || null;
-        const contactJson = contacts.length ? JSON.stringify(contacts, null, 2) : '[]';
         const defaultCallMessage = "Hi, it's your OpenCAS assistant calling.";
+        const menuConfigJson = JSON.stringify(menuConfig, null, 2);
         let html = `<h3>Phone Bridge</h3>
           <p class="muted">Twilio voice channel for owner calls, low-trust caller workspaces, voicemail capture, and caller-scoped knowledge QA.</p>`;
         if (phoneUiMessage?.text) {
@@ -4849,9 +5744,11 @@
         html += `<div class="stat-grid">
           <div><div class="stat-value">${status.enabled ? 'on' : 'off'}</div><div class="stat-label">Enabled</div></div>
           <div><div class="stat-value">${status.twilio_credentials_configured ? 'saved' : 'missing'}</div><div class="stat-label">Twilio Creds</div></div>
+          <div><div class="stat-value">${status.elevenlabs_api_key_configured && status.elevenlabs_voice_id ? 'saved' : 'missing'}</div><div class="stat-label">Voice Config</div></div>
           <div><div class="stat-value">${status.webhook_secret_configured ? 'set' : 'unset'}</div><div class="stat-label">Bridge Secret</div></div>
-          <div><div class="stat-value">${status.twilio_from_number ? escapeHtml(status.twilio_from_number) : 'unset'}</div><div class="stat-label">Agent Number</div></div>
+          <div><div class="stat-value">${status.twilio_from_number ? escapeHtml(status.twilio_from_number) : 'unset'}</div><div class="stat-label">Assistant Number</div></div>
           <div><div class="stat-value">${owner.phone_number ? escapeHtml(owner.phone_number) : 'unset'}</div><div class="stat-label">Owner Number</div></div>
+          <div><div class="stat-value">${owner.pin_configured ? 'set' : 'unset'}</div><div class="stat-label">Owner PIN</div></div>
           <div><div class="stat-value">${contacts.length}</div><div class="stat-label">Approved Callers</div></div>
           <div><div class="stat-value">${status.webhook_signature_required ? 'strict' : 'off'}</div><div class="stat-label">Signature Check</div></div>
         </div>`;
@@ -4862,8 +5759,45 @@
               <span class="badge ${status.twilio_credentials_configured ? 'ok' : 'warn'}">${escapeHtml(status.twilio_credentials_configured ? 'ready for Twilio' : 'Twilio creds missing')}</span>
             </div>
             <p class="muted">Voice callbacks: ${webhookUrls.voice ? `<code>${escapeHtml(webhookUrls.voice)}</code>` : 'set a public base URL to generate webhook targets.'}</p>
-            <p class="muted">Speech synthesis reuses the existing voice pipeline and falls back to Twilio speech if ElevenLabs is unavailable.</p>
-            ${selectedNumber ? `<p class="muted mt-3">Last autoconfigure selected <code>${escapeHtml(selectedNumber.phone_number || selectedNumber.friendly_name || selectedNumber.sid || '-')}</code> and pointed voice webhooks to <code>${escapeHtml((status.webhook_update || {}).voice_url || webhookUrls.voice || '-')}</code>.</p>` : '<p class="muted mt-3">Autoconfigure will discover the account number, set its voice webhook, and persist the selected agent line.</p>'}
+            <p class="muted">Speech synthesis uses the configured voice pipeline and falls back to local Edge TTS if ElevenLabs is unavailable.</p>
+            <p class="muted">Voice identity: <code>${escapeHtml(status.elevenlabs_voice_id || 'unset')}</code> • local fallback <code>${escapeHtml(status.edge_tts_voice || 'Aira')}</code></p>
+            <p class="muted">Screening menu config: <code>${escapeHtml(status.menu_config_path || 'operator default')}</code></p>
+            <p class="muted">Dashboard-edited menu path: <code>${escapeHtml(menuSource.editable_path || '-')}</code> • source <code>${escapeHtml(menuSource.path || '-')}</code></p>
+            ${selectedNumber ? `<p class="muted mt-3">Last autoconfigure selected <code>${escapeHtml(selectedNumber.phone_number || selectedNumber.friendly_name || selectedNumber.sid || '-')}</code> and pointed voice webhooks to <code>${escapeHtml((status.webhook_update || {}).voice_url || webhookUrls.voice || '-')}</code>.</p>` : '<p class="muted mt-3">Autoconfigure will discover the account number, set its voice webhook, and persist the selected assistant line.</p>'}
+            <h4 class="mt-4">Phone Sessions</h4>
+            <div class="stat-grid">
+              <div><div class="stat-value">${escapeHtml(ownerSession.continue_digit || '1')}</div><div class="stat-label">Owner Continue</div></div>
+              <div><div class="stat-value">${employerSession.enabled ? escapeHtml(employerSession.digit || '1') : 'off'}</div><div class="stat-label">Employer Route</div></div>
+              <div><div class="stat-value">${rejectSession.enabled ? escapeHtml(rejectSession.digit || '2') : 'off'}</div><div class="stat-label">Reject Route</div></div>
+              <div><div class="stat-value">${escapeHtml(employerSession.prompt_profile || 'unset')}</div><div class="stat-label">Employer Profile</div></div>
+            </div>
+            <p class="muted mt-3">Owner entry: ${escapeHtml(ownerSession.prompt || 'unset')}</p>
+            <p class="muted">Public screening: ${escapeHtml(publicSession.prompt || 'unset')}</p>
+            <p class="muted">Employer greeting: ${escapeHtml(employerSession.greeting || 'unset')}</p>
+            <p class="muted">Reject message: ${escapeHtml(rejectSession.message || 'unset')}</p>
+            <h4 class="mt-4">Recent Calls</h4>
+            ${recentCalls.length ? `
+              <table class="data-table"><thead><tr><th>Last Seen</th><th>Caller</th><th>Mode</th><th>Last Event</th><th>Notes</th></tr></thead><tbody>
+                ${recentCalls.map(call => `<tr>
+                  <td>${formatDateTime(call.last_at)}</td>
+                  <td><code>${escapeHtml(call.caller_number || '-')}</code><div class="muted">${escapeHtml(call.call_sid || '-')}</div></td>
+                  <td>${escapeHtml(call.mode || '-')}</td>
+                  <td>${escapeHtml(call.current_state || call.last_event || '-')}<div class="muted">${escapeHtml(call.last_event || '-')}</div></td>
+                  <td>${escapeHtml(call.hangup_reason || call.last_summary || '-')}<div class="muted">${escapeHtml(`events ${call.event_count || 0} • issues ${call.issue_count || 0}`)}</div><div class="muted">${escapeHtml(`terminal ${call.terminal_action || '-'} • hangup ${call.hangup_class || '-'}`)}</div><div class="inline-actions mt-2"><button class="button-secondary" onclick="inspectPhoneCall('${encodeDashboardValue(call.call_sid || '')}')">Inspect</button></div></td>
+                </tr>`).join('')}
+              </tbody></table>`
+              : '<p class="muted">No recent phone calls have been traced yet.</p>'}
+            <h4 class="mt-4">Recent Phone Events</h4>
+            ${recentEvents.length ? `
+              <table class="data-table"><thead><tr><th>Time</th><th>Event</th><th>Caller</th><th>Summary</th></tr></thead><tbody>
+                ${recentEvents.map(item => `<tr>
+                  <td>${formatDateTime(item.timestamp)}</td>
+                  <td>${escapeHtml(item.label || item.event || '-')}</td>
+                  <td><code>${escapeHtml(item.caller_number || '-')}</code></td>
+                  <td>${escapeHtml(item.summary || '-')}</td>
+                </tr>`).join('')}
+              </tbody></table>`
+              : '<p class="muted">No recent phone telemetry events are available yet.</p>'}
             <h4 class="mt-4">Configured Callers</h4>
             ${contacts.length ? `
               <table class="data-table"><thead><tr><th>Caller</th><th>Actions</th><th>Workspace</th><th>Notes</th></tr></thead><tbody>
@@ -4875,8 +5809,108 @@
                 </tr>`).join('')}
               </tbody></table>`
               : '<p class="muted">No approved non-owner callers are configured yet.</p>'}
+            ${phoneCallDetailPanelHtml()}
           </div>
           <div>
+            <h4>Session Profiles</h4>
+            <form class="telegram-config-form" onsubmit="savePhoneSessionProfiles(event)">
+              <div class="control-grid">
+                <label class="field-label">Owner entry prompt
+                  <input id="phone-session-owner-entry-prompt" class="input" value="${escapeHtml(ownerSession.prompt || '')}" placeholder="Hi, this is the OpenCAS agent. Press 1..." />
+                </label>
+                <label class="field-label">Owner entry reprompt
+                  <input id="phone-session-owner-entry-reprompt" class="input" value="${escapeHtml(ownerSession.reprompt || '')}" placeholder="Press 1 to continue..." />
+                </label>
+                <label class="field-label">Owner continue digit
+                  <input id="phone-session-owner-continue-digit" class="input" value="${escapeHtml(ownerSession.continue_digit || '1')}" maxlength="1" />
+                </label>
+                <label class="field-label">Owner fallback digit
+                  <input id="phone-session-owner-fallback-digit" class="input" value="${escapeHtml(ownerSession.fallback_digit || '2')}" maxlength="1" />
+                </label>
+                <label class="field-label">Owner PIN prompt
+                  <input id="phone-session-owner-pin-prompt" class="input" value="${escapeHtml(ownerPinSession.prompt || '')}" placeholder="Please enter your six digit owner PIN now." />
+                </label>
+                <label class="field-label">Owner PIN retry
+                  <input id="phone-session-owner-pin-retry-prompt" class="input" value="${escapeHtml(ownerPinSession.retry_prompt || '')}" placeholder="That PIN was not accepted..." />
+                </label>
+                <label class="field-label">Owner PIN success
+                  <input id="phone-session-owner-pin-success-message" class="input" value="${escapeHtml(ownerPinSession.success_message || '')}" placeholder="Thanks. You're verified." />
+                </label>
+                <label class="field-label">Owner PIN failure
+                  <input id="phone-session-owner-pin-failure-message" class="input" value="${escapeHtml(ownerPinSession.failure_message || '')}" placeholder="Sorry, I couldn't verify..." />
+                </label>
+                <label class="field-label">Public screening prompt
+                  <input id="phone-session-public-prompt" class="input" value="${escapeHtml(publicSession.prompt || '')}" placeholder="Potential employers, press 1..." />
+                </label>
+                <label class="field-label">Public screening reprompt
+                  <input id="phone-session-public-reprompt" class="input" value="${escapeHtml(publicSession.reprompt || '')}" placeholder="Please press 1 or say employer..." />
+                </label>
+                <label class="field-label">Employer route
+                  <select id="phone-session-employer-enabled" class="input">
+                    <option value="true" ${employerSession.enabled !== false ? 'selected' : ''}>Enabled</option>
+                    <option value="false" ${employerSession.enabled === false ? 'selected' : ''}>Disabled</option>
+                  </select>
+                </label>
+                <label class="field-label">Employer digit
+                  <input id="phone-session-employer-digit" class="input" value="${escapeHtml(employerSession.digit || '1')}" maxlength="1" />
+                </label>
+                <label class="field-label">Employer label
+                  <input id="phone-session-employer-label" class="input" value="${escapeHtml(employerSession.label || 'Potential employer')}" placeholder="Potential employer" />
+                </label>
+                <label class="field-label">Employer prompt profile
+                  <input id="phone-session-employer-prompt-profile" class="input" value="${escapeHtml(employerSession.prompt_profile || 'worksafe_owner')}" placeholder="worksafe_owner" />
+                </label>
+                <label class="field-label">Employer allowed actions
+                  <input id="phone-session-employer-allowed-actions" class="input" value="${escapeHtml((employerSession.allowed_actions || []).join(', '))}" placeholder="leave_message, knowledge_qa" />
+                </label>
+                <label class="field-label">Employer phrases
+                  <input id="phone-session-employer-phrases" class="input" value="${escapeHtml((employerSession.phrases || []).join(', '))}" placeholder="employer, recruiter, hiring" />
+                </label>
+                <label class="field-label">Employer shared workspace
+                  <input id="phone-session-employer-shared-workspace" class="input" value="${escapeHtml(employerSession.shared_workspace_subdir || 'phone/employer_shared')}" placeholder="phone/employer_shared" />
+                </label>
+                <label class="field-label">Employer caller workspace
+                  <input id="phone-session-employer-caller-workspace" class="input" value="${escapeHtml(employerSession.caller_workspace_subdir || 'phone/employers/{phone_digits}')}" placeholder="phone/employers/{phone_digits}" />
+                </label>
+                <label class="field-label">Reject route
+                  <select id="phone-session-reject-enabled" class="input">
+                    <option value="true" ${rejectSession.enabled !== false ? 'selected' : ''}>Enabled</option>
+                    <option value="false" ${rejectSession.enabled === false ? 'selected' : ''}>Disabled</option>
+                  </select>
+                </label>
+                <label class="field-label">Reject digit
+                  <input id="phone-session-reject-digit" class="input" value="${escapeHtml(rejectSession.digit || '2')}" maxlength="1" />
+                </label>
+                <label class="field-label">Reject label
+                  <input id="phone-session-reject-label" class="input" value="${escapeHtml(rejectSession.label || 'Not for this line')}" placeholder="Not for this line" />
+                </label>
+                <label class="field-label">Reject phrases
+                  <input id="phone-session-reject-phrases" class="input" value="${escapeHtml((rejectSession.phrases || []).join(', '))}" placeholder="other, public" />
+                </label>
+              </div>
+              <label class="field-label mt-3">Employer greeting
+                <textarea id="phone-session-employer-greeting" class="input" rows="5" placeholder="Employer-safe phone greeting">${escapeHtml(employerSession.greeting || '')}</textarea>
+              </label>
+              <label class="field-label mt-3">Reject message
+                <textarea id="phone-session-reject-message" class="input" rows="3" placeholder="Sorry, this service is not for you.">${escapeHtml(rejectSession.message || '')}</textarea>
+              </label>
+              <div class="inline-actions mt-4">
+                <button type="submit">Save Session Profiles</button>
+                <button type="button" class="button-secondary" onclick="refreshPhoneStatus()">Refresh</button>
+              </div>
+              <p class="muted mt-3">Use this editor for the spoken session flow. Advanced transport credentials, caller policy controls, and full menu editing remain below.</p>
+            </form>
+            <h4 class="mt-4">Advanced Menu Config</h4>
+            <form class="telegram-config-form" onsubmit="savePhoneMenuConfig(event)">
+              <label class="field-label">Phone menu JSON
+                <textarea id="phone-menu-config-json" class="input" rows="18" placeholder='{"default_menu_key":"public_main","menus":[] }'>${escapeHtml(menuConfigJson)}</textarea>
+              </label>
+              <div class="inline-actions mt-4">
+                <button type="submit">Save Advanced Menu Config</button>
+                <button type="button" class="button-secondary" onclick="refreshPhoneStatus()">Reload Current Menu</button>
+              </div>
+              <p class="muted mt-3">Use this when you need custom submenus, time announcements, or additional workspace-assistant routes beyond the simple session-profile editor above.</p>
+            </form>
             <h4>Phone Settings</h4>
             <form class="telegram-config-form" onsubmit="savePhoneConfig(event)">
               <div class="control-grid">
@@ -4898,11 +5932,29 @@
                 <label class="field-label">Bridge secret
                   <input id="phone-webhook-secret" class="input" value="" placeholder="${status.webhook_secret_configured ? 'stored; leave blank to keep' : 'generate or paste a shared secret'}" />
                 </label>
-                <label class="field-label">Agent number
-                  <input id="phone-twilio-from-number" class="input" value="${escapeHtml(status.twilio_from_number || '')}" placeholder="+15557654321" />
+                <label class="field-label">Menu config path
+                  <input id="phone-menu-config-path" class="input" value="${escapeHtml(status.menu_config_path || '')}" placeholder="operator_seed/phone/menu.json" />
+                </label>
+                <label class="field-label">Twilio env path
+                  <input id="phone-twilio-env-path" class="input" value="${escapeHtml(status.twilio_env_path || '')}" placeholder="~/.opencasenv/.twilio" />
+                </label>
+                <label class="field-label">Twilio account SID
+                  <input id="phone-twilio-account-sid" class="input" value="${escapeHtml(status.twilio_account_sid || '')}" placeholder="AC..." />
+                </label>
+                <label class="field-label">Twilio API key SID
+                  <input id="phone-twilio-api-key-sid" class="input" value="${escapeHtml(status.twilio_api_key_sid || '')}" placeholder="SK... or AC..." />
+                </label>
+                <label class="field-label">Twilio API secret
+                  <input id="phone-twilio-api-secret" class="input" type="password" value="" placeholder="${status.twilio_api_secret_configured ? 'stored; leave blank to keep' : 'paste Twilio API secret'}" />
+                </label>
+                <label class="field-label">Twilio auth token
+                  <input id="phone-twilio-auth-token" class="input" type="password" value="" placeholder="${status.twilio_auth_token_configured ? 'stored; leave blank to keep' : 'optional auth token for webhook validation'}" />
+                </label>
+                <label class="field-label">Assistant number
+                  <input id="phone-twilio-from-number" class="input" value="${escapeHtml(status.twilio_from_number || '')}" placeholder="+15551234567" />
                 </label>
                 <label class="field-label">Owner number
-                  <input id="phone-owner-number" class="input" value="${escapeHtml(owner.phone_number || '')}" placeholder="+15551234567" />
+                  <input id="phone-owner-number" class="input" value="${escapeHtml(owner.phone_number || '')}" placeholder="+15557654321" />
                 </label>
                 <label class="field-label">Owner display name
                   <input id="phone-owner-display-name" class="input" value="${escapeHtml(owner.display_name || 'Operator')}" placeholder="Operator" />
@@ -4910,14 +5962,64 @@
                 <label class="field-label">Owner workspace
                   <input id="phone-owner-workspace-subdir" class="input" value="${escapeHtml(owner.workspace_subdir || 'phone/owner')}" placeholder="phone/owner" />
                 </label>
+                <label class="field-label">Owner six-digit PIN
+                  <input id="phone-owner-pin" class="input" type="password" value="" placeholder="${owner.pin_configured ? 'stored; leave blank to keep' : 'optional 6 digit owner PIN'}" />
+                </label>
+                <label class="field-label">ElevenLabs env path
+                  <input id="phone-elevenlabs-env-path" class="input" value="${escapeHtml(status.elevenlabs_env_path || '')}" placeholder="~/.opencasenv/.env" />
+                </label>
+                <label class="field-label">ElevenLabs API key
+                  <input id="phone-elevenlabs-api-key" class="input" type="password" value="" placeholder="${status.elevenlabs_api_key_configured ? 'stored; leave blank to keep' : 'paste ElevenLabs API key'}" />
+                </label>
+                <label class="field-label">ElevenLabs voice id
+                  <input id="phone-elevenlabs-voice-id" class="input" value="${escapeHtml(status.elevenlabs_voice_id || '')}" placeholder="voice id" />
+                </label>
+                <label class="field-label">STT model
+                  <input id="phone-elevenlabs-stt-model" class="input" value="${escapeHtml(status.elevenlabs_stt_model || 'scribe_v2')}" placeholder="scribe_v2" />
+                </label>
+                <label class="field-label">Fast TTS model
+                  <input id="phone-elevenlabs-fast-model" class="input" value="${escapeHtml(status.elevenlabs_fast_model || 'eleven_flash_v2_5')}" placeholder="eleven_flash_v2_5" />
+                </label>
+                <label class="field-label">Expressive TTS model
+                  <input id="phone-elevenlabs-expressive-model" class="input" value="${escapeHtml(status.elevenlabs_expressive_model || 'eleven_v3')}" placeholder="eleven_v3" />
+                </label>
+                <label class="field-label">Edge fallback voice
+                  <input id="phone-edge-tts-voice" class="input" value="${escapeHtml(status.edge_tts_voice || 'Aira')}" placeholder="Aira" />
+                </label>
+                <label class="field-label">Phone TTS mode
+                  <select id="phone-tts-mode" class="input">
+                    <option value="fast" ${status.phone_tts_mode !== 'expressive' ? 'selected' : ''}>Fast</option>
+                    <option value="expressive" ${status.phone_tts_mode === 'expressive' ? 'selected' : ''}>Expressive</option>
+                  </select>
+                </label>
+                <label class="field-label">Min utterance bytes
+                  <input id="phone-min-utterance-bytes" class="input" type="number" min="160" max="16000" value="${escapeHtml(String(status.phone_min_utterance_bytes || 800))}" />
+                </label>
+                <label class="field-label">Silence gap seconds
+                  <input id="phone-silence-gap-seconds" class="input" type="number" min="0.3" max="3" step="0.05" value="${escapeHtml(String(status.phone_silence_gap_seconds || 1.0))}" />
+                </label>
+                <label class="field-label">Speech RMS threshold
+                  <input id="phone-speech-rms-threshold" class="input" type="number" min="40" max="2000" value="${escapeHtml(String(status.phone_speech_rms_threshold || 180))}" />
+                </label>
+                <label class="field-label">Speech preroll ms
+                  <input id="phone-preroll-ms" class="input" type="number" min="0" max="2000" value="${escapeHtml(String(status.phone_preroll_ms || 320))}" />
+                </label>
               </div>
               <p class="muted mt-2">The bridge secret is appended to Twilio webhook URLs and can be enforced at the VPS edge. Leave it blank to preserve the stored secret.</p>
-              <label class="field-label mt-3">Approved low-trust caller policies (JSON array)
-                <textarea id="phone-contacts-json" class="input" rows="10" placeholder='[{"phone_number":"+15550001111","display_name":"Alex","allowed_actions":["leave_message","knowledge_qa"],"workspace_subdir":"phone/contacts/alex","notes":"Client workspace notes"}]'>${escapeHtml(contactJson)}</textarea>
-              </label>
+              <div class="pill-row mt-2">
+                <label class="badge"><input id="phone-clear-twilio-api-secret" type="checkbox" /> Clear stored Twilio API secret</label>
+                <label class="badge"><input id="phone-clear-twilio-auth-token" type="checkbox" /> Clear stored Twilio auth token</label>
+                <label class="badge"><input id="phone-clear-owner-pin" type="checkbox" /> Clear stored owner PIN</label>
+                <label class="badge"><input id="phone-clear-elevenlabs-api-key" type="checkbox" /> Clear stored ElevenLabs API key</label>
+              </div>
+              <div class="mt-3">
+                <h5>Approved Caller Policies</h5>
+                <p class="muted">Manage approved low-trust callers here instead of editing raw JSON. Each caller can have a display name, action limits, a dedicated workspace path, and operator notes.</p>
+                ${renderPhoneContactsEditor(contacts)}
+              </div>
               <div class="control-grid mt-3">
                 <label class="field-label">Test call message
-                  <input id="phone-call-message" class="input" value="${escapeHtml(defaultCallMessage)}" placeholder="What the assistant should say when the call starts" />
+                  <input id="phone-call-message" class="input" value="${escapeHtml(defaultCallMessage)}" placeholder="What the OpenCAS agent should say when the call starts" />
                 </label>
                 <label class="field-label">Call reason
                   <input id="phone-call-reason" class="input" value="" placeholder="Optional trace note" />
@@ -4929,7 +6031,7 @@
                 <button type="button" class="button-secondary" onclick="callPhoneOwner()">Call Owner</button>
                 <button type="button" class="button-secondary" onclick="refreshPhoneStatus()">Refresh</button>
               </div>
-              <p class="muted mt-3">Autoconfigure uses the Twilio credentials already loaded for this host, discovers the account number, and updates its voice webhook when a public base URL is configured.</p>
+              <p class="muted mt-3">Autoconfigure uses the saved Twilio credentials, discovers the account number, and updates its voice webhook when a public base URL is configured.</p>
             </form>
           </div>
         </div>`;
@@ -5529,16 +6631,83 @@
       function getPhonePanel() {
         return document.querySelector('[data-panel="phone-status"]');
       }
+      function phoneCallDetailPanelHtml() {
+        return `<div id="phone-call-detail" class="mt-4"><p class="muted">Select a recent phone call to inspect its event timeline.</p></div>`;
+      }
       function setPhoneUiMessage(text, kind = 'warn') {
         window.__phoneUiMessage = text ? { text, kind } : null;
       }
-      function parsePhoneContactsJson(raw) {
+      function renderPhoneContactsEditor(contacts) {
+        const items = Array.isArray(contacts) && contacts.length ? contacts : [];
+        return `<div id="phone-contacts-editor" class="stack-sm">
+          <div class="inline-actions mb-2">
+            <button type="button" class="button-secondary" onclick="addPhoneContactRow()">Add Caller</button>
+          </div>
+          <div id="phone-contact-rows" class="stack-sm">
+            ${items.length ? items.map(renderPhoneContactRow).join('') : renderPhoneContactRow({})}
+          </div>
+        </div>`;
+      }
+      function renderPhoneContactRow(contact) {
+        const allowedActions = Array.isArray(contact.allowed_actions) ? contact.allowed_actions.join(', ') : '';
+        return `<div class="card card-subtle phone-contact-row">
+          <div class="control-grid">
+            <label class="field-label">Caller number
+              <input class="input" data-phone-contact="phone_number" value="${escapeHtml(contact.phone_number || '')}" placeholder="+15550001111" />
+            </label>
+            <label class="field-label">Display name
+              <input class="input" data-phone-contact="display_name" value="${escapeHtml(contact.display_name || '')}" placeholder="Alex" />
+            </label>
+            <label class="field-label">Allowed actions
+              <input class="input" data-phone-contact="allowed_actions" value="${escapeHtml(allowedActions)}" placeholder="leave_message, knowledge_qa" />
+            </label>
+            <label class="field-label">Workspace subdir
+              <input class="input" data-phone-contact="workspace_subdir" value="${escapeHtml(contact.workspace_subdir || '')}" placeholder="phone/contacts/alex" />
+            </label>
+          </div>
+          <label class="field-label mt-2">Notes
+            <textarea class="input" data-phone-contact="notes" rows="2" placeholder="Client workspace notes">${escapeHtml(contact.notes || '')}</textarea>
+          </label>
+          <div class="inline-actions mt-2">
+            <button type="button" class="button-secondary" onclick="removePhoneContactRow(this)">Remove</button>
+          </div>
+        </div>`;
+      }
+      function addPhoneContactRow() {
+        const container = document.getElementById('phone-contact-rows');
+        if (!container) return;
+        container.insertAdjacentHTML('beforeend', renderPhoneContactRow({}));
+      }
+      function removePhoneContactRow(button) {
+        const row = button?.closest?.('.phone-contact-row');
+        if (!row) return;
+        const container = document.getElementById('phone-contact-rows');
+        row.remove();
+        if (container && !container.children.length) {
+          container.insertAdjacentHTML('beforeend', renderPhoneContactRow({}));
+        }
+      }
+      function collectPhoneContactsPayload() {
+        const rows = Array.from(document.querySelectorAll('.phone-contact-row'));
+        return rows.map(row => {
+          const getValue = (field) => String(row.querySelector(`[data-phone-contact="${field}"]`)?.value || '').trim();
+          return {
+            phone_number: getValue('phone_number'),
+            display_name: getValue('display_name'),
+            allowed_actions: parseDelimitedValues(getValue('allowed_actions')),
+            workspace_subdir: getValue('workspace_subdir') || null,
+            notes: getValue('notes'),
+          };
+        }).filter(item => item.phone_number);
+      }
+      function parsePhoneMenuConfigJson(raw) {
         const trimmed = String(raw || '').trim();
-        if (!trimmed) return [];
+        if (!trimmed) throw new Error('Phone menu config JSON is required.');
         const parsed = JSON.parse(trimmed);
-        if (Array.isArray(parsed)) return parsed;
-        if (parsed && typeof parsed === 'object') return [parsed];
-        throw new Error('Approved caller policies must be a JSON object or array.');
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Phone menu config must be a JSON object.');
+        }
+        return parsed;
       }
       function collectPhoneConfigPayload() {
         return {
@@ -5546,12 +6715,105 @@
           public_base_url: (document.getElementById('phone-public-base-url')?.value || '').trim() || null,
           webhook_signature_required: document.getElementById('phone-signature-required')?.value !== 'false',
           webhook_secret: (document.getElementById('phone-webhook-secret')?.value || '').trim() || null,
+          menu_config_path: (document.getElementById('phone-menu-config-path')?.value || '').trim() || null,
+          twilio_env_path: (document.getElementById('phone-twilio-env-path')?.value || '').trim() || null,
+          twilio_account_sid: (document.getElementById('phone-twilio-account-sid')?.value || '').trim() || null,
+          twilio_api_key_sid: (document.getElementById('phone-twilio-api-key-sid')?.value || '').trim() || null,
+          twilio_api_secret: (document.getElementById('phone-twilio-api-secret')?.value || '').trim() || null,
+          clear_twilio_api_secret: Boolean(document.getElementById('phone-clear-twilio-api-secret')?.checked),
+          twilio_auth_token: (document.getElementById('phone-twilio-auth-token')?.value || '').trim() || null,
+          clear_twilio_auth_token: Boolean(document.getElementById('phone-clear-twilio-auth-token')?.checked),
           twilio_from_number: (document.getElementById('phone-twilio-from-number')?.value || '').trim() || null,
           owner_phone_number: (document.getElementById('phone-owner-number')?.value || '').trim() || null,
           owner_display_name: (document.getElementById('phone-owner-display-name')?.value || '').trim() || 'Operator',
           owner_workspace_subdir: (document.getElementById('phone-owner-workspace-subdir')?.value || '').trim() || 'phone/owner',
-          contacts: parsePhoneContactsJson(document.getElementById('phone-contacts-json')?.value || '[]'),
+          owner_pin: (document.getElementById('phone-owner-pin')?.value || '').trim() || null,
+          clear_owner_pin: Boolean(document.getElementById('phone-clear-owner-pin')?.checked),
+          elevenlabs_env_path: (document.getElementById('phone-elevenlabs-env-path')?.value || '').trim() || null,
+          elevenlabs_api_key: (document.getElementById('phone-elevenlabs-api-key')?.value || '').trim() || null,
+          clear_elevenlabs_api_key: Boolean(document.getElementById('phone-clear-elevenlabs-api-key')?.checked),
+          elevenlabs_voice_id: (document.getElementById('phone-elevenlabs-voice-id')?.value || '').trim() || null,
+          elevenlabs_stt_model: (document.getElementById('phone-elevenlabs-stt-model')?.value || '').trim() || 'scribe_v2',
+          elevenlabs_fast_model: (document.getElementById('phone-elevenlabs-fast-model')?.value || '').trim() || 'eleven_flash_v2_5',
+          elevenlabs_expressive_model: (document.getElementById('phone-elevenlabs-expressive-model')?.value || '').trim() || 'eleven_v3',
+          edge_tts_voice: (document.getElementById('phone-edge-tts-voice')?.value || '').trim() || 'Aira',
+          phone_tts_mode: (document.getElementById('phone-tts-mode')?.value || 'fast').trim() || 'fast',
+          phone_min_utterance_bytes: Number(document.getElementById('phone-min-utterance-bytes')?.value || 800),
+          phone_silence_gap_seconds: Number(document.getElementById('phone-silence-gap-seconds')?.value || 1.0),
+          phone_speech_rms_threshold: Number(document.getElementById('phone-speech-rms-threshold')?.value || 180),
+          phone_preroll_ms: Number(document.getElementById('phone-preroll-ms')?.value || 320),
+          contacts: collectPhoneContactsPayload(),
         };
+      }
+      function collectPhoneSessionProfilesPayload() {
+        return {
+          owner_entry_prompt: (document.getElementById('phone-session-owner-entry-prompt')?.value || '').trim(),
+          owner_entry_reprompt: (document.getElementById('phone-session-owner-entry-reprompt')?.value || '').trim(),
+          owner_continue_digit: (document.getElementById('phone-session-owner-continue-digit')?.value || '1').trim() || '1',
+          owner_fallback_digit: (document.getElementById('phone-session-owner-fallback-digit')?.value || '2').trim() || '2',
+          owner_pin_prompt: (document.getElementById('phone-session-owner-pin-prompt')?.value || '').trim(),
+          owner_pin_retry_prompt: (document.getElementById('phone-session-owner-pin-retry-prompt')?.value || '').trim(),
+          owner_pin_success_message: (document.getElementById('phone-session-owner-pin-success-message')?.value || '').trim(),
+          owner_pin_failure_message: (document.getElementById('phone-session-owner-pin-failure-message')?.value || '').trim(),
+          public_prompt: (document.getElementById('phone-session-public-prompt')?.value || '').trim(),
+          public_reprompt: (document.getElementById('phone-session-public-reprompt')?.value || '').trim(),
+          employer_enabled: document.getElementById('phone-session-employer-enabled')?.value !== 'false',
+          employer_digit: (document.getElementById('phone-session-employer-digit')?.value || '1').trim() || '1',
+          employer_label: (document.getElementById('phone-session-employer-label')?.value || '').trim() || 'Potential employer',
+          employer_phrases: parseDelimitedValues(document.getElementById('phone-session-employer-phrases')?.value || ''),
+          employer_greeting: (document.getElementById('phone-session-employer-greeting')?.value || '').trim(),
+          employer_prompt_profile: (document.getElementById('phone-session-employer-prompt-profile')?.value || '').trim() || 'worksafe_owner',
+          employer_allowed_actions: parseDelimitedValues(document.getElementById('phone-session-employer-allowed-actions')?.value || ''),
+          employer_shared_workspace_subdir: (document.getElementById('phone-session-employer-shared-workspace')?.value || '').trim() || 'phone/employer_shared',
+          employer_caller_workspace_subdir: (document.getElementById('phone-session-employer-caller-workspace')?.value || '').trim() || 'phone/employers/{phone_digits}',
+          reject_enabled: document.getElementById('phone-session-reject-enabled')?.value !== 'false',
+          reject_digit: (document.getElementById('phone-session-reject-digit')?.value || '2').trim() || '2',
+          reject_label: (document.getElementById('phone-session-reject-label')?.value || '').trim() || 'Not for this line',
+          reject_phrases: parseDelimitedValues(document.getElementById('phone-session-reject-phrases')?.value || ''),
+          reject_message: (document.getElementById('phone-session-reject-message')?.value || '').trim(),
+        };
+      }
+      function renderPhoneCallDetail(d) {
+        if (!d || !d.found) return `<div id="phone-call-detail" class="mt-4"><p class="muted">Phone call detail is not available.</p></div>`;
+        const call = d.call || {};
+        const phaseDurations = d.phase_durations || {};
+        const events = d.events || [];
+        const stateTimeline = d.state_timeline || [];
+        const visitedStates = call.visited_states || [];
+        return `<div id="phone-call-detail" class="mt-4">
+          <h4>Call Detail</h4>
+          <p class="muted">Caller <code>${escapeHtml(call.caller_number || '-')}</code> • call sid <code>${escapeHtml(call.call_sid || '-')}</code> • mode ${escapeHtml(call.mode || '-')}</p>
+          <div class="stat-grid">
+            <div><div class="stat-value">${escapeHtml(String(call.event_count || 0))}</div><div class="stat-label">Events</div></div>
+            <div><div class="stat-value">${escapeHtml(String(call.issue_count || 0))}</div><div class="stat-label">Issues</div></div>
+            <div><div class="stat-value">${escapeHtml(call.hangup_reason || '-')}</div><div class="stat-label">Hangup</div></div>
+            <div><div class="stat-value">${escapeHtml(call.current_state || '-')}</div><div class="stat-label">Current State</div></div>
+            <div><div class="stat-value">${escapeHtml(call.hangup_class || '-')}</div><div class="stat-label">Hangup Class</div></div>
+            <div><div class="stat-value">${escapeHtml(call.terminal_action || '-')}</div><div class="stat-label">Terminal Action</div></div>
+            <div><div class="stat-value">${escapeHtml(call.last_event || '-')}</div><div class="stat-label">Last Event</div></div>
+          </div>
+          <p class="muted mt-3">Visited states: ${escapeHtml(visitedStates.join(' → ') || '-')}</p>
+          <h5 class="mt-4">Phase Timing</h5>
+          <table class="data-table"><thead><tr><th>Phase</th><th>Seconds</th></tr></thead><tbody>
+            ${Object.entries(phaseDurations).map(([key, value]) => `<tr><td>${escapeHtml(key.replace(/_/g, ' '))}</td><td>${value == null ? '-' : escapeHtml(String(value))}</td></tr>`).join('')}
+          </tbody></table>
+          <h5 class="mt-4">State Timeline</h5>
+          ${stateTimeline.length ? `<table class="data-table"><thead><tr><th>Time</th><th>State</th><th>Reason</th></tr></thead><tbody>
+            ${stateTimeline.map(item => `<tr>
+              <td>${formatDateTime(item.timestamp)}</td>
+              <td>${escapeHtml(item.state || '-')}</td>
+              <td>${escapeHtml(item.reason || '-')}</td>
+            </tr>`).join('')}
+          </tbody></table>` : '<p class="muted">No derived state transitions are available for this call.</p>'}
+          <h5 class="mt-4">Event Timeline</h5>
+          ${events.length ? `<table class="data-table"><thead><tr><th>Time</th><th>Event</th><th>Summary</th></tr></thead><tbody>
+            ${events.map(item => `<tr>
+              <td>${formatDateTime(item.timestamp)}</td>
+              <td>${escapeHtml(item.label || item.event || '-')}</td>
+              <td>${escapeHtml(item.summary || '-')}</td>
+            </tr>`).join('')}
+          </tbody></table>` : '<p class="muted">No timeline events are available for this call.</p>'}
+        </div>`;
       }
       async function refreshTelegramStatus() {
         const panel = getTelegramPanel();
@@ -5643,6 +6905,44 @@
           await refreshPhoneStatus();
         }
       }
+      async function savePhoneSessionProfiles(event) {
+        event.preventDefault();
+        const panel = getPhonePanel();
+        if (!panel) return;
+        const payload = collectPhoneSessionProfilesPayload();
+        panel.innerHTML = '<p class="muted">Saving phone session profiles…</p>';
+        try {
+          const data = await requestConfigJson('/api/phone/session-profiles', {
+            method: 'POST',
+            body: JSON.stringify(payload),
+          });
+          setPhoneUiMessage('Phone session profiles were saved to the dashboard-editable menu config.', 'ok');
+          panel.innerHTML = renderPhoneStatus(data);
+        } catch (error) {
+          setPhoneUiMessage(String(error), 'error');
+          await refreshPhoneStatus();
+        }
+      }
+      async function savePhoneMenuConfig(event) {
+        event.preventDefault();
+        const panel = getPhonePanel();
+        if (!panel) return;
+        setPhoneUiMessage('Saving advanced phone menu config…', 'warn');
+        panel.innerHTML = renderPhoneStatus({ ...(window.__lastPhoneStatus || {}), status: window.__lastPhoneStatus || {} });
+        try {
+          const payload = { config: parsePhoneMenuConfigJson(document.getElementById('phone-menu-config-json')?.value || '') };
+          const data = await requestConfigJson('/api/phone/menu-config', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          setPhoneUiMessage('Advanced phone menu config saved.', 'ok');
+          panel.innerHTML = renderPhoneStatus(data);
+        } catch (error) {
+          setPhoneUiMessage(String(error), 'error');
+          panel.innerHTML = renderPhoneStatus({ ...(window.__lastPhoneStatus || {}), status: window.__lastPhoneStatus || {} });
+        }
+      }
       async function autoconfigurePhoneBridge() {
         const panel = getPhonePanel();
         if (!panel) return;
@@ -5663,6 +6963,11 @@
               public_base_url: payload.public_base_url,
               webhook_signature_required: payload.webhook_signature_required,
               webhook_secret: payload.webhook_secret,
+              twilio_env_path: payload.twilio_env_path,
+              twilio_account_sid: payload.twilio_account_sid,
+              twilio_api_key_sid: payload.twilio_api_key_sid,
+              twilio_api_secret: payload.twilio_api_secret,
+              twilio_auth_token: payload.twilio_auth_token,
               twilio_from_number: payload.twilio_from_number,
               owner_phone_number: payload.owner_phone_number,
               owner_display_name: payload.owner_display_name,
@@ -5671,7 +6976,7 @@
           });
           const selected = data.selected_number?.phone_number || data.twilio_from_number || 'the discovered number';
           const note = data.note ? ` ${data.note}` : '';
-          setPhoneUiMessage(`Twilio autoconfigure completed and saved ${selected} as the agent line.${note}`, 'ok');
+          setPhoneUiMessage(`Twilio autoconfigure completed and saved ${selected} as the assistant line.${note}`, 'ok');
           panel.innerHTML = renderPhoneStatus(data);
         } catch (error) {
           setPhoneUiMessage(String(error), 'error');
@@ -5695,6 +7000,20 @@
         } catch (error) {
           setPhoneUiMessage(String(error), 'error');
           await refreshPhoneStatus();
+        }
+      }
+      async function inspectPhoneCall(callSidEncoded) {
+        const panel = getPhonePanel();
+        if (!panel) return;
+        const detailPanel = panel.querySelector('#phone-call-detail');
+        if (!detailPanel) return;
+        const callSid = decodeDashboardValue(callSidEncoded);
+        detailPanel.innerHTML = '<p class="muted">Loading phone call detail…</p>';
+        try {
+          const data = await requestConfigJson(`/api/phone/recent-calls/${encodeURIComponent(callSid)}`);
+          detailPanel.outerHTML = renderPhoneCallDetail(data);
+        } catch (error) {
+          detailPanel.innerHTML = `<p class="muted">${escapeHtml(String(error))}</p>`;
         }
       }
       // renderProjection() lives in /dashboard/static/js/memory_app.js.
@@ -5835,6 +7154,35 @@
       function renderSomatic(d) {
         return renderSomaticPanel(d, 'somaticRadarChart', 'Somatic State');
       }
+      function renderTom(d) {
+        if (!d || d.available === false) return '<p class="muted">Theory-of-mind state not available.</p>';
+        const beliefs = d.belief_counts || {};
+        const intentions = d.intention_counts || {};
+        const consistency = d.consistency || {};
+        let html = '<h4>Theory Of Mind</h4>';
+        html += '<div class="stat-grid">';
+        html += '<div><div class="stat-value">' + (beliefs.total ?? 0) + '</div><div class="stat-label">Beliefs</div></div>';
+        html += '<div><div class="stat-value">' + (intentions.total ?? 0) + '</div><div class="stat-label">Intentions</div></div>';
+        html += '<div><div class="stat-value">' + (intentions.active ?? 0) + '</div><div class="stat-label">Active</div></div>';
+        html += '<div><div class="stat-value">' + ((consistency.contradictions || []).length) + '</div><div class="stat-label">Contradictions</div></div>';
+        html += '</div>';
+        html += '<h5 class="mt-4">Belief Subjects</h5><table class="data-table"><thead><tr><th>Subject</th><th>Count</th></tr></thead><tbody>';
+        Object.entries(beliefs.by_subject || {}).forEach(([key, value]) => {
+          html += '<tr><td>' + escapeHtml(key) + '</td><td>' + escapeHtml(String(value)) + '</td></tr>';
+        });
+        html += '</tbody></table>';
+        html += '<h5 class="mt-4">Recent Intentions</h5>';
+        if ((d.recent_intentions || []).length) {
+          html += '<table class="data-table"><thead><tr><th>Status</th><th>Actor</th><th>Content</th></tr></thead><tbody>';
+          (d.recent_intentions || []).slice(0, 5).forEach(item => {
+            html += '<tr><td><span class="badge">' + escapeHtml(item.status || '-') + '</span></td><td>' + escapeHtml(item.actor || '-') + '</td><td>' + escapeHtml(item.content || '-') + '</td></tr>';
+          });
+          html += '</tbody></table>';
+        } else {
+          html += '<p class="muted">No durable intentions recorded.</p>';
+        }
+        return html;
+      }
       function renderExecutiveSnapshot(d) {
         let html = '<h4>Executive Snapshot</h4>';
         html += '<p class="muted">Intention: <strong>' + escapeHtml(d.intention || '-') + '</strong></p>';
@@ -5844,7 +7192,21 @@
         html += '<div><div class="stat-value">' + (d.recommend_pause ? 'Yes' : 'No') + '</div><div class="stat-label">Pause?</div></div>';
         html += '</div>';
         html += renderTagList('Active Goals', d.active_goals || []);
-        if ((d.queue_stages || []).length) {
+        const queueItems = d.queue_metadata || [];
+        if (queueItems.length) {
+          html += '<h5 class="mt-4">Queue states</h5><div class="chat-task-list">';
+          queueItems.forEach(item => {
+            const state = item.state || item.role || 'held';
+            const badgeClass = state === 'active' ? 'ok' : 'muted';
+            const label = item.state_label || item.role_label || (state === 'active' ? 'Active' : 'Held');
+            const bearing = item.bearing_label ? `<span class="badge muted">${escapeHtml(item.bearing_label)}</span>` : '';
+            html += `<div class="chat-task-item">
+              <div>${escapeHtml(item.title || item.work_id || '-')}</div>
+              <div class="muted"><span class="badge ${badgeClass}">${escapeHtml(label)}</span>${bearing ? ` ${bearing}` : ''} • stage ${escapeHtml(item.stage || '-')} • position ${item.position ?? 0}</div>
+            </div>`;
+          });
+          html += '</div>';
+        } else if ((d.queue_stages || []).length) {
           html += '<p class="muted mt-4">Queue stages: ' + escapeHtml((d.queue_stages || []).join(', ')) + '</p>';
         }
         return html;
@@ -5945,6 +7307,7 @@
         items: [],
         runs: [],
         calendar: [],
+        agenda: null,
         loading: false,
         saving: false,
         message: '',
@@ -5983,10 +7346,15 @@
         async refreshAll() {
           this.loading = true;
           try {
-            await Promise.all([this.loadItems(), this.loadCalendar(), this.loadRuns()]);
+            await Promise.all([this.loadItems(), this.loadCalendar(), this.loadRuns(), this.loadAgenda()]);
           } finally {
             this.loading = false;
           }
+        },
+        async loadAgenda() {
+          const response = await fetch('/api/schedule/agenda?horizon_hours=24&upcoming_limit=8&recent_limit=8');
+          const data = await response.json();
+          this.agenda = data || null;
         },
         async loadItems() {
           const params = new URLSearchParams({ limit: '100' });
@@ -6113,6 +7481,38 @@
           html += '</tbody></table>';
           return html;
         },
+        renderAgenda() {
+          if (!this.agenda || this.agenda.available === false) return '<p class="muted">No temporal agenda available.</p>';
+          const counts = this.agenda.counts || {};
+          const next = this.agenda.next || null;
+          let html = '<div class="stat-grid">';
+          html += `<div><div class="stat-value">${counts.due_now ?? 0}</div><div class="stat-label">Due now</div></div>`;
+          html += `<div><div class="stat-value">${counts.upcoming ?? 0}</div><div class="stat-label">Upcoming 24h</div></div>`;
+          html += `<div><div class="stat-value">${counts.active ?? 0}</div><div class="stat-label">Active</div></div>`;
+          html += `<div><div class="stat-value">${counts.recent_runs ?? 0}</div><div class="stat-label">Recent runs</div></div>`;
+          html += '</div>';
+          html += `<p class="muted mt-3">${escapeHtml(this.agenda.summary || '')}</p>`;
+          if (next) {
+            html += `<p class="mt-3"><strong>Next:</strong> ${escapeHtml(next.title || '-')} <span class="badge">${escapeHtml(next.kind || '-')}</span> <span class="muted">${formatDateTime(next.next_run_at)}</span></p>`;
+          }
+          const due = this.agenda.due_now || [];
+          if (due.length) {
+            html += '<table class="data-table mt-3"><thead><tr><th>Due</th><th>Action</th><th>Priority</th></tr></thead><tbody>';
+            for (const item of due.slice(0, 5)) {
+              html += `<tr><td>${escapeHtml(item.title || '-')}<div class="muted mt-1">${escapeHtml((item.tags || []).join(', ') || '-')}</div></td><td>${escapeHtml(item.action || '-')}</td><td>${escapeHtml(String(item.priority ?? '-'))}</td></tr>`;
+            }
+            html += '</tbody></table>';
+          }
+          const upcoming = this.agenda.upcoming || [];
+          if (upcoming.length) {
+            html += '<table class="data-table mt-3"><thead><tr><th>Upcoming</th><th>When</th><th>Kind</th></tr></thead><tbody>';
+            for (const item of upcoming.slice(0, 5)) {
+              html += `<tr><td>${escapeHtml(item.title || '-')}</td><td>${formatDateTime(item.next_run_at)}</td><td><span class="badge">${escapeHtml(item.kind || '-')}</span></td></tr>`;
+            }
+            html += '</tbody></table>';
+          }
+          return html;
+        },
         renderRuns() {
           if (!this.runs.length) return '<p class="muted">No schedule runs yet.</p>';
           let html = '<table class="data-table"><thead><tr><th>Status</th><th>Scheduled</th><th>Task</th><th>Error</th></tr></thead><tbody>';
@@ -6138,6 +7538,20 @@
         async initUsage() {
           await this.refreshUsage();
           this._refreshTimer = setInterval(() => this.refreshUsage(), 30000);
+        },
+        destroy() {
+          if (this._refreshTimer) {
+            clearInterval(this._refreshTimer);
+            this._refreshTimer = null;
+          }
+          if (this._trendChart) {
+            this._trendChart.destroy();
+            this._trendChart = null;
+          }
+          if (this._providerChart) {
+            this._providerChart.destroy();
+            this._providerChart = null;
+          }
         },
         async refreshUsage() {
           this.loading = true;
@@ -6263,6 +7677,24 @@
           await this.refreshAll();
           this._refreshTimer = setInterval(() => this.refreshAll(), 30000);
         },
+        destroy() {
+          if (this._refreshTimer) {
+            clearInterval(this._refreshTimer);
+            this._refreshTimer = null;
+          }
+          if (this._tokenChart) {
+            this._tokenChart.destroy();
+            this._tokenChart = null;
+          }
+          if (this._somaticChart) {
+            this._somaticChart.destroy();
+            this._somaticChart = null;
+          }
+          if (this._musubiChart) {
+            this._musubiChart.destroy();
+            this._musubiChart = null;
+          }
+        },
         async refreshAll() {
           await Promise.allSettled([
             this.loadTokenChart(),
@@ -6381,6 +7813,6 @@
       };
     };
   </script>
-  <script src="/dashboard/static/js/memory_app.js"></script>
+  <script src="dashboard/static/js/memory_app.js"></script>
 </body>
 </html>

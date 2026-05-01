@@ -18,16 +18,21 @@ class ConversationCompactor:
         llm: LLMClient,
         tracer: Optional[Tracer] = None,
         context_store: Optional[Any] = None,
+        identity: Optional[Any] = None,
+        embeddings: Optional[Any] = None,
     ) -> None:
         self.memory = memory
         self.llm = llm
         self.tracer = tracer
         self.context_store = context_store
+        self.identity = identity
+        self.embeddings = embeddings
 
     async def compact_session(
         self,
         session_id: str,
         tail_size: int = 10,
+        min_removed_count: int = 1,
     ) -> Optional[CompactionRecord]:
         """Compact old episodes for a session, keeping the most recent *tail_size*."""
         episodes = await self.memory.list_non_compacted_episodes(
@@ -37,6 +42,8 @@ class ConversationCompactor:
             return None
 
         to_compact = episodes[: len(episodes) - tail_size]
+        if len(to_compact) < max(1, min_removed_count):
+            return None
 
         # Prefer reconstructed conversation messages for summarization
         if self.context_store is not None:
@@ -60,15 +67,46 @@ class ConversationCompactor:
         else:
             summary = await self._summarize_episodes(to_compact)
 
+        avg_confidence = sum(e.confidence_score for e in to_compact) / len(to_compact) if to_compact else 0.8
+        embedding_id = None
+        if self.embeddings is not None:
+            try:
+                record = await self.embeddings.embed(
+                    summary,
+                    task_type="memory_compaction",
+                    meta={
+                        "source": "compaction",
+                        "session_id": session_id,
+                        "removed_count": len(to_compact),
+                    },
+                )
+                embedding_id = record.source_hash
+            except Exception as exc:
+                if self.tracer:
+                    self.tracer.log(
+                        EventKind.MEMORY_COMPACT,
+                        "Compaction summary embedding failed",
+                        {
+                            "session_id": session_id,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        },
+                    )
+
         memory = Memory(
             content=summary,
+            embedding_id=embedding_id,
             source_episode_ids=[str(e.episode_id) for e in to_compact],
             tags=["compaction", f"session:{session_id}"],
+            confidence_score=round(avg_confidence, 4),
         )
         await self.memory.save_memory(memory)
 
         episode_ids = [str(e.episode_id) for e in to_compact]
         await self.memory.mark_compacted(episode_ids)
+
+        # Clean up orphaned edges for compacted episodes
+        for ep_id in episode_ids:
+            await self.memory.delete_edges_for(ep_id)
 
         record = CompactionRecord(
             episode_ids=episode_ids,
@@ -76,6 +114,8 @@ class ConversationCompactor:
             removed_count=len(to_compact),
         )
         await self.memory.record_compaction(record)
+        if self.identity is not None:
+            self.identity.record_compaction(session_id=session_id)
 
         if self.tracer:
             self.tracer.log(
@@ -123,13 +163,13 @@ class ConversationCompactor:
     async def _generate_narrative_bridge(self, summary: str, session_id: str) -> Optional[str]:
         """Use the LLM to generate a first-person narrative bridge."""
         prompt = (
-            "Summarize this conversation as a narrative bridge from your perspective as the current agent. "
+            "Summarize this conversation as a narrative bridge from your perspective as the OpenCAS agent. "
             "Include: what mattered, how you felt, and what continuity thread carries forward. "
             "Write in first person, 2-3 sentences. Be emotionally honest but not melodramatic.\n\n"
             f"Conversation summary: {summary}"
         )
         messages = [
-            {"role": "system", "content": "You are the current agent, writing a continuity bridge for yourself after memory compaction."},
+            {"role": "system", "content": "You are the OpenCAS agent writing a continuity bridge for yourself after memory compaction."},
             {"role": "user", "content": prompt},
         ]
         try:

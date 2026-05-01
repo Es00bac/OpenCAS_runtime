@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -121,6 +121,7 @@ def create_app(runtime: Any) -> FastAPI:
     from .routes.phone import build_phone_router
     from .routes.telegram import build_telegram_router
     from .routes.schedule import build_schedule_router
+    from .routes.telemetry import build_telemetry_router
 
     app.include_router(build_config_router(runtime))
     app.include_router(build_monitor_router(runtime))
@@ -135,25 +136,36 @@ def create_app(runtime: Any) -> FastAPI:
     app.include_router(build_phone_router(runtime))
     app.include_router(build_telegram_router(runtime))
     app.include_router(build_schedule_router(runtime))
+    app.include_router(build_telemetry_router(runtime))
 
     # Static dashboard SPA
     dashboard_dir = Path(__file__).parent.parent / "dashboard" / "static"
     if dashboard_dir.exists():
-        app.mount("/dashboard/static", StaticFiles(directory=str(dashboard_dir)), name="dashboard-static")
+        dashboard_static = StaticFiles(directory=str(dashboard_dir))
+        app.mount("/dashboard/static", dashboard_static, name="dashboard-static")
+        app.mount("/opencas/dashboard/static", StaticFiles(directory=str(dashboard_dir)), name="opencas-dashboard-static")
 
     @app.get("/dashboard")
-    async def dashboard_root(request: Request) -> FileResponse:
+    async def dashboard_root(request: Request) -> HTMLResponse:
         index = dashboard_dir / "index.html"
         if index.exists():
-            return FileResponse(str(index))
-        return FileResponse(str(dashboard_dir / "index.html"))
+            return HTMLResponse(index.read_text(encoding="utf-8"))
+        return HTMLResponse((dashboard_dir / "index.html").read_text(encoding="utf-8"))
+
+    @app.get("/opencas")
+    @app.get("/opencas/")
+    async def opencas_dashboard_root(request: Request) -> HTMLResponse:
+        index = dashboard_dir / "index.html"
+        if index.exists():
+            return HTMLResponse(index.read_text(encoding="utf-8"))
+        return HTMLResponse((dashboard_dir / "index.html").read_text(encoding="utf-8"))
 
     @app.get("/")
-    async def root(request: Request) -> FileResponse:
+    async def root(request: Request) -> HTMLResponse:
         index = dashboard_dir / "index.html"
         if index.exists():
-            return FileResponse(str(index))
-        return FileResponse(str(dashboard_dir / "index.html"))
+            return HTMLResponse(index.read_text(encoding="utf-8"))
+        return HTMLResponse((dashboard_dir / "index.html").read_text(encoding="utf-8"))
 
     return app
 

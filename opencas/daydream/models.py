@@ -24,6 +24,7 @@ class DaydreamReflection(BaseModel):
     alignment_score: float = Field(default=0.0, ge=0.0, le=1.0)
     novelty_score: float = Field(default=0.0, ge=0.0, le=1.0)
     fascination_thread: Optional[str] = None
+    experience_context: Dict[str, Any] = Field(default_factory=dict)
     keeper: bool = False
 
 

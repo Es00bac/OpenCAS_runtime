@@ -19,13 +19,15 @@ def register_web_and_browser_tools(runtime: Any) -> None:
         [
             ToolRegistrationSpec(
                 name="web_fetch",
-                description="Fetch a URL and return extracted text.",
-                risk_tier=ActionRiskTier.READONLY,
+                description="Fetch an http(s) URL. Default returns extracted text; pass raw=true for the raw body or parse_json=true to validate and pretty-print JSON. Metadata includes status and content_type.",
+                risk_tier=ActionRiskTier.NETWORK,
                 schema={
                     "type": "object",
                     "properties": {
-                        "url": {"type": "string", "description": "URL to fetch."},
+                        "url": {"type": "string", "description": "Absolute http(s) URL."},
                         "max_length": {"type": "integer", "description": "Maximum characters to return."},
+                        "raw": {"type": "boolean", "description": "Return raw response body without HTML extraction."},
+                        "parse_json": {"type": "boolean", "description": "Parse and pretty-print response as JSON."},
                     },
                     "required": ["url"],
                 },

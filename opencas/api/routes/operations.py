@@ -57,8 +57,8 @@ from opencas.api.operator_actions import (
 from opencas.api.qualification_models import QualificationArtifactsPaths
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-QUALIFICATION_SUMMARY_PATH = REPO_ROOT / "docs" / "qualification" / "live_validation_summary.json"
-QUALIFICATION_REMEDIATION_PATH = REPO_ROOT / "docs" / "qualification" / "qualification_remediation_rollup.json"
+QUALIFICATION_SUMMARY_PATH = REPO_ROOT / "dev-notes" / "qualification" / "live_validation_summary.json"
+QUALIFICATION_REMEDIATION_PATH = REPO_ROOT / "dev-notes" / "qualification" / "qualification_remediation_rollup.json"
 VALIDATION_RUNS_DIR = REPO_ROOT / ".opencas_live_test_state"
 QUALIFICATION_RERUN_HISTORY_PATH = VALIDATION_RUNS_DIR / "qualification_rerun_history.jsonl"
 DEFAULT_OPERATOR_ACTIONS_PATH = VALIDATION_RUNS_DIR / "operator_action_history.jsonl"
@@ -364,6 +364,20 @@ def build_operations_router(runtime: Any) -> APIRouter:
     @r.get("/tasks/{task_id}")
     async def get_task(task_id: str) -> Dict[str, Any]:
         return await activity_operations.get_task(task_id)
+
+    @r.get("/tasks/{task_id}/salvage")
+    async def list_task_salvage_packets(task_id: str) -> Dict[str, Any]:
+        store = getattr(runtime.ctx, "tasks", None)
+        if store is None:
+            return {"found": False, "error": "Task store not available"}
+        if not hasattr(store, "list_salvage_packets"):
+            return {"found": True, "packets": []}
+        packets = await store.list_salvage_packets(task_id)
+        return {
+            "found": True,
+            "task_id": task_id,
+            "packets": [p.model_dump(mode="json") for p in packets],
+        }
 
     # ── Work Items ────────────────────────────────────────────────────
 

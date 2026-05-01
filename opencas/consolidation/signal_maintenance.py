@@ -16,8 +16,12 @@ from .signal_ranker import SignalScore
 
 def has_obsolete_system_reference(obj: Any) -> bool:
     """Detect references to superseded systems/workspace paths."""
+    text = str(getattr(obj, "content", "")).lower()
     payload = getattr(obj, "payload", {}) or {}
-    return bool(payload.get("legacy_system_obsolete") or payload.get("superseded_system_reference"))
+    source = str(payload.get("bulma_source", "")).lower()
+    markers = ["openbulma-v4", "openbulma-v3", "openbulma-v2", "openclaw"]
+    combined = f"{text} {source}"
+    return any(marker in combined for marker in markers)
 
 
 def cluster_hash(cluster: List[Any]) -> str:
@@ -91,8 +95,13 @@ async def promote_strong_signals(
                     top_hit, top_sim = similar[0]
                     if top_sim > 0.92 and top_hit.source_hash != embed_record.source_hash:
                         continue
-            except Exception:
-                pass
+            except Exception as exc:
+                if engine.tracer:
+                    engine.tracer.log(
+                        EventKind.TOOL_CALL,
+                        "signal_maintenance_search_similar_failed",
+                        {"error": str(exc), "episode_id": ep_id},
+                    )
 
         memory = Memory(
             content=ep.content,

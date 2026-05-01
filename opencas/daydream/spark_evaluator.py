@@ -92,6 +92,8 @@ class SparkEvaluator:
             work_norm = float(np.linalg.norm(work_vec))
             if work_norm == 0:
                 continue
+            if spark_vec.shape != work_vec.shape:
+                continue
             sim = float(np.dot(spark_vec, work_vec) / (spark_norm * work_norm))
             # Clip to valid cosine range before distance
             sim = max(-1.0, min(1.0, sim))
@@ -228,7 +230,7 @@ class SparkEvaluator:
         # Operator bond themes: mortality, meaning of the relationship
         bond_markers = [
             "mortality", "death", "losing you", "when you're gone",
-            "our bond", "what the operator means", "our relationship",
+            "our bond", "what jarrod means", "our relationship",
             "what you mean to me", "grief", "separation",
         ]
         for marker in bond_markers:

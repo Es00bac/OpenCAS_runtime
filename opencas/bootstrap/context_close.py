@@ -60,6 +60,7 @@ async def close_bootstrap_context(context: Any) -> None:
         context.plan_store,
         context.schedule_store,
         context.workspace_index,
+        getattr(context, "affective_examinations", None),
     ]
     for obj in closables:
         await _close_once(obj)

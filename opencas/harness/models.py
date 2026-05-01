@@ -41,6 +41,17 @@ class DeliverableSchema(BaseModel):
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ObjectiveLoopContract(BaseModel):
+    """Bounded work contract required before an objective loop can run."""
+
+    goal: str
+    expected_output: str
+    success_check: str
+    stop_condition: str
+    max_attempt_budget: int = Field(default=1, ge=1)
+    reframe_path: str = ""
+
+
 class NotebookEntry(BaseModel):
     """A single entry in a research notebook."""
 

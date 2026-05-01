@@ -9,6 +9,9 @@ import uvicorn
 
 from opencas.api.server import create_app
 
+from .continuity_breadcrumbs import current_runtime_focus, record_burst_continuity
+from .conversation_recovery import recover_interrupted_conversation_turns
+from .provenance_hooks import emit_runtime_session_lifecycle
 from .scheduler import AgentScheduler
 
 if TYPE_CHECKING:
@@ -37,6 +40,27 @@ def install_runtime_signal_handlers(
 
 async def shutdown_runtime_resources(runtime: "AgentRuntime") -> None:
     """Close runtime-owned services and stores in the correct shutdown order."""
+    try:
+        active_focus = current_runtime_focus(runtime, "shutdown")
+        if active_focus and active_focus != "shutdown":
+            await record_burst_continuity(
+                runtime,
+                trigger="work_burst_interrupted",
+                phase="interrupt",
+                intent="Interrupted work burst during runtime shutdown",
+                focus=active_focus,
+                next_step="recover the interrupted burst before starting new work",
+                note="shutdown interruption",
+            )
+        emit_runtime_session_lifecycle(
+            runtime,
+            transition="shutdown",
+            reason="runtime shutdown persisted",
+            note="shutdown interruption" if active_focus and active_focus != "shutdown" else None,
+            entrypoint="shutdown_runtime_resources",
+        )
+    except Exception:
+        runtime._trace("continuity_breadcrumb_shutdown_error", {})
     if runtime.reliability:
         runtime.reliability.stop()
     if getattr(runtime, "process_supervisor", None):
@@ -57,7 +81,9 @@ async def shutdown_runtime_resources(runtime: "AgentRuntime") -> None:
 async def run_autonomous_runtime(
     runtime: "AgentRuntime",
     *,
-    cycle_interval: int = 300,
+    cycle_interval: int = 600,
+    daydream_interval: int = 720,
+    baa_heartbeat_interval: int = 120,
     consolidation_interval: int = 86400,
 ) -> None:
     """Run the scheduler-only autonomous mode until a shutdown signal arrives."""
@@ -68,10 +94,15 @@ async def run_autonomous_runtime(
         return
 
     await runtime._continuity_check()
+    recovered_turns = await recover_interrupted_conversation_turns(runtime)
+    if recovered_turns:
+        runtime._trace("conversation_recovery_complete", {"recovered_turns": recovered_turns})
     scheduler = AgentScheduler(
         runtime=runtime,
         cycle_interval=cycle_interval,
         consolidation_interval=consolidation_interval,
+        baa_heartbeat_interval=baa_heartbeat_interval,
+        daydream_interval=daydream_interval,
         readiness=runtime.readiness,
         tracer=runtime.tracer,
     )
@@ -82,6 +113,13 @@ async def run_autonomous_runtime(
     await scheduler.start()
     await runtime.start_telegram()
     runtime.readiness.ready("autonomous_mode_active")
+    emit_runtime_session_lifecycle(
+        runtime,
+        transition="boot",
+        reason="autonomous runtime started",
+        note="scheduler-only autonomous runtime",
+        entrypoint="run_autonomous_runtime",
+    )
     runtime._trace("autonomous_start", {})
 
     await shutdown_event.wait()
@@ -98,7 +136,9 @@ async def run_autonomous_with_server_runtime(
     *,
     host: str = "127.0.0.1",
     port: int = 8080,
-    cycle_interval: int = 300,
+    cycle_interval: int = 600,
+    daydream_interval: int = 720,
+    baa_heartbeat_interval: int = 120,
     consolidation_interval: int = 86400,
 ) -> None:
     """Run the scheduler and FastAPI server together until a shutdown signal arrives."""
@@ -112,6 +152,8 @@ async def run_autonomous_with_server_runtime(
         runtime=runtime,
         cycle_interval=cycle_interval,
         consolidation_interval=consolidation_interval,
+        baa_heartbeat_interval=baa_heartbeat_interval,
+        daydream_interval=daydream_interval,
         readiness=runtime.readiness,
         tracer=runtime.tracer,
     )
@@ -122,10 +164,20 @@ async def run_autonomous_with_server_runtime(
     install_runtime_signal_handlers(runtime, shutdown_event)
 
     await runtime._continuity_check()
+    recovered_turns = await recover_interrupted_conversation_turns(runtime)
+    if recovered_turns:
+        runtime._trace("conversation_recovery_complete", {"recovered_turns": recovered_turns})
     runtime.scheduler = scheduler
     await scheduler.start()
     await runtime.start_telegram()
     runtime.readiness.ready("autonomous_mode_with_server")
+    emit_runtime_session_lifecycle(
+        runtime,
+        transition="boot",
+        reason="autonomous runtime with server started",
+        note="scheduler and server runtime",
+        entrypoint="run_autonomous_with_server_runtime",
+    )
     runtime._trace("autonomous_with_server_start", {"host": host, "port": port})
 
     server_task = asyncio.create_task(server.serve())

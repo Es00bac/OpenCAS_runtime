@@ -6,7 +6,40 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from ...api.provenance_store import (
+    ProvenanceTransitionKind,
+    record_provenance_transition,
+)
 from ..models import ToolResult
+
+
+def _record_blocked_waiting_provenance(
+    runtime: Any,
+    *,
+    source_artifact: str,
+    target_entity: str,
+    reason: str,
+) -> None:
+    config = getattr(getattr(runtime, "ctx", None), "config", None)
+    state_dir = getattr(config, "state_dir", None)
+    if state_dir is None:
+        return
+    raw_session_id = getattr(config, "session_id", None) if config is not None else None
+    session_id = raw_session_id.strip() if isinstance(raw_session_id, str) and raw_session_id.strip() else target_entity
+    record_provenance_transition(
+        state_dir=state_dir,
+        kind=ProvenanceTransitionKind.WAITING,
+        session_id=session_id,
+        entity_id=target_entity,
+        status="blocked",
+        trigger_artifact=source_artifact,
+        source_artifact=source_artifact,
+        trigger_action="workflow_supervise_session",
+        parent_transition_id=target_entity,
+        target_entity=target_entity,
+        origin_action_id=target_entity,
+        details={"reason": reason},
+    )
 
 
 def supervision_advisory(
@@ -232,6 +265,14 @@ async def supervise_session(runtime: Any, args: Dict[str, Any]) -> ToolResult:
                 pty_data,
                 verification_exists=verification_exists,
             )
+
+    if advisory.get("reason") in {"auth_or_gate_blocked", "awaiting_operator_input"} and active_session_id:
+        _record_blocked_waiting_provenance(
+            runtime,
+            source_artifact=f"workflow|supervision|{scope_key}",
+            target_entity=active_session_id,
+            reason=str(advisory.get("reason")),
+        )
 
     return ToolResult(
         True,

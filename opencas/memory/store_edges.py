@@ -28,8 +28,7 @@ ON CONFLICT(source_id, target_id) DO UPDATE SET
     causal_weight = excluded.causal_weight,
     verification_weight = excluded.verification_weight,
     actor_affinity_weight = excluded.actor_affinity_weight,
-    confidence = excluded.confidence,
-    created_at = excluded.created_at
+    confidence = excluded.confidence
 """
 
 
