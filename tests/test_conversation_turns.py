@@ -90,7 +90,7 @@ async def test_record_tom_belief_extracts_learned_self_location() -> None:
 
     await _record_tom_belief(
         runtime,
-        "She lives with me, in my computer, in my city. You live with me in my computer.",
+        "She lives with me, in my computer, in Arvada. You live with me in my computer.",
     )
 
     recorded_pairs = [

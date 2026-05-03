@@ -22,8 +22,6 @@ from opencas.bootstrap.task_beacon import (
 )
 from opencas.bootstrap.live_objective import read_tasklist_live_objective
 from opencas.api.voice_service import (
-    VoiceSynthesisResult,
-    VoiceTranscriptionResult,
     synthesize_speech,
     transcribe_audio,
     voice_status,
@@ -233,6 +231,19 @@ def _runtime_intention_source(runtime: Any) -> Optional[str]:
     return getattr(executive, "intention_source", None)
 
 
+def _coerce_count(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _executive_has_foreground_intention(executive_payload: Dict[str, Any]) -> bool:
+    return bool(executive_payload.get("active_goals") or []) or _coerce_count(
+        executive_payload.get("queued_work_count")
+    ) > 0
+
+
 def _normalize_tasklist_title(value: Any) -> str:
     return " ".join(str(value or "").strip().lower().split())
 
@@ -270,8 +281,6 @@ def _normalize_session_status(status: str) -> str:
 def build_chat_router(runtime: Any) -> APIRouter:
     """Build chat routes wired to *runtime*."""
     import uuid
-
-    from opencas.context.models import MessageRole
 
     r = APIRouter(prefix="/api/chat", tags=["chat"])
     upload_dir = chat_upload_dir(runtime)
@@ -428,6 +437,13 @@ def build_chat_router(runtime: Any) -> APIRouter:
             elif _tasklist_section_for_title(workspace_root, effective_intention) in _TASKLIST_STALE_SECTIONS:
                 effective_intention = None
                 intention_source = "stale_tasklist_completed"
+            elif (
+                intention_source == "active_work"
+                and effective_intention
+                and not _executive_has_foreground_intention(executive_payload)
+            ):
+                effective_intention = None
+                intention_source = "stale_active_work"
 
         task_entries = []
         task_counts = {"active": 0, "waiting": 0, "completed": 0, "failed": 0, "total": 0}

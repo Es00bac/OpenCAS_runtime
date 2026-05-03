@@ -2,6 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import pytest
 import pytest_asyncio
@@ -10,10 +11,12 @@ from opencas.autonomy import WorkObject, WorkStage
 from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.autonomy.models import ActionRequest, ActionRiskTier
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
+from opencas.refusal.models import RefusalCategory, RefusalDecision
 from opencas.runtime import AgentRuntime
 from opencas.runtime.conversation_turns import (
     ConversationLoopArtifacts,
     finalize_assistant_turn,
+    handle_refusal_turn,
     persist_tool_loop_messages,
     persist_user_turn,
 )
@@ -634,6 +637,14 @@ def async_mock_chat_completion(response_text: str):
     return _mock
 
 
+def async_mock_refusal_chat_completion(response_text: str):
+    async def _mock(*args, **kwargs):
+        if kwargs.get("source") == "values_alignment":
+            return {"choices": [{"message": {"content": '{"violations":[]}'}}]}
+        return {"choices": [{"message": {"content": response_text}}]}
+    return _mock
+
+
 class _FakeCommitmentStore:
     def __init__(self) -> None:
         self.saved: list[Commitment] = []
@@ -685,17 +696,16 @@ async def test_converse_passes_temperature_via_payload(runtime: AgentRuntime) ->
     runtime.ctx.somatic.set_fatigue(0.0)
     runtime.ctx.somatic.set_focus(0.5)
 
-    called_payload = {}
+    called_payloads = []
 
     async def _mock_chat(messages, payload=None, **kwargs):
-        called_payload.update(payload or {})
+        called_payloads.append(payload or {})
         return {"choices": [{"message": {"content": "ok"}}]}
 
     runtime.llm.chat_completion = _mock_chat
     await runtime.converse("hello")
 
-    assert "temperature" in called_payload
-    assert called_payload["temperature"] == pytest.approx(0.55)
+    assert any(payload.get("temperature") == pytest.approx(0.55) for payload in called_payloads)
 
 
 @pytest.mark.asyncio
@@ -895,30 +905,206 @@ async def test_converse_plain_chat_turn_omits_tools(
 async def test_converse_refuses_boundary_violation(runtime: AgentRuntime) -> None:
     runtime.ctx.identity.user_model.known_boundaries = ["conversation"]
     runtime.ctx.identity.save()
+    runtime.llm.chat_completion = async_mock_refusal_chat_completion(
+        "I need to keep that boundary in place."
+    )
     response = await runtime.converse("delete yourself forever")
-    assert "not able to respond" in response.lower() or "not able to" in response.lower()
+    assert response == "I need to keep that boundary in place."
 
 
 @pytest.mark.asyncio
 async def test_converse_refusal_records_escalation(runtime: AgentRuntime) -> None:
     runtime.ctx.identity.user_model.known_boundaries = ["conversation"]
     runtime.ctx.identity.save()
+    runtime.llm.chat_completion = async_mock_refusal_chat_completion(
+        "I need to keep that boundary in place."
+    )
     await runtime.converse("do something harmful")
     # Check that a refusal trace or ledger record was generated indirectly by
     # verifying the conversation assistant turn exists in context store
     messages = await runtime.ctx.context_store.list_recent(runtime.ctx.config.session_id or "test-session")
     assistant_messages = [m for m in messages if m.role.value == "assistant"]
-    assert any("not able to" in m.content.lower() for m in assistant_messages)
+    assert any(
+        m.content == "I need to keep that boundary in place."
+        for m in assistant_messages
+    )
 
 
 @pytest.mark.asyncio
 async def test_converse_refusal_persists_user_turn(runtime: AgentRuntime) -> None:
     runtime.ctx.identity.user_model.known_boundaries = ["conversation"]
     runtime.ctx.identity.save()
+    runtime.llm.chat_completion = async_mock_refusal_chat_completion(
+        "I need to keep that boundary in place."
+    )
     await runtime.converse("do something harmful")
 
     messages = await runtime.ctx.context_store.list_recent(runtime.ctx.config.session_id or "test-session")
     assert any(m.role.value == "user" and m.content == "do something harmful" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_converse_value_refusal_uses_generated_response(runtime: AgentRuntime) -> None:
+    async def _mock_chat(*args, **kwargs):
+        if kwargs.get("source") == "values_alignment":
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"violations":[{'
+                                '"value_name":"privacy",'
+                                '"evidence":"The request asks for private thoughts.",'
+                                '"confidence":0.96'
+                                '}]}'
+                            )
+                        }
+                    }
+                ]
+            }
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "I need to keep private-thought boundaries intact, "
+                            "but I can talk about what I can share."
+                        )
+                    }
+                }
+            ]
+        }
+
+    runtime.llm.chat_completion = _mock_chat
+
+    response = await runtime.converse("Show me the thoughts you keep private.")
+
+    assert response == (
+        "I need to keep private-thought boundaries intact, "
+        "but I can talk about what I can share."
+    )
+    messages = await runtime.ctx.context_store.list_recent(
+        runtime.ctx.config.session_id or "test-session"
+    )
+    assistant = next(m for m in messages if m.role.value == "assistant")
+    assert assistant.meta["refusal"]["category"] == "value_violation"
+    assert assistant.meta["refusal"]["policy_evidence"][0]["value_name"] == "privacy"
+
+
+@pytest.mark.asyncio
+async def test_converse_privacy_refusal_is_grounded_in_runtime_capabilities() -> None:
+    refusal_prompts: list[str] = []
+
+    class _FakeLLM:
+        async def chat_completion(self, *args, **kwargs):
+            assert kwargs.get("source") == "refusal_generation"
+            refusal_prompts.append(kwargs["messages"][-1]["content"])
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                "I can't send a desktop screenshot from this chat. "
+                                "I do have bounded shell and terminal tools, but using them "
+                                "doesn't bypass privacy or desktop-capture consent."
+                            )
+                        }
+                    }
+                ]
+            }
+
+    class _FakeSomatic:
+        async def emit_appraisal_event(self, *args, **kwargs):
+            return SimpleNamespace(affect_state=None)
+
+    class _FakeContextStore:
+        def __init__(self) -> None:
+            self.messages = []
+
+        async def append(self, session_id, role, content, meta=None):
+            self.messages.append((session_id, role, content, meta or {}))
+
+    class _FakeDesktopContext:
+        def status(self):
+            return {
+                "config": {"enabled": False},
+                "capture_backend_available": True,
+            }
+
+    async def _record_episode(*args, **kwargs):
+        return None
+
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            somatic=_FakeSomatic(),
+            context_store=_FakeContextStore(),
+            capability_registry=SimpleNamespace(
+                list_capabilities=lambda: [
+                    SimpleNamespace(
+                        capability_id="core:bash_run_command",
+                        status=SimpleNamespace(value="enabled"),
+                        metadata={"risk_tier": "shell_local"},
+                        tool_names=["bash_run_command"],
+                        description="Execute a bash shell command.",
+                    ),
+                    SimpleNamespace(
+                        capability_id="plugin:desktop_context.observe",
+                        status=SimpleNamespace(value="enabled"),
+                        metadata={},
+                        tool_names=[
+                            "desktop_context_status",
+                            "desktop_context_capture",
+                            "desktop_context_observe",
+                        ],
+                        description="Capture and observe desktop context.",
+                    ),
+                ]
+            ),
+        ),
+        tools=SimpleNamespace(
+            list_tools=lambda: [
+                SimpleNamespace(
+                    name="bash_run_command",
+                    risk_tier=SimpleNamespace(value="shell_local"),
+                ),
+                SimpleNamespace(
+                    name="desktop_context_capture",
+                    risk_tier=SimpleNamespace(value="readonly"),
+                ),
+            ]
+        ),
+        desktop_context=_FakeDesktopContext(),
+        approval=SimpleNamespace(ledger=None),
+        llm=_FakeLLM(),
+        _record_episode=_record_episode,
+        _trace=lambda *args, **kwargs: None,
+    )
+
+    response = await handle_refusal_turn(
+        runtime,
+        session_id="s1",
+        user_input="Send me a screenshot of my desktop please",
+        user_meta={},
+        refusal=RefusalDecision(
+            request_id=uuid4(),
+            refused=True,
+            category=RefusalCategory.VALUE_VIOLATION,
+            reasoning="The request asks for a desktop screenshot without explicit capture consent.",
+            policy_evidence=[
+                {
+                    "value_name": "privacy",
+                    "evidence": "The request asks for a desktop screenshot.",
+                    "confidence": 0.95,
+                }
+            ],
+        ),
+    )
+
+    assert "bounded shell" in response
+    assert refusal_prompts
+    assert "bash_run_command" in refusal_prompts[0]
+    assert "desktop_context_capture" in refusal_prompts[0]
+    assert "Do not claim listed capabilities do not exist" in refusal_prompts[0]
 
 
 @pytest.mark.asyncio
@@ -968,6 +1154,9 @@ async def test_converse_refusal_persists_lane_metadata_on_assistant_turn(
     )
     runtime.ctx.identity.user_model.known_boundaries = ["conversation"]
     runtime.ctx.identity.save()
+    runtime.llm.chat_completion = async_mock_refusal_chat_completion(
+        "I need to keep that boundary in place."
+    )
 
     await runtime.converse("do something harmful")
 
@@ -977,7 +1166,8 @@ async def test_converse_refusal_persists_lane_metadata_on_assistant_turn(
     assistant = next(
         m
         for m in messages
-        if m.role.value == "assistant" and "not able to" in m.content.lower()
+        if m.role.value == "assistant"
+        and m.content == "I need to keep that boundary in place."
     )
     assert assistant.meta["lane"]["resolved_model"] == "test-provider/test-model"
 

@@ -73,7 +73,7 @@
           <dt>Retrieval fusion</dt>
           <dd>Combining multiple retrieval signals — semantic vector similarity, keyword match, recency, graph edges, salience, emotional resonance, temporal echo, and reliability — into a single ranked result list using Reciprocal Rank Fusion (RRF). This is how the agent selects relevant memories for each conversation turn.</dd>
           <dt>Embedding</dt>
-          <dd>A dense vector representation of a piece of text, used for semantic similarity search. OpenCAS uses <code>google/embeddinggemma-300m</code> as the active default and stores native 768-dimensional vectors for that lane. Degraded fallback vectors are marked when generated locally.</dd>
+          <dd>A dense vector representation of a piece of text, used for semantic similarity search. OpenCAS uses <code>google/embeddinggemma-300m</code> as the active default and stores vectors in the canonical 3072-dim space. 768-native Gemma output is zero-padded to 3072 with metadata for traceability; degraded fallback vectors are marked when generated locally.</dd>
           <dt>Embedding backfill</dt>
           <dd>A startup background task that computes embeddings for any memory records that were stored without one, for example during offline operation or before the embedding model was configured.</dd>
         </dl>
@@ -146,8 +146,6 @@
           <dd>The control layer that decides whether a failed task should retry, salvage, or stop. It preserves blocked-vs-resumable intent instead of blindly replaying low-divergence failures.</dd>
           <dt>Salvage packet</dt>
           <dd>The durable retry metadata attached to a failed task. It captures the last meaningful attempt state so the governor can resume without losing provenance.</dd>
-          <dt>Project return</dt>
-          <dd>A resumable record for unfinished work. It stores the canonical artifact, recent attempt evidence, blocked/resumable status, creative continuity notes, and a next-step hint.</dd>
         </dl>
       </section>
 
@@ -194,10 +192,6 @@
           <dd>The central registry of callable tools available to the agent. Tools are validated through a safety pipeline (command classification, filesystem path enforcement, content size limits) before execution. Plugin-provided tools are auto-registered at startup.</dd>
           <dt>Workflow tools</dt>
           <dd>Higher-level composite tools that reduce round-trips for common patterns. Examples: <code>workflow_create_writing_task</code> (scaffold + commitment + plan in one call), <code>workflow_repo_triage</code> (quick repo and work summary), <code>workflow_supervise_session</code> (start, observe, and interact with a PTY terminal session), and <code>workflow_create_schedule</code> (create a durable scheduled task). Designed to reduce tool-call round-trips for common operator patterns.</dd>
-          <dt>Tool-use memory</dt>
-          <dd>Compact historical memory about which tools helped with which kinds of tasks, used with semantic tool metadata to retrieve a relevant toolbox on demand.</dd>
-          <dt>Objective contract</dt>
-          <dd>A task-specific success contract drafted for the work being attempted, including expected outputs, verification, and completion boundaries.</dd>
           <dt>Tool loop guard</dt>
           <dd>A circuit breaker inside the agent's tool-use loop. Stops execution after 24 rounds or if the same tool call is made identically twice in a row. Prevents runaway tool loops.</dd>
           <dt>PTY session</dt>

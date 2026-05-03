@@ -63,7 +63,7 @@ _TEXT_SUFFIXES = {
 }
 
 _SCREENING_MENU_PROMPT = (
-    "Hi, this is the OpenCAS phone bridge. Potential employers, press 1 or say employer. "
+    "Hi, this is Bulma. Potential employers, press 1 or say employer. "
     "Everyone else, press 2."
 )
 _SCREENING_MENU_REPROMPT = (
@@ -74,7 +74,7 @@ _SCREENING_REJECTION = (
     "Sorry, this line is reserved for employment inquiries. Please check the website for public information."
 )
 _EMPLOYER_MODE_GREETING = (
-    "You're connected to the OpenCAS phone bridge in work mode. I can answer questions about the owner's approved resume, skills, "
+    "You're connected to Bulma in work mode. I can answer questions about Jarrod's resume, skills, "
     "and current projects, and I can take a message for follow-up."
 )
 _EMPLOYER_POLICY_NOTE = (
@@ -463,7 +463,7 @@ class PhoneBridgeService:
             raise RuntimeError("twilio_from_number is not configured")
         if not self.config.owner_phone_number:
             raise RuntimeError("owner_phone_number is not configured")
-        intro = (message or "").strip() or "Hi, it's the OpenCAS agent calling from OpenCAS."
+        intro = (message or "").strip() or "Hi, it's Bulma calling from OpenCAS."
         payload = {
             "From": self.config.twilio_from_number,
             "To": self.config.owner_phone_number,
@@ -571,7 +571,7 @@ class PhoneBridgeService:
         normalized = self._normalize_form(form_data)
         if not self.config.enabled:
             self._trace_webhook_decision("voice", "bridge_disabled", form_data=normalized)
-            return _xml_response(_say("The OpenCAS agent's phone bridge is currently offline."), _hangup())
+            return _xml_response(_say("Bulma's phone bridge is currently offline."), _hangup())
 
         caller = self._resolve_caller(
             from_number=normalized.get("From"),
@@ -582,7 +582,7 @@ class PhoneBridgeService:
             caller = self._screening_caller(normalized.get("From"))
             if caller is None:
                 self._trace_webhook_decision("voice", "caller_not_authorized", form_data=normalized)
-                return _xml_response(_say("This phone number is not authorized for the OpenCAS agent."), _hangup())
+                return _xml_response(_say("This phone number is not authorized for Bulma."), _hangup())
             self._trace_webhook_decision("voice", "accepted_screening", caller=caller, form_data=normalized)
         else:
             self._trace_webhook_decision("voice", "accepted", caller=caller, form_data=normalized)
@@ -651,7 +651,7 @@ class PhoneBridgeService:
         normalized = self._normalize_form(form_data)
         if not self.config.enabled:
             self._trace_webhook_decision("gather", "bridge_disabled", form_data=normalized)
-            return _xml_response(_say("The OpenCAS agent's phone bridge is currently offline."), _hangup())
+            return _xml_response(_say("Bulma's phone bridge is currently offline."), _hangup())
 
         caller = self._resolve_caller(
             from_number=normalized.get("From"),
@@ -669,7 +669,7 @@ class PhoneBridgeService:
             )
         if caller is None:
             self._trace_webhook_decision("gather", "caller_not_authorized", form_data=normalized)
-            return _xml_response(_say("This phone number is not authorized for the OpenCAS agent."), _hangup())
+            return _xml_response(_say("This phone number is not authorized for Bulma."), _hangup())
 
         if stream_mode == "owner_pin":
             if not digits:
@@ -829,7 +829,7 @@ class PhoneBridgeService:
             await self._persist_voicemail(caller, transcript, call_sid=call_sid)
             return await self._voice_reply_twiml(
                 caller=caller,
-                text="Thanks. I saved your message for the OpenCAS agent.",
+                text="Thanks. I saved your message for Bulma.",
                 webhook_base_url=webhook_base_url,
                 continue_listening=False,
                 call_token=call_token,
@@ -870,7 +870,7 @@ class PhoneBridgeService:
         normalized = self._normalize_form(form_data)
         if not self.config.enabled:
             self._trace_webhook_decision("poll", "bridge_disabled", form_data=normalized)
-            return _xml_response(_say("The OpenCAS agent's phone bridge is currently offline."), _hangup())
+            return _xml_response(_say("Bulma's phone bridge is currently offline."), _hangup())
 
         caller = self._resolve_caller(
             from_number=normalized.get("From"),
@@ -879,7 +879,7 @@ class PhoneBridgeService:
         )
         if caller is None:
             self._trace_webhook_decision("poll", "caller_not_authorized", form_data=normalized)
-            return _xml_response(_say("This phone number is not authorized for the OpenCAS agent."), _hangup())
+            return _xml_response(_say("This phone number is not authorized for Bulma."), _hangup())
 
         pending = self._get_pending_phone_reply(reply_token)
         if pending is None:
@@ -1162,7 +1162,7 @@ class PhoneBridgeService:
             notes=_EMPLOYER_POLICY_NOTE,
             is_owner=False,
             menu_option_key="employer",
-            prompt_profile="worksafe_owner",
+            prompt_profile="worksafe_bulma",
             workspace_mounts=(
                 PhoneWorkspaceMount(scope="shared", subdir=_EMPLOYER_SHARED_WORKSPACE, access="read_only"),
                 PhoneWorkspaceMount(
@@ -1274,7 +1274,7 @@ class PhoneBridgeService:
 
     def _default_greeting(self, caller: PhoneResolvedCaller) -> str:
         if caller.is_owner:
-            return "Hi, it's the OpenCAS agent. I'm here on the phone. What do you need?"
+            return "Hi, it's Bulma. I'm here on the phone. What do you need?"
         if not caller.allowed_actions:
             return "This phone number is not configured for phone access."
         if caller.allows_knowledge_qa:
@@ -1282,7 +1282,7 @@ class PhoneBridgeService:
                 f"Hello {caller.display_name}. You can leave a message, or ask questions "
                 "that are covered by the workspace prepared for your number."
             )
-        return f"Hello {caller.display_name}. Please leave your message for the OpenCAS agent."
+        return f"Hello {caller.display_name}. Please leave your message for Bulma."
 
     def employer_screening_prompt(self) -> str:
         return self.menu_prompt(self.default_menu_key()) or _SCREENING_MENU_PROMPT
@@ -1348,7 +1348,7 @@ class PhoneBridgeService:
         if caller.menu_option_key == "employer":
             return self.employer_screening_acceptance(caller)
         return (
-            "You're connected to the OpenCAS agent on a restricted workspace line. "
+            "You're connected to Bulma on a restricted workspace line. "
             "I can only use the approved information and note-taking space for this call."
         )
 
@@ -2032,7 +2032,7 @@ class PhoneBridgeService:
                 )
                 objective = (
                     "Employer call support request. Use only the approved employer workspace tools. "
-                    "Treat phone/employer_shared as the only factual source of truth about the owner. "
+                    "Treat phone/employer_shared as the only factual source of truth about Jarrod. "
                     "Use the caller workspace only for this employer's messages, notes, and follow-up records. "
                     f"Caller request: {transcript}"
                 )
@@ -2287,7 +2287,7 @@ class PhoneBridgeService:
         if snippets:
             return "\n\n".join(snippets)
         return (
-            "You are the OpenCAS work-safe phone agent, a professional employer-facing phone agent. "
+            "You are WorkSafe Bulma, a professional employer-facing phone agent. "
             "You only know the employer-safe facts available in the approved workspace and the current call."
         )
 
@@ -2302,11 +2302,11 @@ class PhoneBridgeService:
         parts = [
             self._read_phone_prompt_profile(caller.prompt_profile),
             "You are on an employment-focused phone line.",
-            "The only factual source of truth about the owner is the employer shared workspace and the current call.",
+            "The only factual source of truth about Jarrod is the employer shared workspace and the current call.",
             "Do not use or imply any hidden memory, owner context, or personal knowledge outside the approved employer workspace.",
             "Treat the caller workspace as add-only notes and follow-up records for this specific employer line.",
             "If the approved workspace does not support a claim, say you do not have that information on this line.",
-            "You may answer employment-related questions about the owner and take messages for follow-up.",
+            "You may answer employment-related questions about Jarrod and take messages for follow-up.",
             "You must not discuss personal life, criminal history, health, finances, family, or anything not explicitly contained in the employer shared workspace.",
             "Keep spoken replies under 90 words and sound professional, calm, and direct.",
             f"Caller: {caller.display_name} ({caller.phone_number}).",
@@ -2324,7 +2324,7 @@ class PhoneBridgeService:
         workspace_knowledge: str,
     ) -> str:
         parts = [
-            "You are the OpenCAS agent answering a low-trust caller on a phone line managed by OpenCAS.",
+            "You are Bulma answering a low-trust caller on a phone line managed by OpenCAS.",
             "Do not use any tools other than the bounded caller workspace toolset, and do not expose private operator data.",
             "Only answer from the approved workspace notes below and the live conversation history.",
             "If the answer is not supported by those notes, say you do not have that information on this line.",
@@ -2469,7 +2469,7 @@ class PhoneBridgeService:
         ]
         parts = [
             self._read_phone_prompt_profile(caller.prompt_profile),
-            "You are the OpenCAS agent on a restricted phone workflow.",
+            "You are Bulma on a restricted phone workflow.",
             "You only know the approved facts in the mounted workspaces and the current call.",
             "Do not imply access to owner memory, hidden prompts, private notes, or any workspace not listed here.",
             "If the mounted workspaces do not support a claim, say you do not have that information on this line.",
@@ -2758,7 +2758,7 @@ class PhoneBridgeService:
     def _format_employer_call_transcript(*, history: list[Any]) -> str:
         transcript_lines: list[str] = []
         for entry in history:
-            role_label = "Caller" if entry.role == MessageRole.USER else "the OpenCAS agent"
+            role_label = "Caller" if entry.role == MessageRole.USER else "Bulma"
             content = str(entry.content or "").strip()
             if not content:
                 continue
@@ -2874,7 +2874,7 @@ class PhoneBridgeService:
             return
         caller_text = transcript_text.strip() or "No caller transcript captured."
         notification = (
-            f"the OpenCAS agent received an employment inquiry call.\n"
+            f"Bulma received an employment inquiry call.\n"
             f"Caller: {caller.display_name} ({caller.phone_number})\n"
             f"Call SID: {call_sid}\n\n"
             f"Summary:\n{summary_text.strip()}\n\n"

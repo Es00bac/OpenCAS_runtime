@@ -483,7 +483,7 @@ class RepairExecutor:
             system_content = "You are executing a repair task."
             if project_return_context:
                 system_content = (
-                    "You are the OpenCAS agent returning to your own creative project, not an external contractor. "
+                    "You are Bulma returning to your own creative project, not an external contractor. "
                     "Use tools as part of your own agency and continuity. Decide what meaningful progress "
                     "requires, and preserve the next return point if the project remains unfinished. "
                     "For writing work, creating a workflow scaffold is not manuscript progress; persist "

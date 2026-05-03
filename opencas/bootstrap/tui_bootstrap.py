@@ -7,10 +7,39 @@ from pathlib import Path
 from typing import Any, Dict, List
 
 from opencas.bootstrap import BootstrapConfig
+from opencas.bootstrap.tui_state import WizardState
+from opencas.desktop_context import DesktopContextConfig
 from opencas.model_routing import ModelRoutingConfig, ModelRoutingMode
 from opencas.sandbox import SandboxConfig
 from opencas.sandbox.config import SandboxMode
-from opencas.bootstrap.tui_state import WizardState
+
+CURRENT_AGENT_SYSTEMS: Dict[str, List[str]] = {
+    "always_on": [
+        "memory",
+        "somatic_state",
+        "musubi",
+        "theory_of_mind",
+        "daydreaming",
+        "self_inspection",
+        "wellbeing",
+        "commitments",
+        "schedules",
+        "managed_workspace",
+    ],
+    "conversation_guards": [
+        "response_integrity",
+        "capability_grounding",
+        "semantic_value_review",
+    ],
+    "operator_channels": [
+        "dashboard",
+        "telegram",
+        "phone",
+        "desktop_context",
+        "mcp",
+        "plugins",
+    ],
+}
 
 
 def compose_user_bio(state: WizardState) -> str:
@@ -85,6 +114,11 @@ def questionnaire_payload(state: WizardState) -> Dict[str, Dict[str, object]]:
         "persona_theme": {
             "accent": state.persona_accent,
         },
+        "current_agent_systems": CURRENT_AGENT_SYSTEMS,
+        "runtime_preferences": {
+            "approval_mode": state.approval_mode,
+            "desktop_context_enabled": state.desktop_context_enabled,
+        },
     }
 
 
@@ -93,6 +127,47 @@ def save_questionnaire(state: WizardState, state_dir: Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(questionnaire_payload(state), indent=2), encoding="utf-8")
     return path
+
+
+def save_runtime_preferences(state: WizardState, state_dir: Path) -> Dict[str, Path]:
+    """Persist bootstrap-time settings consumed directly by runtime services."""
+
+    root = Path(state_dir)
+    desktop_config = DesktopContextConfig(
+        enabled=state.desktop_context_enabled,
+        capture_interval_seconds=_parse_int(
+            state.desktop_capture_interval_seconds,
+            default=300,
+            field_name="Desktop capture interval",
+        ),
+        min_speech_interval_seconds=_parse_int(
+            state.desktop_min_speech_interval_seconds,
+            default=60,
+            field_name="Desktop minimum speech interval",
+        ),
+        tts_enabled=state.desktop_tts_enabled,
+        play_audio=state.desktop_play_audio,
+        vision_enabled=state.desktop_vision_enabled,
+        ocr_enabled=state.desktop_ocr_enabled,
+        capture_backend=state.desktop_capture_backend,
+        max_spoken_chars=_parse_int(
+            state.desktop_max_spoken_chars,
+            default=360,
+            field_name="Desktop max spoken chars",
+        ),
+    )
+    desktop_path = root / "desktop_context" / "config.json"
+    desktop_path.parent.mkdir(parents=True, exist_ok=True)
+    desktop_path.write_text(
+        json.dumps(
+            desktop_config.model_dump(),
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=True,
+        ),
+        encoding="utf-8",
+    )
+    return {"desktop_context": desktop_path}
 
 
 def _optional_path(value: str) -> Path | None:
@@ -215,6 +290,7 @@ def build_bootstrap_config(state: WizardState) -> BootstrapConfig:
             field_name="Telegram pairing TTL",
         ),
         telegram_api_base_url=state.telegram_api_base_url.strip() or "https://api.telegram.org",
+        approval_mode=state.approval_mode,
         cycle_interval=_parse_int(
             state.cycle_interval,
             default=600,

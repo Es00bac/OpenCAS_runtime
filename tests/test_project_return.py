@@ -41,7 +41,7 @@ async def test_chat_project_context_creates_return_commitment_and_schedule(proje
             {
                 "role": "system",
                 "content": (
-                    "Earlier conversation: the OpenCAS agent was working on a book, Chronicle 4246. "
+                    "Earlier conversation: Bulma was working on a book, Chronicle 4246. "
                     "The user asked her to keep working on it, revise, edit, critique "
                     "her own work, and continue until it feels complete."
                 ),

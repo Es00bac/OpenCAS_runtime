@@ -12,13 +12,12 @@ OpenCAS is structured as explicit subsystems rather than one monolithic agent fi
 | `opencas/runtime/` | Conversational loop, scheduler, autonomous cycles, Telegram and phone lifecycle |
 | `opencas/memory/` | Episodes, distilled memories, graph edges, artifact-backed memory ingestion |
 | `opencas/context/` | Session context, retrieval fusion, resonance logic, prompt assembly |
-| `opencas/embeddings/` | Embedding service, cache, native 768-dimensional Gemma lane, local fallback, vector backend wiring |
+| `opencas/embeddings/` | Embedding service, cache, local fallback, vector backend wiring |
 | `opencas/autonomy/` | Self-approval, executive state, creative ladder, commitment and work stores |
 | `opencas/scheduling/` | Durable scheduled tasks, calendar views, and run history |
 | `opencas/platform/` | Capability inventory, extension descriptors, trust surfaces |
 | `opencas/telemetry/` | Append-only runtime event stream and log/query helpers |
 | `opencas/daydream/` | Reflection and conflict storage for the daydream subsystem |
-| `opencas/desktop_context/` | Explicit opt-in desktop capture and context packaging |
 | `opencas/identity/` | Self-model, user model, continuity |
 | `opencas/somatic/` | Somatic dimensions and modulators |
 | `opencas/relational/` | Musubi and relational influence |
@@ -49,13 +48,6 @@ OpenCAS is structured as explicit subsystems rather than one monolithic agent fi
 2. Task schedules can submit new BAA work.
 3. Reminder schedules can emit durable run records without execution.
 4. Missed runs are advanced conservatively instead of being blindly replayed.
-
-### Project Return Loop
-
-1. Long-running creative or execution work records a return snapshot when it stops before true completion.
-2. The snapshot preserves canonical artifacts, attempts, blocked state, and a bounded next step.
-3. The runtime can surface or requeue the work later when it has capacity or new context.
-4. Completion checks reject false "done" states when required artifact changes did not happen.
 
 ### Consolidation Loop
 
@@ -97,7 +89,6 @@ OpenCAS uses `open_llm_auth` as its model gateway.
 
 - chat and tool-use completions use the configured default model lane
 - voice lanes and embeddings use the configured provider material when available
-- the default embedding lane is `google/embeddinggemma-300m`, native 768 dimensions
 - provider material can be linked from an existing config/env or copied into app-local state
 - the dashboard System tab exposes both configured defaults and effective runtime models
 
@@ -141,6 +132,6 @@ The dashboard surfaces those through the current tab set:
 ## Architectural Truths
 
 - The repo currently has a strong operator surface and broad internal observability.
-- The repo is documented here as an editable source checkout, not a package-manager install.
+- The repo is not yet documented here as a polished package-manager install.
 - The release docs should not describe the system as cloud-free unless the configured model lanes are truly local.
 - Phone, voice, schedule, platform, and telemetry are first-class runtime surfaces, not side experiments.

@@ -54,6 +54,8 @@ async def close_bootstrap_context(context: Any) -> None:
         getattr(context.ledger, "store", None),
         getattr(context.harness, "store", None),
         context.commitment_store,
+        getattr(context, "self_inspection_store", None),
+        getattr(context, "wellbeing_store", None),
         context.portfolio_store,
         context.tom_store,
         context.plugin_store,

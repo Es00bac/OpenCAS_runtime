@@ -12,10 +12,6 @@ This release bundle reflects the repo as it exists now. It is not an aspirationa
 - Chat, operations, usage, daydream, identity, executive, schedule, platform, logs, and system dashboard surfaces
 - Twilio-backed phone bridge support with owner and caller workspace separation
 - Telegram pairing and chat integration
-- Telegram media attachment handling for image/message context
-- Compact tool-use memory and semantic tool routing for better tool selection
-- Autonomous project return scheduling for unfinished work
-- Opt-in desktop context capture and review tools
 - Background daydreaming, creative ladder promotion, retry-aware recovery, and task orchestration
 - Operator-facing audit, receipt, qualification, telemetry, and plugin-trust APIs
 
@@ -25,7 +21,7 @@ This release bundle reflects the repo as it exists now. It is not an aspirationa
 - The default CLI state directory is `./.opencas`.
 - Chat, voice, and embedding traffic normally goes to whichever provider/model you configure through `open_llm_auth`.
 - The default embedding model is now `google/embeddinggemma-300m`.
-- `google/embeddinggemma-300m` is treated as the native 768-dimensional local embedding lane. Older 3072-dimensional compatibility records are historical migration concerns, not the current default.
+- Embedding vectors are stored in the canonical 3072-dim space. `google/embeddinggemma-300m` runs locally and is upcast from its 768-native output to 3072 with explicit embedding metadata.
 - A deterministic local hash fallback path is retained for environments where embedding generation is blocked.
 - The dashboard server defaults to `127.0.0.1:8080`.
 
@@ -98,7 +94,7 @@ The current dashboard includes these top-level tabs:
 
 ## Current Release Boundaries
 
-This release is documented as an editable source checkout. The current `requirements.txt` expects the editable gateway dependency at:
+This repo is not yet packaged as a polished PyPI install. The current `requirements.txt` expects the editable gateway dependency at:
 
 ```text
 ../open_llm_auth/
@@ -125,4 +121,4 @@ pytest tests/test_dashboard_api.py -q
 
 ## Licensing Note
 
-This checkout includes a root `LICENSE` file and is published as AGPL-3.0-or-later.
+This checkout does not currently include a root `LICENSE` file. Confirm licensing material before publishing this release bundle externally.

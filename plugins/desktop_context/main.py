@@ -54,7 +54,7 @@ def register_skills(skill_registry, tools) -> None:
     )
     tools.register(
         "desktop_context_capture",
-        "Capture one active-desktop screenshot and OCR excerpt without asking the OpenCAS agent to comment.",
+        "Capture one active-desktop screenshot and OCR excerpt without asking Bulma to comment.",
         adapter,
         ActionRiskTier.WORKSPACE_WRITE,
         {
@@ -70,7 +70,7 @@ def register_skills(skill_registry, tools) -> None:
     )
     tools.register(
         "desktop_context_observe",
-        "Capture the active desktop, create context, and let the OpenCAS agent decide whether a short spoken comment is useful.",
+        "Capture the active desktop, create context, and let Bulma decide whether a short spoken comment is useful.",
         adapter,
         ActionRiskTier.EXTERNAL_WRITE,
         {

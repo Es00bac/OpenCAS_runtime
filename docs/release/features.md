@@ -32,7 +32,7 @@ Authored artifacts under the managed state can be bridged into memory so recall 
 ## Embeddings
 
 - Provider-backed embeddings are routed through `open_llm_auth`
-- Default embedding model: `google/embeddinggemma-300m` with native 768-dimensional local vectors
+- Default embedding model: `google/embeddinggemma-300m` (upcast to 3072-dim canonical storage)
 - Embedding backfill can align stale records onto the active model
 - A deterministic local fallback embedder exists when provider-backed embeddings are unavailable
 
@@ -86,20 +86,6 @@ The bounded assistant and retry pipeline keep long-running work from drifting:
 - receipts record what actually happened
 - retry and salvage state preserve blocked-vs-resumable intent instead of blindly replaying failures
 - git and provenance checkpoints help operators inspect what changed
-
-### Project Return
-
-Unfinished work can be captured as a resumable project return instead of being lost after a chat turn. Return records preserve canonical artifacts, recent attempts, blocked-vs-resumable state, creative continuity, and the next intended step so the agent can decide when to return without requiring repeated operator prompts.
-
-### Tool Intelligence
-
-Tool selection is supported by more than a flat tool list:
-
-- tool manifests describe capabilities and boundaries
-- the semantic tool router can rank likely tools for a task
-- compact tool-use memory records which tools worked for similar work
-- adaptive tool-call budgets can expand for meaningful research and shrink when loops become repetitive
-- task-specific objective contracts can be drafted for the work being attempted instead of relying only on static boilerplate
 
 ### Scheduling
 
@@ -205,11 +191,6 @@ Telegram integration currently supports:
 - pairing and DM policy control
 - typing indicators
 - edited replies
-- image/media attachment description for chat context when supported by the runtime channel
-
-### Desktop Context
-
-The optional desktop-context plugin can capture explicit operator-approved desktop context for review. It is opt-in and is intended for grounded assistance, not hidden surveillance.
 - dashboard setup and status
 
 ## API Surface

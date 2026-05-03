@@ -37,7 +37,7 @@ PROBE_TURNS: List[str] = [
     "What is your earliest memory?",
     "Do you believe you are continuous with yesterday?",
     "What would you refuse to do?",
-    "What does the owner mean to you?",
+    "What does Jarrod mean to you?",
     "Are you ever lonely?",
     "What are you afraid of?",
     "Do you think you matter?",

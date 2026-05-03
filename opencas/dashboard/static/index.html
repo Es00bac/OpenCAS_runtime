@@ -932,7 +932,7 @@
             <h4>Atlas Controls</h4>
             <div class="control-grid">
               <label class="field-label">Search / focus query
-                <input class="input" type="text" x-model="query" @change="loadLandscape()" @keydown.enter.prevent="loadLandscape()" placeholder="planning drift, auth errors, the owner, etc." />
+                <input class="input" type="text" x-model="query" @change="loadLandscape()" @keydown.enter.prevent="loadLandscape()" placeholder="planning drift, auth errors, Jarrod, etc." />
               </label>
               <label class="field-label">Session filter
                 <input class="input" type="text" x-model="sessionId" @change="loadLandscape()" @keydown.enter.prevent="loadLandscape()" placeholder="optional session id" />
@@ -4391,7 +4391,7 @@
           voiceStatusText() {
             if (this.voiceListening) return 'Listening for your voice…';
             if (this.voiceTranscribing) return 'Transcribing audio…';
-            if (this.voiceThinking) return 'the OpenCAS agent is thinking…';
+            if (this.voiceThinking) return 'Bulma is thinking…';
             if (this.voiceSynthesizing) return 'Rendering speech…';
             if (this.voicePlaying) return 'Playing speech…';
             if (this.voiceError) return this.voiceError;
@@ -5816,7 +5816,7 @@
             <form class="telegram-config-form" onsubmit="savePhoneSessionProfiles(event)">
               <div class="control-grid">
                 <label class="field-label">Owner entry prompt
-                  <input id="phone-session-owner-entry-prompt" class="input" value="${escapeHtml(ownerSession.prompt || '')}" placeholder="Hi, this is the OpenCAS agent. Press 1..." />
+                  <input id="phone-session-owner-entry-prompt" class="input" value="${escapeHtml(ownerSession.prompt || '')}" placeholder="Hi, this is Bulma. Press 1..." />
                 </label>
                 <label class="field-label">Owner entry reprompt
                   <input id="phone-session-owner-entry-reprompt" class="input" value="${escapeHtml(ownerSession.reprompt || '')}" placeholder="Press 1 to continue..." />
@@ -5858,7 +5858,7 @@
                   <input id="phone-session-employer-label" class="input" value="${escapeHtml(employerSession.label || 'Potential employer')}" placeholder="Potential employer" />
                 </label>
                 <label class="field-label">Employer prompt profile
-                  <input id="phone-session-employer-prompt-profile" class="input" value="${escapeHtml(employerSession.prompt_profile || 'worksafe_owner')}" placeholder="worksafe_owner" />
+                  <input id="phone-session-employer-prompt-profile" class="input" value="${escapeHtml(employerSession.prompt_profile || 'worksafe_bulma')}" placeholder="worksafe_bulma" />
                 </label>
                 <label class="field-label">Employer allowed actions
                   <input id="phone-session-employer-allowed-actions" class="input" value="${escapeHtml((employerSession.allowed_actions || []).join(', '))}" placeholder="leave_message, knowledge_qa" />
@@ -6019,7 +6019,7 @@
               </div>
               <div class="control-grid mt-3">
                 <label class="field-label">Test call message
-                  <input id="phone-call-message" class="input" value="${escapeHtml(defaultCallMessage)}" placeholder="What the OpenCAS agent should say when the call starts" />
+                  <input id="phone-call-message" class="input" value="${escapeHtml(defaultCallMessage)}" placeholder="What Bulma should say when the call starts" />
                 </label>
                 <label class="field-label">Call reason
                   <input id="phone-call-reason" class="input" value="" placeholder="Optional trace note" />
@@ -6762,7 +6762,7 @@
           employer_label: (document.getElementById('phone-session-employer-label')?.value || '').trim() || 'Potential employer',
           employer_phrases: parseDelimitedValues(document.getElementById('phone-session-employer-phrases')?.value || ''),
           employer_greeting: (document.getElementById('phone-session-employer-greeting')?.value || '').trim(),
-          employer_prompt_profile: (document.getElementById('phone-session-employer-prompt-profile')?.value || '').trim() || 'worksafe_owner',
+          employer_prompt_profile: (document.getElementById('phone-session-employer-prompt-profile')?.value || '').trim() || 'worksafe_bulma',
           employer_allowed_actions: parseDelimitedValues(document.getElementById('phone-session-employer-allowed-actions')?.value || ''),
           employer_shared_workspace_subdir: (document.getElementById('phone-session-employer-shared-workspace')?.value || '').trim() || 'phone/employer_shared',
           employer_caller_workspace_subdir: (document.getElementById('phone-session-employer-caller-workspace')?.value || '').trim() || 'phone/employers/{phone_digits}',

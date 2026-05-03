@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -42,6 +44,88 @@ async def maybe_compact_runtime_session(
     return record
 
 
+async def compact_runtime_backlog(
+    runtime: Any,
+    *,
+    max_sessions: int = 8,
+    min_session_lag: int = 20,
+    tail_size: int = 10,
+    max_candidates: int = 1000,
+) -> Dict[str, Any]:
+    """Compact the largest old uncompacted session backlogs within a small budget."""
+    ctx = getattr(runtime, "ctx", None)
+    memory = getattr(ctx, "memory", None) or getattr(runtime, "memory", None)
+    compactor = getattr(runtime, "compactor", None)
+    if memory is None or compactor is None:
+        return {
+            "available": False,
+            "reason": "missing_memory_or_compactor",
+            "sessions_compacted": 0,
+            "episodes_compacted": 0,
+        }
+
+    episodes = await memory.list_non_compacted_episodes(limit=max_candidates)
+    total_lag = len(episodes)
+    count_func = getattr(memory, "count_non_compacted_episodes", None)
+    if callable(count_func):
+        try:
+            counted = count_func()
+            if inspect.isawaitable(counted):
+                counted = await counted
+            if isinstance(counted, int):
+                total_lag = counted
+        except Exception:
+            pass
+
+    session_counts: Counter[str] = Counter()
+    for episode in episodes:
+        session_id = getattr(episode, "session_id", None)
+        if session_id:
+            session_counts[str(session_id)] += 1
+
+    selected = [
+        (session_id, count)
+        for session_id, count in session_counts.most_common()
+        if count >= max(min_session_lag, tail_size + 1)
+    ][: max(0, max_sessions)]
+
+    compacted_sessions = []
+    episodes_compacted = 0
+    for session_id, count in selected:
+        record = await compactor.compact_session(
+            session_id,
+            tail_size=tail_size,
+            min_removed_count=1,
+        )
+        if record is None:
+            continue
+        removed = int(getattr(record, "removed_count", 0) or 0)
+        episodes_compacted += removed
+        compacted_sessions.append(
+            {
+                "session_id": session_id,
+                "candidate_lag": count,
+                "removed_count": removed,
+                "compaction_id": str(getattr(record, "compaction_id", "")),
+            }
+        )
+
+    result = {
+        "available": True,
+        "candidate_lag": len(episodes),
+        "total_lag": total_lag,
+        "sessions_considered": len(session_counts),
+        "sessions_compacted": len(compacted_sessions),
+        "episodes_compacted": episodes_compacted,
+        "remaining_lag": max(0, total_lag - episodes_compacted),
+        "compacted_sessions": compacted_sessions,
+    }
+    trace = getattr(runtime, "_trace", None)
+    if callable(trace):
+        trace("compaction_backlog_sweep", result)
+    return result
+
+
 def _persist_runtime_consolidation_state(
     runtime: Any,
     payload: Dict[str, Any],
@@ -77,6 +161,15 @@ async def run_runtime_consolidation(
                 runtime,
                 budget=dict(budget or {}),
             )
+            backlog_result = await compact_runtime_backlog(
+                runtime,
+                max_sessions=int((budget or {}).get("max_compaction_sessions", 8)),
+                min_session_lag=int((budget or {}).get("min_compaction_session_lag", 20)),
+                tail_size=int((budget or {}).get("compaction_tail_size", 10)),
+                max_candidates=int((budget or {}).get("max_compaction_candidates", 1000)),
+            )
+            if backlog_result.get("available"):
+                payload["compaction_backlog"] = backlog_result
             runtime._last_consolidation_result = payload
             _persist_runtime_consolidation_state(runtime, payload)
             trace = getattr(runtime, "_trace", None)
@@ -115,6 +208,15 @@ async def run_runtime_consolidation(
                 trace("consolidation_budget_timeout", payload)
             return payload
         payload = result.model_dump(mode="json")
+        backlog_result = await compact_runtime_backlog(
+            runtime,
+            max_sessions=int((budget or {}).get("max_compaction_sessions", 8)),
+            min_session_lag=int((budget or {}).get("min_compaction_session_lag", 20)),
+            tail_size=int((budget or {}).get("compaction_tail_size", 10)),
+            max_candidates=int((budget or {}).get("max_compaction_candidates", 1000)),
+        )
+        if backlog_result.get("available"):
+            payload["compaction_backlog"] = backlog_result
         runtime._last_consolidation_result = payload
         _persist_runtime_consolidation_state(runtime, payload)
         return payload

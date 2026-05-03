@@ -1,13 +1,14 @@
 from opencas.bootstrap.tui import BootstrapTUI
-from opencas.bootstrap.tui_screens_intro import WelcomeScreen
-from opencas.bootstrap.tui_screens_user import GoalsScreen
 from opencas.bootstrap.tui_runtime import BootstrapScreen
+from opencas.bootstrap.tui_screens_intro import WelcomeScreen
 from opencas.bootstrap.tui_screens_setup import (
+    AgentSystemsScreen,
     CredentialsScreen,
     IntegrationsScreen,
     ReviewScreen,
     WorkspaceScreen,
 )
+from opencas.bootstrap.tui_screens_user import GoalsScreen
 
 
 def test_bootstrap_tui_resolves_profile_screens() -> None:
@@ -20,6 +21,7 @@ def test_bootstrap_tui_resolves_setup_screens() -> None:
     app = BootstrapTUI()
     assert isinstance(app.get_screen("workspace"), WorkspaceScreen)
     assert isinstance(app.get_screen("credentials"), CredentialsScreen)
+    assert isinstance(app.get_screen("agent_systems"), AgentSystemsScreen)
     assert isinstance(app.get_screen("integrations"), IntegrationsScreen)
     assert isinstance(app.get_screen("review"), ReviewScreen)
 

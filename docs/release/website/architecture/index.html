@@ -10,7 +10,7 @@
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="../styles.css">
-  <link rel="stylesheet" href="../media-player.css">
+  <link rel="stylesheet" href="media-player.css">
 </head>
 <body>
   <header class="site-header">
@@ -46,7 +46,6 @@
           <article class="content-card"><h3>somatic/</h3><p>Arousal, fatigue, tension, valence, focus, energy, certainty, and modulation logic.</p></article>
           <article class="content-card"><h3>autonomy/</h3><p>Self-approval, creative ladder, work store, commitments, and executive state.</p></article>
           <article class="content-card"><h3>scheduling/</h3><p>Durable schedules, calendar views, and run history.</p></article>
-          <article class="content-card"><h3>desktop_context/</h3><p>Explicit opt-in desktop capture and context packaging.</p></article>
           <article class="content-card"><h3>platform/</h3><p>Capability inventory, extension descriptors, and trust control surfaces.</p></article>
           <article class="content-card"><h3>telemetry/</h3><p>Append-only runtime events and query helpers for the Logs view.</p></article>
           <article class="content-card"><h3>daydream/</h3><p>Reflection storage, conflict storage, keeper flow, and promotion lineage.</p></article>
@@ -69,7 +68,6 @@
               <tr><td>Conversation</td><td>Handles user input, retrieval, tool use, and response persistence.</td></tr>
               <tr><td>Voice</td><td>Transcribes microphone input and synthesizes spoken replies when enabled.</td></tr>
               <tr><td>Creative / background</td><td>Checks idle opportunities, evaluates the creative ladder, and generates daydream sparks.</td></tr>
-              <tr><td>Project return</td><td>Preserves unfinished work, blocked state, canonical artifacts, and next steps for later resumption.</td></tr>
               <tr><td>Scheduling</td><td>Drives durable task and reminder schedules on a fixed cadence.</td></tr>
               <tr><td>Consolidation</td><td>Reweights memory and continuity state over time.</td></tr>
               <tr><td>Telemetry</td><td>Appends events, aggregates usage, and feeds the Logs tab.</td></tr>
@@ -86,7 +84,6 @@
           <li><code>context.db</code> for session context and message history</li>
           <li><code>tasks.db</code> and <code>work.db</code> for background execution state</li>
           <li><code>plans.db</code> for commitment and planning state</li>
-          <li><code>tool_use_memory.db</code> for compact records of which tools worked for similar tasks</li>
           <li><code>daydream.db</code> for reflection and conflict tracking</li>
           <li><code>tom.db</code> for belief and intention state</li>
           <li><code>telemetry/</code> for event and usage logs</li>
@@ -105,10 +102,6 @@
             <h3>Dashboard tabs</h3>
             <p>Overview, Health, Chat, Operations, Schedule, Usage, Daydream, Memory, Identity, Executive, Platform, System, and Logs.</p>
           </article>
-          <article class="content-card">
-            <h3>Tool selection</h3>
-            <p>Tool manifests, semantic routing, compact tool-use memory, and objective contracts keep the active toolbox small and task-specific.</p>
-          </article>
         </div>
       </section>
 
@@ -116,7 +109,7 @@
         <h3>Architectural truths</h3>
         <ul class="list">
           <li>The repo currently has a strong operator surface and broad internal observability.</li>
-          <li>The repo is documented here as an editable source checkout, not a package-manager install.</li>
+          <li>The repo is not yet documented here as a polished package-manager install.</li>
           <li>The release docs should not describe the system as cloud-free unless the configured model lanes are truly local.</li>
           <li>Phone, voice, schedule, platform, and telemetry are first-class runtime surfaces, not side experiments.</li>
         </ul>
@@ -130,6 +123,6 @@
       <div><a href="../index.html">Back to release index</a></div>
     </div>
   </footer>
-  <script src="../media-player.js"></script>
+  <script src="media-player.js"></script>
 </body>
 </html>

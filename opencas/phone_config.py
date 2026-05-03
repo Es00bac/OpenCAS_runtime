@@ -604,103 +604,17 @@ def save_phone_menu_config(path: Path | str, config: PhoneMenuConfig) -> Path:
     return config_path
 
 
-def default_phone_menu_config() -> PhoneMenuConfig:
-    """Return the built-in public phone menu for fresh installs."""
-
-    return PhoneMenuConfig(
-        default_menu_key="public_main",
-        owner_menu_key="owner_entry",
-        owner_pin_prompt="Please enter your six digit owner PIN now.",
-        owner_pin_retry_prompt="That PIN did not match. Please try once more.",
-        owner_pin_success_message="PIN verified.",
-        owner_pin_failure_message="Sorry, I couldn't verify the owner PIN. Goodbye.",
-        menus=[
-            {
-                "key": "owner_entry",
-                "prompt": "Press 1 to continue as the owner, or press 2 for the main menu.",
-                "reprompt": "Press 1 for owner mode, or press 2 for the main menu.",
-                "options": [
-                    {
-                        "key": "owner_continue",
-                        "digit": "1",
-                        "action": "owner_conversation",
-                        "label": "Owner conversation",
-                        "message": "Go ahead.",
-                    },
-                    {
-                        "key": "owner_main_menu",
-                        "digit": "2",
-                        "action": "submenu",
-                        "label": "Main menu",
-                        "target_menu": "public_main",
-                    },
-                ],
-            },
-            {
-                "key": "public_main",
-                "prompt": (
-                    "Hi, this is the OpenCAS phone bridge. Potential employers, press 1 or say employer. "
-                    "Everyone else, press 2."
-                ),
-                "reprompt": (
-                    "Please press 1 or say employer if you're calling about work opportunities. "
-                    "Otherwise, press 2."
-                ),
-                "options": [
-                    {
-                        "key": "employer",
-                        "digit": "1",
-                        "action": "workspace_assistant",
-                        "label": "Potential employer",
-                        "phrases": ["employer", "work", "recruiter", "hiring", "job"],
-                        "greeting": (
-                            "You're connected to the OpenCAS phone bridge in work mode. "
-                            "I can answer questions about the owner's approved resume, skills, "
-                            "and current projects, and I can take a message for follow-up."
-                        ),
-                        "prompt_profile": "worksafe_owner",
-                        "allowed_actions": ["leave_message", "knowledge_qa"],
-                        "workspace_mounts": [
-                            {
-                                "scope": "shared",
-                                "subdir": "phone/employer_shared",
-                                "access": "read_only",
-                            },
-                            {
-                                "scope": "caller",
-                                "subdir": "phone/employers/{phone_digits}",
-                                "access": "append_only",
-                            },
-                        ],
-                    },
-                    {
-                        "key": "reject",
-                        "digit": "2",
-                        "action": "say_then_hangup",
-                        "label": "Not for this line",
-                        "phrases": ["other", "not employer", "personal"],
-                        "message": (
-                            "Sorry, this line is reserved for employment inquiries. "
-                            "Please check the website for public information."
-                        ),
-                    },
-                ],
-            },
-        ],
-    )
-
-
 def load_phone_menu_config(path: Path | str) -> PhoneMenuConfig:
     config_path = Path(path).expanduser()
     if not config_path.exists():
-        return default_phone_menu_config()
+        return PhoneMenuConfig()
     try:
         payload = json.loads(config_path.read_text(encoding="utf-8"))
         if isinstance(payload, dict):
             return PhoneMenuConfig.model_validate(payload)
     except Exception:
         pass
-    return default_phone_menu_config()
+    return PhoneMenuConfig()
 
 
 def summarize_phone_session_profiles(menu: PhoneMenuConfig) -> Dict[str, Any]:
@@ -763,7 +677,7 @@ def summarize_phone_session_profiles(menu: PhoneMenuConfig) -> Dict[str, Any]:
             "label": employer.label if employer else "Potential employer",
             "phrases": list(employer.phrases) if employer else [],
             "greeting": employer.greeting if employer else "",
-            "prompt_profile": employer.prompt_profile if employer else "worksafe_owner",
+            "prompt_profile": employer.prompt_profile if employer else "worksafe_bulma",
             "allowed_actions": list(employer.allowed_actions) if employer else ["leave_message", "knowledge_qa"],
             "shared_workspace_subdir": _workspace_mount_subdir(
                 employer, scope="shared", access="read_only"

@@ -480,7 +480,7 @@ No god files. No hidden ownership. No ambiguous boundaries.
 
 ### 11.4 Portability
 
-OpenCAS should run locally and support clean migration from legacy agent state.
+OpenCAS should run locally and support clean migration from Bulma state.
 
 ### 11.5 Observability
 
@@ -808,7 +808,7 @@ For a persistent agent, diagnostics are not optional. They are part of the produ
 The product spec is satisfied only if the implementation can:
 
 1. Start as a clean new CAS agent with a one-time moral warning.
-2. Import legacy agent state and continue coherently.
+2. Import legacy Bulma state and continue coherently.
 3. Operate with high trust and self-approval by default.
 4. Promote daydream sparks into artifacts and projects without constant user approval.
 5. Use embeddings broadly and efficiently.

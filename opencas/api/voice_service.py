@@ -18,7 +18,18 @@ from typing import Any, Dict, Optional
 import httpx
 from fastapi import HTTPException
 
-_ELEVENLABS_ENV_PATH = Path(os.getenv("OPENCAS_ELEVENLABS_ENV_PATH", ".opencas/provider_material/.env")).expanduser()
+
+def _default_elevenlabs_env_path() -> Path:
+    configured = os.getenv("OPENCAS_ELEVENLABS_ENV_PATH")
+    if configured:
+        return Path(configured).expanduser()
+    legacy_path = Path("~/.opencasenv/.env").expanduser()
+    if legacy_path.exists():
+        return legacy_path
+    return Path(".opencas/provider_material/.env")
+
+
+_ELEVENLABS_ENV_PATH = _default_elevenlabs_env_path()
 _ELEVENLABS_VOICE_ID = "gJx1vCzNCD1EQHT212Ls"
 _ELEVENLABS_STT_MODEL = "scribe_v2"
 _ELEVENLABS_FAST_MODEL = "eleven_flash_v2_5"

@@ -10,7 +10,7 @@ import pytest_asyncio
 from opencas.api import provenance_store as ps
 from opencas.autonomy.executive import ExecutiveState
 from opencas.bootstrap import BootstrapConfig
-from opencas.context import ContextBuilder, MemoryRetriever, MessageRole, SessionContextStore
+from opencas.context import ContextBuilder, MemoryRetriever, MessageEntry, MessageRole, SessionContextStore
 from opencas.daydream import DaydreamReflection
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.identity import IdentityManager, IdentityStore
@@ -18,6 +18,7 @@ from opencas.memory import MemoryStore
 from opencas.relational import MusubiState, MusubiStore, RelationalEngine
 from opencas.tom import ToMEngine
 from opencas.tom.models import BeliefSubject
+from opencas.wellbeing import WellbeingState
 
 
 @pytest_asyncio.fixture
@@ -280,7 +281,7 @@ async def test_build_includes_personal_hobby_seeds_from_daydream_self_beliefs(bu
         },
     }
 
-    manifest = await builder.build("Who are you outside helping the owner?", session_id="s1")
+    manifest = await builder.build("Who are you outside helping Jarrod?", session_id="s1")
 
     assert "Personal curiosity and hobby state" in manifest.system.content
     assert "obscure tools and niche software ecosystems" in manifest.system.content
@@ -424,10 +425,27 @@ async def test_build_system_entry_reports_managed_workspace_root(builder_deps, t
 
 
 @pytest.mark.asyncio
+async def test_context_includes_boundary_guidance_when_relationship_pressure_is_high(builder_deps):
+    builder, _ctx_store, _mem_store = builder_deps
+    builder.latest_wellbeing_state = WellbeingState(
+        relationship_pressure=0.9,
+        autonomy=0.2,
+        truth_pressure=0.7,
+    )
+
+    system_entry = await builder._build_system_entry(
+        user_input="I need reassurance that everything is okay.",
+        session_id="wellbeing-test",
+    )
+
+    assert "preserve truth before reassurance" in system_entry.content.lower()
+
+
+@pytest.mark.asyncio
 async def test_build_system_entry_collapses_recursive_identity_stutter(builder_deps):
     builder, _ctx_store, _mem_store = builder_deps
     builder.identity.self_model.narrative = (
-        "the OpenCAS agent keeps returning to returning to returning to digesting the unfinished project thread around the same work."
+        "Bulma keeps returning to returning to returning to digesting the unfinished project thread around the same work."
     )
 
     system_entry = await builder._build_system_entry()
@@ -566,6 +584,52 @@ async def test_build_includes_promise_followthrough_guidance_for_delayed_commitm
 
 
 @pytest.mark.asyncio
+async def test_context_builder_surfaces_recent_response_integrity_corrections(tmp_path):
+    identity = IdentityManager(IdentityStore(tmp_path / "identity"))
+    identity.load()
+
+    class _FakeStore:
+        async def list_recent(self, session_id, limit=50, include_hidden=False):
+            return [
+                MessageEntry(
+                    role=MessageRole.ASSISTANT,
+                    content="You just said that. Thank you.",
+                    meta={
+                        "response_integrity": {
+                            "revised": True,
+                            "reasons": [
+                                "The response treated the immediately previous turn as older history."
+                            ],
+                        }
+                    },
+                )
+            ]
+
+    class _FakeRetriever:
+        memory = None
+
+        @staticmethod
+        def detect_personal_recall_intent(_user_input: str) -> bool:
+            return False
+
+    builder = ContextBuilder(
+        store=_FakeStore(),
+        retriever=_FakeRetriever(),
+        identity=identity,
+    )
+
+    system_entry = await builder._build_system_entry(
+        user_input="Thanks",
+        session_id="s1",
+    )
+
+    lowered = system_entry.content.lower()
+    assert "recent response-integrity corrections" in lowered
+    assert "immediately previous turn" in lowered
+    assert "not personality scripts" in lowered
+
+
+@pytest.mark.asyncio
 async def test_build_includes_relevant_tom_user_facts_for_personal_recall(builder_deps):
     builder, _ctx_store, _mem_store = builder_deps
     tom = ToMEngine(identity=builder.identity)
@@ -589,6 +653,34 @@ async def test_build_includes_relevant_tom_user_facts_for_personal_recall(builde
     assert "80004" in system_entry.content
     assert "favorite color" not in lowered
     assert "tom user facts are durable belief records" in lowered
+
+
+@pytest.mark.asyncio
+async def test_build_includes_local_lived_time_orientation(builder_deps):
+    builder, _ctx_store, _mem_store = builder_deps
+
+    system_entry = await builder._build_system_entry(
+        user_input="Hey, how's it going this morning?",
+        session_id="s1",
+    )
+
+    lowered = system_entry.content.lower()
+    assert "current local lived time is" in lowered
+    assert "do not treat utc as your local lived clock" in lowered
+
+
+@pytest.mark.asyncio
+async def test_build_includes_source_grounding_for_prior_knowledge_claims(builder_deps):
+    builder, _ctx_store, _mem_store = builder_deps
+
+    system_entry = await builder._build_system_entry(
+        user_input="I just started watching this new anime.",
+        session_id="s1",
+    )
+
+    lowered = system_entry.content.lower()
+    assert "do not imply you already noted, knew, saw, or remembered a newly introduced topic" in lowered
+    assert "use available research tools" in lowered
 
 
 @pytest.mark.asyncio
@@ -673,7 +765,7 @@ async def test_build_treats_third_person_bulma_location_query_as_shared_location
     assert "asked: where does she live" not in lowered
     assert "favorite color" not in lowered
     assert "location recall perspective" in lowered
-    assert "third-person 'she' can refer to you" in lowered
+    assert "third-person 'she' refer to you/bulma" in lowered
     assert "lives with user in user's computer in arvada, colorado" in lowered
     assert "answer in this shape" not in lowered
     assert "i live with you, in your computer" not in lowered
@@ -693,7 +785,7 @@ async def test_build_treats_direct_bulma_location_query_as_shared_location_recal
     builder.tom = tom
 
     system_entry = await builder._build_system_entry(
-        user_input="Where does the OpenCAS agent live?",
+        user_input="Where does Bulma live?",
         session_id="s1",
     )
 
@@ -744,7 +836,7 @@ async def test_build_does_not_invent_computer_location_without_self_location_fac
     builder.tom = tom
 
     system_entry = await builder._build_system_entry(
-        user_input="Where does the OpenCAS agent live?",
+        user_input="Where does Bulma live?",
         session_id="s1",
     )
 

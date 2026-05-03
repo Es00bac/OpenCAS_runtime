@@ -1,10 +1,16 @@
 import json
 from pathlib import Path
 
+from opencas.bootstrap.tui_bootstrap import (
+    build_bootstrap_config,
+    compose_user_bio,
+    questionnaire_payload,
+    save_questionnaire,
+    save_runtime_preferences,
+)
+from opencas.bootstrap.tui_state import WizardState
 from opencas.model_routing import ModelRoutingMode
 from opencas.sandbox.config import SandboxMode
-from opencas.bootstrap.tui_bootstrap import build_bootstrap_config, compose_user_bio, questionnaire_payload, save_questionnaire
-from opencas.bootstrap.tui_state import WizardState
 
 
 def test_compose_user_bio_uses_questionnaire_fallbacks():
@@ -24,11 +30,18 @@ def test_questionnaire_payload_and_save_round_trip(tmp_path: Path):
     state = WizardState()
     state.goal_1 = "Finish setup"
     state.persona_accent = "teal"
+    state.approval_mode = "auto_review"
+    state.desktop_context_enabled = True
 
     payload = questionnaire_payload(state)
     saved = save_questionnaire(state, tmp_path)
 
     assert payload["initial_goals"]["goal_1"] == "Finish setup"
+    assert payload["runtime_preferences"]["approval_mode"] == "auto_review"
+    assert payload["runtime_preferences"]["desktop_context_enabled"] is True
+    assert "wellbeing" in payload["current_agent_systems"]["always_on"]
+    assert "self_inspection" in payload["current_agent_systems"]["always_on"]
+    assert "response_integrity" in payload["current_agent_systems"]["conversation_guards"]
     assert saved == tmp_path / "bootstrap_questionnaire.json"
     assert json.loads(saved.read_text(encoding="utf-8"))["persona_theme"]["accent"] == "teal"
 
@@ -105,6 +118,7 @@ def test_build_bootstrap_config_covers_current_bootstrap_surface():
     state.telegram_poll_interval_seconds = "2.5"
     state.telegram_pairing_ttl_seconds = "7200"
     state.telegram_api_base_url = "https://telegram.example.com"
+    state.approval_mode = "auto_review"
     state.cycle_interval = "600"
     state.daydream_interval = "720"
     state.baa_heartbeat_interval = "120"
@@ -144,6 +158,7 @@ def test_build_bootstrap_config_covers_current_bootstrap_surface():
     assert config.telegram_poll_interval_seconds == 2.5
     assert config.telegram_pairing_ttl_seconds == 7200
     assert config.telegram_api_base_url == "https://telegram.example.com"
+    assert config.approval_mode == "auto_review"
     assert config.cycle_interval == 600
     assert config.daydream_interval == 720
     assert config.baa_heartbeat_interval == 120
@@ -170,3 +185,31 @@ def test_build_bootstrap_config_ignores_stale_provider_fields_in_auto_mode():
     assert config.credential_source_env_path is None
     assert config.credential_env_keys == []
     assert config.credential_profile_ids == []
+
+
+def test_save_runtime_preferences_writes_desktop_context_config(tmp_path: Path):
+    state = WizardState()
+    state.desktop_context_enabled = True
+    state.desktop_capture_interval_seconds = "90"
+    state.desktop_min_speech_interval_seconds = "45"
+    state.desktop_tts_enabled = False
+    state.desktop_play_audio = False
+    state.desktop_vision_enabled = False
+    state.desktop_ocr_enabled = True
+    state.desktop_capture_backend = "grim"
+    state.desktop_max_spoken_chars = "280"
+
+    saved = save_runtime_preferences(state, tmp_path)
+
+    desktop_config = saved["desktop_context"]
+    assert desktop_config == tmp_path / "desktop_context" / "config.json"
+    payload = json.loads(desktop_config.read_text(encoding="utf-8"))
+    assert payload["enabled"] is True
+    assert payload["capture_interval_seconds"] == 90
+    assert payload["min_speech_interval_seconds"] == 45
+    assert payload["tts_enabled"] is False
+    assert payload["play_audio"] is False
+    assert payload["vision_enabled"] is False
+    assert payload["ocr_enabled"] is True
+    assert payload["capture_backend"] == "grim"
+    assert payload["max_spoken_chars"] == 280

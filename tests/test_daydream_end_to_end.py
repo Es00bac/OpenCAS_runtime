@@ -70,7 +70,7 @@ async def test_run_cycle_daydream_keeper_gate(runtime: AgentRuntime) -> None:
     assert "keeper spark about growth and clarity" in ladder_contents
     assert "reject spark about nothing relevant" not in ladder_contents
 
-    # Both reflections should be saved (reframe may prepend mirror affirmation)
+    # Both reflections should be saved without injecting canned mirror text
     recent = await runtime.ctx.daydream_store.list_recent(limit=10)
     sparks = {r.spark_content for r in recent}
     assert any("keeper spark about growth and clarity" in s for s in sparks)

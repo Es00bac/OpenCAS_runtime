@@ -7,14 +7,11 @@ Run with:
 from __future__ import annotations
 
 import sys
-from typing import Any
 
-from textual.app import App, ComposeResult
-from textual.containers import Container
-from textual.widgets import Footer, Header
+from textual.app import App
+from textual.screen import Screen
 
-from opencas.bootstrap.tui_state import STATE
-
+from opencas.bootstrap.tui_runtime import BootstrapScreen
 from opencas.bootstrap.tui_screens_intro import (
     IdentityScreen,
     ThemeScreen,
@@ -22,22 +19,21 @@ from opencas.bootstrap.tui_screens_intro import (
     VisionScreen,
     WelcomeScreen,
 )
-from opencas.bootstrap.tui_screens_user import (
-    AboutMeScreen,
-    EmotionsScreen,
-    GoalsScreen,
-    LearningStyleScreen,
-)
-from opencas.bootstrap.tui_runtime import BootstrapScreen
 from opencas.bootstrap.tui_screens_setup import (
     AdvancedScreen,
+    AgentSystemsScreen,
     CredentialsScreen,
     IntegrationsScreen,
     ModelsScreen,
     ReviewScreen,
     WorkspaceScreen,
 )
-
+from opencas.bootstrap.tui_screens_user import (
+    AboutMeScreen,
+    EmotionsScreen,
+    GoalsScreen,
+    LearningStyleScreen,
+)
 
 # -----------------------------------------------------------------------------
 # State held across the wizard
@@ -138,6 +134,7 @@ class BootstrapTUI(App):
                 "credentials": CredentialsScreen,
                 "models": ModelsScreen,
                 "advanced": AdvancedScreen,
+                "agent_systems": AgentSystemsScreen,
                 "integrations": IntegrationsScreen,
                 "review": ReviewScreen,
                 "bootstrap": BootstrapScreen,

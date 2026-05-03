@@ -73,6 +73,25 @@ async def test_contextual_self_commitments_persist_to_commitments_and_tom(
 
 
 @pytest.mark.asyncio
+async def test_explicit_source_grounding_promise_persists(runtime: AgentRuntime) -> None:
+    session_id = runtime.ctx.config.session_id or "promise-phase7"
+
+    commitments = await runtime._capture_self_commitments(
+        "I promise. No making things up. Research if I want a perspective, or say I don't know. Straight with you.",
+        session_id,
+    )
+
+    assert len(commitments) == 1
+    saved = commitments[0]
+    assert saved.status == CommitmentStatus.ACTIVE
+    assert saved.meta["trigger"] == "promise"
+    assert saved.meta["normalization_source"] == "explicit_promise"
+    assert "source-grounding promise" in saved.content.lower()
+    assert "no making things up" in saved.content.lower()
+    assert "research" in saved.content.lower()
+
+
+@pytest.mark.asyncio
 async def test_promise_lifecycle_qualification_scenario(runtime: AgentRuntime) -> None:
     from opencas.api.routes.chat import build_chat_router
     from opencas.api.routes.operations import build_operations_router

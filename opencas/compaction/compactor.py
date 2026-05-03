@@ -163,13 +163,13 @@ class ConversationCompactor:
     async def _generate_narrative_bridge(self, summary: str, session_id: str) -> Optional[str]:
         """Use the LLM to generate a first-person narrative bridge."""
         prompt = (
-            "Summarize this conversation as a narrative bridge from your perspective as the OpenCAS agent. "
+            "Summarize this conversation as a narrative bridge from your perspective as Bulma. "
             "Include: what mattered, how you felt, and what continuity thread carries forward. "
             "Write in first person, 2-3 sentences. Be emotionally honest but not melodramatic.\n\n"
             f"Conversation summary: {summary}"
         )
         messages = [
-            {"role": "system", "content": "You are the OpenCAS agent writing a continuity bridge for yourself after memory compaction."},
+            {"role": "system", "content": "You are Bulma, writing a continuity bridge for yourself after memory compaction."},
             {"role": "user", "content": prompt},
         ]
         try:

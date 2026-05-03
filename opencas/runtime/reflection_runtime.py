@@ -144,9 +144,14 @@ async def run_runtime_daydream_inner(runtime: "AgentRuntime") -> Dict[str, Any]:
                     },
                 )
             elif resolution.strategy == "reframe" and resolution.mirror:
-                reflection.spark_content = (
-                    f"{resolution.mirror.affirmation}\n\n{reflection.spark_content}"
-                )
+                reflection.experience_context["mirror_strategy"] = {
+                    "reason": resolution.mirror.reason,
+                    "suggested_strategy": resolution.mirror.suggested_strategy,
+                    "grounding": [
+                        item.model_dump(mode="json")
+                        for item in resolution.mirror.grounding
+                    ],
+                }
 
             if allow_promotion:
                 from opencas.autonomy.commitment import Commitment
@@ -212,6 +217,9 @@ async def run_runtime_daydream_inner(runtime: "AgentRuntime") -> Dict[str, Any]:
             if getattr(runtime.ctx, "daydream_store", None):
                 await runtime.ctx.daydream_store.save_reflection(reflection)
                 recent.append(reflection.spark_content)
+            record_daydream_wellbeing = getattr(runtime, "record_daydream_wellbeing", None)
+            if callable(record_daydream_wellbeing):
+                await record_daydream_wellbeing(reflection)
             if reflection.keeper and runtime.memory:
                 content = reflection.synthesis or reflection.spark_content
                 try:
@@ -251,9 +259,15 @@ async def run_runtime_daydream_inner(runtime: "AgentRuntime") -> Dict[str, Any]:
             if resolution.strategy == "reframe" and resolution.mirror:
                 await runtime.ctx.somatic.emit_appraisal_event(
                     AppraisalEventType.SELF_COMPASSION_OFFERED,
-                    source_text=resolution.mirror.affirmation,
+                    source_text=resolution.mirror.reason,
                     trigger_event_id=str(reflection.reflection_id),
-                    meta={"suggested_strategy": resolution.mirror.suggested_strategy},
+                    meta={
+                        "suggested_strategy": resolution.mirror.suggested_strategy,
+                        "grounding": [
+                            item.model_dump(mode="json")
+                            for item in resolution.mirror.grounding
+                        ],
+                    },
                 )
 
             initiative_contact = getattr(runtime, "initiative_contact", None)

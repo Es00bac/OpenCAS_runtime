@@ -140,7 +140,7 @@ async def test_phone_routes_direct_invocation() -> None:
     updated = await config_endpoint(
         PhoneConfigUpdateRequest(
             enabled=True,
-            public_base_url="https://opencas.example.com",
+            public_base_url="https://bulma.example.com",
             webhook_signature_required=True,
             twilio_from_number="+14846736227",
             owner_phone_number="+17203340532",
@@ -153,8 +153,8 @@ async def test_phone_routes_direct_invocation() -> None:
 
     session_profiles = await session_profiles_endpoint(
         PhoneSessionProfilesUpdateRequest(
-            owner_entry_prompt="Press 1 for the owner.",
-            owner_entry_reprompt="Press 1 for the owner again.",
+            owner_entry_prompt="Press 1 for Jarrod.",
+            owner_entry_reprompt="Press 1 for Jarrod again.",
             owner_pin_prompt="Enter owner pin.",
             owner_pin_retry_prompt="Try the pin again.",
             owner_pin_success_message="Verified.",
@@ -175,7 +175,7 @@ async def test_phone_routes_direct_invocation() -> None:
                 "default_menu_key": "public_main",
                 "owner_menu_key": "owner_entry",
                 "menus": [
-                    {"key": "owner_entry", "prompt": "Press 1 for the owner.", "options": []},
+                    {"key": "owner_entry", "prompt": "Press 1 for Jarrod.", "options": []},
                     {"key": "public_main", "prompt": "Potential employers press 1.", "options": []},
                 ],
             }
@@ -187,7 +187,7 @@ async def test_phone_routes_direct_invocation() -> None:
     autoconfigured = await autoconfigure_endpoint(
         PhoneAutoconfigureRequest(
             enabled=True,
-            public_base_url="https://opencas.example.com",
+            public_base_url="https://bulma.example.com",
             owner_phone_number="+17203340532",
             owner_display_name="Cabew",
         )
@@ -203,7 +203,7 @@ def test_phone_route_external_url_prefers_configured_public_base_url() -> None:
     runtime = SimpleNamespace(
         phone_settings=PhoneRuntimeConfig(
             enabled=True,
-            public_base_url="https://opencas.example.com",
+            public_base_url="https://bulma.example.com",
             twilio_from_number="+14846736227",
             owner_phone_number="+17203340532",
         )
@@ -221,10 +221,10 @@ def test_phone_route_external_url_prefers_configured_public_base_url() -> None:
         }
     )
 
-    assert _external_base_url(runtime, request) == "https://opencas.example.com"
+    assert _external_base_url(runtime, request) == "https://bulma.example.com"
     assert (
         _external_request_url(runtime, request)
-        == "https://opencas.example.com/api/phone/twilio/voice?call_token=abc123"
+        == "https://bulma.example.com/api/phone/twilio/voice?call_token=abc123"
     )
 
 
@@ -232,7 +232,7 @@ def test_phone_route_external_url_also_supports_callable_phone_settings() -> Non
     runtime = SimpleNamespace(
         phone_settings=lambda: PhoneRuntimeConfig(
             enabled=True,
-            public_base_url="https://opencas.example.com",
+            public_base_url="https://bulma.example.com",
             twilio_from_number="+14846736227",
             owner_phone_number="+17203340532",
         )
@@ -250,10 +250,10 @@ def test_phone_route_external_url_also_supports_callable_phone_settings() -> Non
         }
     )
 
-    assert _external_base_url(runtime, request) == "https://opencas.example.com"
+    assert _external_base_url(runtime, request) == "https://bulma.example.com"
     assert (
         _external_request_url(runtime, request)
-        == "https://opencas.example.com/api/phone/twilio/voice?call_token=abc123"
+        == "https://bulma.example.com/api/phone/twilio/voice?call_token=abc123"
     )
 
 

@@ -8,12 +8,14 @@ from typing import List, Optional
 
 import aiosqlite
 
+from .mirror import strip_legacy_compassion_prefix
 from .models import (
     DaydreamInitiative,
     DaydreamNotification,
     DaydreamOutcome,
     DaydreamReflection,
     DaydreamSpark,
+    DaydreamThought,
 )
 from .sqlite_base import SqliteBackedStore
 
@@ -126,6 +128,7 @@ class DaydreamStore(SqliteBackedStore):
             )
 
     async def save_reflection(self, reflection: DaydreamReflection) -> None:
+        experience_context = self._serialize_experience_context(reflection)
         await self.db.execute(
             """
             INSERT INTO daydream_reflections (
@@ -160,7 +163,7 @@ class DaydreamStore(SqliteBackedStore):
                 json.dumps(reflection.tension_hints),
                 reflection.alignment_score,
                 reflection.novelty_score,
-                json.dumps(reflection.experience_context),
+                json.dumps(experience_context),
                 int(reflection.keeper),
             ),
         )
@@ -181,7 +184,7 @@ class DaydreamStore(SqliteBackedStore):
                 json.dumps(reflection.tension_hints),
                 reflection.alignment_score,
                 reflection.novelty_score,
-                json.dumps(reflection.experience_context),
+                json.dumps(self._serialize_experience_context(reflection)),
                 int(reflection.keeper),
             )
             for reflection in reflections
@@ -479,10 +482,12 @@ class DaydreamStore(SqliteBackedStore):
 
     @staticmethod
     def _row_to_reflection(row: aiosqlite.Row) -> DaydreamReflection:
+        experience_context = json.loads(row["experience_context"]) if row["experience_context"] else {}
+        thoughts = DaydreamStore._deserialize_thoughts(experience_context)
         return DaydreamReflection(
             reflection_id=row["reflection_id"],
             created_at=datetime.fromisoformat(row["created_at"]),
-            spark_content=row["spark_content"],
+            spark_content=strip_legacy_compassion_prefix(row["spark_content"]),
             recollection=row["recollection"],
             interpretation=row["interpretation"],
             synthesis=row["synthesis"],
@@ -491,9 +496,34 @@ class DaydreamStore(SqliteBackedStore):
             tension_hints=json.loads(row["tension_hints"]) if row["tension_hints"] else [],
             alignment_score=row["alignment_score"],
             novelty_score=row["novelty_score"],
-            experience_context=json.loads(row["experience_context"]) if row["experience_context"] else {},
+            thoughts=thoughts,
+            experience_context=experience_context,
             keeper=bool(row["keeper"]),
         )
+
+    @staticmethod
+    def _serialize_experience_context(reflection: DaydreamReflection) -> dict:
+        context = dict(reflection.experience_context or {})
+        if reflection.thoughts:
+            context["thoughts"] = [
+                thought.model_dump(mode="json") for thought in reflection.thoughts
+            ]
+        return context
+
+    @staticmethod
+    def _deserialize_thoughts(experience_context: dict) -> List[DaydreamThought]:
+        raw = experience_context.get("thoughts", [])
+        if not isinstance(raw, list):
+            return []
+        thoughts: List[DaydreamThought] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                continue
+            try:
+                thoughts.append(DaydreamThought.model_validate(item))
+            except Exception:
+                continue
+        return thoughts
 
     @staticmethod
     def _row_to_spark(row: aiosqlite.Row) -> DaydreamSpark:

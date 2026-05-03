@@ -4,46 +4,104 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import aiosqlite
 
-from .models import CompactionRecord, EdgeKind, Episode, EpisodeEdge, EpisodeKind, Memory
+from .models import CompactionRecord, EdgeKind, Episode, EpisodeEdge, Memory
 from .store_edges import (
     boost_edge_confidence as boost_edge_confidence_impl,
+)
+from .store_edges import (
     decay_all_edges as decay_all_edges_impl,
+)
+from .store_edges import (
     delete_edges_for as delete_edges_for_impl,
+)
+from .store_edges import (
     edge_exists as edge_exists_impl,
+)
+from .store_edges import (
     get_edges_for as get_edges_for_impl,
+)
+from .store_edges import (
     get_edges_for_batch as get_edges_for_batch_impl,
+)
+from .store_edges import (
     prune_weak_edges as prune_weak_edges_impl,
+)
+from .store_edges import (
     save_edge as save_edge_impl,
+)
+from .store_edges import (
     save_edges_batch as save_edges_batch_impl,
 )
 from .store_episodes import (
+    compaction_backlog_stats as compaction_backlog_stats_impl,
+)
+from .store_episodes import (
+    count_non_compacted_episodes as count_non_compacted_episodes_impl,
+)
+from .store_episodes import (
     delete_episodes as delete_episodes_impl,
+)
+from .store_episodes import (
     get_episode as get_episode_impl,
+)
+from .store_episodes import (
     get_episodes_by_ids as get_episodes_by_ids_impl,
+)
+from .store_episodes import (
     list_artifact_episodes as list_artifact_episodes_impl,
+)
+from .store_episodes import (
     list_episodes as list_episodes_impl,
+)
+from .store_episodes import (
     list_episodes_by_embedding_ids as list_episodes_by_embedding_ids_impl,
+)
+from .store_episodes import (
     list_identity_core_episodes as list_identity_core_episodes_impl,
+)
+from .store_episodes import (
     list_non_compacted_episodes as list_non_compacted_episodes_impl,
+)
+from .store_episodes import (
     list_recent_episodes as list_recent_episodes_impl,
+)
+from .store_episodes import (
     mark_compacted as mark_compacted_impl,
+)
+from .store_episodes import (
     mark_episode_failed as mark_episode_failed_impl,
+)
+from .store_episodes import (
     mark_episode_successful as mark_episode_successful_impl,
+)
+from .store_episodes import (
     prune_episodes_by_salience as prune_episodes_by_salience_impl,
+)
+from .store_episodes import (
     save_episode as save_episode_impl,
+)
+from .store_episodes import (
     save_episodes_batch as save_episodes_batch_impl,
+)
+from .store_episodes import (
     search_episodes_by_content as search_episodes_by_content_impl,
+)
+from .store_episodes import (
     touch_episode as touch_episode_impl,
+)
+from .store_episodes import (
     update_episode_affect as update_episode_affect_impl,
 )
 from .store_schema import MEMORY_STORE_MIGRATIONS, MEMORY_STORE_SCHEMA
 from .store_serialization import (
     compaction_db_params,
     memory_db_params,
+)
+from .store_serialization import (
     row_to_memory as deserialize_memory,
 )
 
@@ -372,6 +430,19 @@ class MemoryStore:
         limit: int = 100,
     ) -> List[Episode]:
         return await list_non_compacted_episodes_impl(self, session_id=session_id, limit=limit)
+
+    async def count_non_compacted_episodes(
+        self,
+        session_id: Optional[str] = None,
+    ) -> int:
+        return await count_non_compacted_episodes_impl(self, session_id=session_id)
+
+    async def compaction_backlog_stats(
+        self,
+        *,
+        tail_size: int = 10,
+    ) -> Dict[str, Any]:
+        return await compaction_backlog_stats_impl(self, tail_size=tail_size)
 
     async def list_identity_core_episodes(
         self,

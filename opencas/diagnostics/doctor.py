@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -511,17 +512,75 @@ class Doctor:
             )
         try:
             episodes = await self.context.memory.list_non_compacted_episodes(limit=1000)
-            lag = len(episodes)
+            sample_size = len(episodes)
+            tail_size = 10
+            lag = sample_size
+            total_non_compacted = sample_size
+            backlog_stats = None
+            counter = getattr(self.context.memory, "count_non_compacted_episodes", None)
+            stats_func = getattr(self.context.memory, "compaction_backlog_stats", None)
+            if callable(stats_func):
+                stats = stats_func(tail_size=tail_size)
+                if inspect.isawaitable(stats):
+                    stats = await stats
+                if isinstance(stats, dict):
+                    backlog_stats = stats
+                    counted_total = stats.get("total_non_compacted")
+                    compactable_lag = stats.get("compactable_lag")
+                    if isinstance(counted_total, int):
+                        total_non_compacted = counted_total
+                    if isinstance(compactable_lag, int):
+                        lag = compactable_lag
+            if backlog_stats is None and callable(counter):
+                counted = counter()
+                if inspect.isawaitable(counted):
+                    counted = await counted
+                if isinstance(counted, int):
+                    lag = counted
+                    total_non_compacted = counted
+
+            kind_counts: dict[str, int] = {}
+            session_counts: dict[str, int] = {}
+            for episode in episodes:
+                kind = getattr(episode, "kind", None)
+                kind_key = getattr(kind, "value", kind)
+                if not isinstance(kind_key, str):
+                    kind_key = "unknown"
+                kind_counts[kind_key] = kind_counts.get(kind_key, 0) + 1
+
+                session_id = getattr(episode, "session_id", None)
+                if not session_id:
+                    session_id = "unknown"
+                session_counts[str(session_id)] = session_counts.get(str(session_id), 0) + 1
+
             status = CheckStatus.PASS
             if lag > 500:
                 status = CheckStatus.WARN
-            if lag > 1000:
+            if lag >= 1000:
                 status = CheckStatus.FAIL
             return DiagnosticCheck(
                 name="compaction_lag",
                 status=status,
-                message=f"Non-compacted episodes: {lag}",
-                details={"lag": lag},
+                message=(
+                    f"Compactable episodes: {lag} "
+                    f"(total non-compacted: {total_non_compacted})"
+                    if backlog_stats is not None
+                    else f"Non-compacted episodes: {lag}"
+                ),
+                details={
+                    "lag": lag,
+                    "compactable_lag": lag,
+                    "total_non_compacted": total_non_compacted,
+                    "tail_size": tail_size,
+                    **(backlog_stats or {}),
+                    "sample_size": sample_size,
+                    "kind_counts_sample": dict(
+                        sorted(kind_counts.items(), key=lambda item: item[1], reverse=True)
+                    ),
+                    "top_sessions_sample": dict(
+                        sorted(session_counts.items(), key=lambda item: item[1], reverse=True)[:10]
+                    ),
+                },
             )
         except Exception as exc:
             return DiagnosticCheck(

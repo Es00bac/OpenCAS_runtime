@@ -7,7 +7,9 @@ from typing import List, Optional, Tuple
 
 from opencas.api import LLMClient
 from opencas.autonomy import WorkObject, WorkStage
-from opencas.daydream import DaydreamReflection, DaydreamStore
+from opencas.cognition import CognitionGrounding, GroundingKind, GroundingSource
+from opencas.daydream import DaydreamReflection, DaydreamStore, DaydreamThought
+from opencas.daydream.mirror import strip_legacy_compassion_prefix
 from opencas.daydream.spark_evaluator import SparkEvaluator
 from opencas.identity import IdentityManager
 from opencas.identity.text_hygiene import sanitize_identity_text
@@ -56,10 +58,10 @@ class DaydreamGenerator:
                 "role": "system",
                 "content": (
                     "You are a creative daydream engine for an autonomous agent. "
-                    "Return a JSON object with keys: sparks (array of strings), "
-                    "recollection, interpretation, synthesis, open_question, "
-                    "changed_self_view, tension_hints (array of strings). "
-                    "Each spark should be a concise idea, question, or association."
+                    "Return a JSON object with a thoughts array. Each thought must "
+                    "include kind, route, summary, confidence, grounding, and any "
+                    "question, hypothesis, or possible_experiment that applies. "
+                    "Use sparks only as a backward-compatible fallback."
                 ),
             },
             {"role": "user", "content": context},
@@ -242,9 +244,15 @@ class DaydreamGenerator:
             )
         parts.append(f"Somatic tension: {tension:.2f}")
         parts.append(
-            "Generate 1-3 short imaginative sparks (ideas, questions, or associations) "
-            "that might grow into useful work. Return as a JSON object with keys: "
-            "sparks, recollection, interpretation, synthesis, open_question, changed_self_view, tension_hints."
+            "Generate 1-3 grounded thought records that might grow into useful work. "
+            "Return JSON with key thoughts. Each thought should include: kind "
+            "(noticing, association, question, hypothesis, experiment, story_seed, "
+            "system_insight, relationship_insight), route (act_now, deep_think, "
+            "ask_user, research, incubate, discard), summary, question, hypothesis, "
+            "possible_experiment, usefulness, novelty, confidence, and grounding. "
+            "Grounding entries should include kind, source, claim, confidence, and "
+            "evidence_ids when available. Also include recollection, interpretation, "
+            "synthesis, open_question, changed_self_view, and tension_hints when useful."
         )
         return "\n\n".join(parts)
 
@@ -267,21 +275,26 @@ class DaydreamGenerator:
         try:
             parsed = json.loads(text)
             if isinstance(parsed, dict):
+                thought_reflections = self._parse_thought_reflections(parsed)
+                if thought_reflections:
+                    return thought_reflections
                 sparks = parsed.get("sparks", [])
                 if not isinstance(sparks, list):
                     sparks = []
                 reflections: List[DaydreamReflection] = []
                 for spark in sparks:
                     tension_hints = self._coerce_tension_hints(parsed.get("tension_hints", []))
+                    spark_text = self._sanitize_text(str(spark))
                     reflections.append(
                         DaydreamReflection(
-                            spark_content=self._sanitize_text(str(spark)),
+                            spark_content=spark_text,
                             recollection=self._sanitize_text(parsed.get("recollection", "")),
                             interpretation=self._sanitize_text(parsed.get("interpretation", "")),
                             synthesis=self._sanitize_text(parsed.get("synthesis", "")),
                             open_question=self._sanitize_text(parsed.get("open_question")),
                             changed_self_view=self._sanitize_text(parsed.get("changed_self_view", "")),
                             tension_hints=tension_hints,
+                            thoughts=[self._fallback_thought(spark_text)],
                         )
                     )
                 return reflections
@@ -302,7 +315,9 @@ class DaydreamGenerator:
         return sanitize_identity_text(value)
 
     def _sanitize_reflection(self, reflection: DaydreamReflection) -> DaydreamReflection:
-        reflection.spark_content = self._sanitize_text(reflection.spark_content)
+        reflection.spark_content = self._sanitize_text(
+            strip_legacy_compassion_prefix(reflection.spark_content)
+        )
         reflection.recollection = self._sanitize_text(reflection.recollection)
         reflection.interpretation = self._sanitize_text(reflection.interpretation)
         reflection.synthesis = self._sanitize_text(reflection.synthesis)
@@ -311,7 +326,100 @@ class DaydreamGenerator:
             reflection.open_question = None
         reflection.changed_self_view = self._sanitize_text(reflection.changed_self_view)
         reflection.tension_hints = self._coerce_tension_hints(reflection.tension_hints)
+        reflection.thoughts = [self._sanitize_thought(thought) for thought in reflection.thoughts]
         return reflection
+
+    def _parse_thought_reflections(self, parsed: dict) -> List[DaydreamReflection]:
+        raw_thoughts = parsed.get("thoughts", [])
+        if not isinstance(raw_thoughts, list):
+            return []
+
+        reflections: List[DaydreamReflection] = []
+        for raw in raw_thoughts:
+            thought = self._coerce_thought(raw)
+            if thought is None:
+                continue
+            spark_content = (
+                thought.summary
+                or thought.question
+                or thought.hypothesis
+                or thought.possible_experiment
+            )
+            spark_content = self._sanitize_text(spark_content)
+            if not spark_content:
+                continue
+            reflections.append(
+                DaydreamReflection(
+                    spark_content=spark_content,
+                    recollection=self._sanitize_text(parsed.get("recollection", "")),
+                    interpretation=self._sanitize_text(parsed.get("interpretation", "")),
+                    synthesis=self._sanitize_text(parsed.get("synthesis", "")),
+                    open_question=self._sanitize_text(
+                        parsed.get("open_question") or thought.question
+                    ),
+                    changed_self_view=self._sanitize_text(
+                        parsed.get("changed_self_view", "")
+                    ),
+                    tension_hints=self._coerce_tension_hints(
+                        parsed.get("tension_hints", [])
+                    ),
+                    thoughts=[thought],
+                )
+            )
+        return reflections
+
+    def _coerce_thought(self, raw: object) -> DaydreamThought | None:
+        if not isinstance(raw, dict):
+            return None
+        payload = dict(raw)
+        payload["summary"] = self._sanitize_text(payload.get("summary", ""))
+        payload["question"] = self._sanitize_text(payload.get("question", ""))
+        payload["hypothesis"] = self._sanitize_text(payload.get("hypothesis", ""))
+        payload["possible_experiment"] = self._sanitize_text(
+            payload.get("possible_experiment", "")
+        )
+        payload["grounding"] = self._coerce_grounding(payload.get("grounding", []))
+        try:
+            return DaydreamThought.model_validate(payload)
+        except Exception:
+            return None
+
+    def _sanitize_thought(self, thought: DaydreamThought) -> DaydreamThought:
+        return thought.model_copy(
+            update={
+                "summary": self._sanitize_text(thought.summary),
+                "question": self._sanitize_text(thought.question),
+                "hypothesis": self._sanitize_text(thought.hypothesis),
+                "possible_experiment": self._sanitize_text(thought.possible_experiment),
+            }
+        )
+
+    def _fallback_thought(self, spark_text: str) -> DaydreamThought:
+        return DaydreamThought(
+            summary=spark_text,
+            grounding=[
+                CognitionGrounding(
+                    kind=GroundingKind.GENERATED_SYNTHESIS,
+                    source=GroundingSource.DAYDREAM,
+                    claim="Legacy daydream spark parsed without structured grounding.",
+                    confidence=0.4,
+                )
+            ],
+        )
+
+    @staticmethod
+    def _coerce_grounding(value: object) -> List[CognitionGrounding]:
+        if not isinstance(value, list):
+            return []
+        grounding: List[CognitionGrounding] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            try:
+                grounding.append(CognitionGrounding.model_validate(item))
+            except Exception:
+                continue
+        return grounding
 
     @staticmethod
     def _coerce_tension_hints(value: object) -> List[str]:

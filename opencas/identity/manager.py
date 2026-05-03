@@ -559,7 +559,7 @@ class IdentityManager:
     ) -> None:
         """Atomically import an external identity profile into the self-model and user-model."""
         if auto_activate:
-            self._self.name = "the OpenCAS agent" if source_system == "openbulma-v4" else self._self.name
+            self._self.name = "Bulma" if source_system == "openbulma-v4" else self._self.name
             self._self.narrative = sanitize_identity_text(narrative)
             self._self.values = self._sanitize_string_list(values)
             self._self.current_goals = self._sanitize_string_list(ongoing_goals)

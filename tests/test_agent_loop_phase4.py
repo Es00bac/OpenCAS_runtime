@@ -1,18 +1,21 @@
 """Integration tests for Phase 4 Inner Life wiring in AgentRuntime."""
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 import pytest_asyncio
 
-from opencas.bootstrap import BootstrapContext
+from opencas.autonomy import WorkObject
+from opencas.autonomy.models import ActionRiskTier, ApprovalDecision, ApprovalLevel
+from opencas.bootstrap import BootstrapConfig
+from opencas.bootstrap.pipeline import BootstrapPipeline
 from opencas.daydream.models import ConflictRecord, DaydreamReflection
 from opencas.runtime.agent_loop import AgentRuntime
-from opencas.somatic import AppraisalEventType
+from opencas.somatic.models import SomaticState
 
 
 @pytest_asyncio.fixture
 async def runtime(tmp_path_factory):
-    from opencas.bootstrap.pipeline import BootstrapPipeline
-    from opencas.bootstrap import BootstrapConfig
     config = BootstrapConfig(
         state_dir=tmp_path_factory.mktemp("state"),
         session_id="phase4-test",
@@ -36,9 +39,6 @@ async def test_converse_emits_appraisal_event(runtime):
 @pytest.mark.asyncio
 async def test_execute_tool_emits_appraisal_event(runtime):
     # Register a harmless mock tool so it can be found
-    from opencas.autonomy.models import ActionRiskTier
-    from opencas.tools import ToolRegistry
-
     class MockTool:
         async def execute(self, args):
             class Result:
@@ -55,7 +55,6 @@ async def test_execute_tool_emits_appraisal_event(runtime):
         {"type": "object", "properties": {}},
     )
     # Bypass self-approval by pre-approving
-    from opencas.autonomy.models import ApprovalDecision, ApprovalLevel
     runtime.approval.evaluate = lambda req: ApprovalDecision(
         level=ApprovalLevel.CAN_DO_NOW,
         action_id=req.action_id,
@@ -72,14 +71,11 @@ async def test_execute_tool_emits_appraisal_event(runtime):
 @pytest.mark.asyncio
 async def test_run_daydream_resolver_accept_allows_promotion(runtime):
     # Force boredom high enough to daydream
-    from datetime import datetime, timezone, timedelta
     past = datetime.now(timezone.utc) - timedelta(hours=3)
     runtime.boredom._last_activity_at = past
     runtime.boredom._last_reset_at = past
 
     # Mock daydream generator
-    from opencas.autonomy import WorkObject, WorkStage
-    from uuid import uuid4
     wo = WorkObject(content="fitness app idea")
     reflection = DaydreamReflection(
         spark_content="fitness app idea",
@@ -92,7 +88,10 @@ async def test_run_daydream_resolver_accept_allows_promotion(runtime):
         return [wo], [reflection]
 
     runtime.daydream.generate = _mock_generate
-    runtime.reflection_evaluator.score_alignment = lambda reflection, identity: setattr(reflection, "alignment_score", 0.8) or 0.8
+    runtime.reflection_evaluator.score_alignment = (
+        lambda reflection, identity: setattr(reflection, "alignment_score", 0.8)
+        or 0.8
+    )
 
     result = await runtime.run_daydream()
     assert result["daydreams"] >= 1
@@ -102,13 +101,10 @@ async def test_run_daydream_resolver_accept_allows_promotion(runtime):
 @pytest.mark.asyncio
 async def test_run_daydream_resolver_escalate_blocks_promotion(runtime):
     runtime.boredom.record_activity()
-    from datetime import datetime, timezone, timedelta
     past = datetime.now(timezone.utc) - timedelta(hours=3)
     runtime.boredom._last_activity_at = past
     runtime.boredom._last_reset_at = past
 
-    from opencas.autonomy import WorkObject
-    from opencas.somatic.models import SomaticState
     wo = WorkObject(content="overwhelming task")
     reflection = DaydreamReflection(
         spark_content="overwhelming task",
@@ -120,7 +116,10 @@ async def test_run_daydream_resolver_escalate_blocks_promotion(runtime):
         return [wo], [reflection]
 
     runtime.daydream.generate = _mock_generate
-    runtime.reflection_evaluator.score_alignment = lambda reflection, identity: setattr(reflection, "alignment_score", 0.5) or 0.5
+    runtime.reflection_evaluator.score_alignment = (
+        lambda reflection, identity: setattr(reflection, "alignment_score", 0.5)
+        or 0.5
+    )
     # Force high tension/fatigue for escalate
     runtime.ctx.somatic._state = SomaticState(tension=0.8, fatigue=0.8, arousal=0.8)
     # Pre-seed an acute conflict
@@ -137,13 +136,10 @@ async def test_run_daydream_resolver_escalate_blocks_promotion(runtime):
 @pytest.mark.asyncio
 async def test_run_daydream_resolver_reframe(runtime):
     runtime.boredom.record_activity()
-    from datetime import datetime, timezone, timedelta
     past = datetime.now(timezone.utc) - timedelta(hours=3)
     runtime.boredom._last_activity_at = past
     runtime.boredom._last_reset_at = past
 
-    from opencas.autonomy import WorkObject
-    from opencas.somatic.models import SomaticState
     wo = WorkObject(content="stressed idea")
     reflection = DaydreamReflection(
         spark_content="stressed idea",
@@ -155,12 +151,16 @@ async def test_run_daydream_resolver_reframe(runtime):
         return [wo], [reflection]
 
     runtime.daydream.generate = _mock_generate
-    runtime.reflection_evaluator.score_alignment = lambda reflection, identity: setattr(reflection, "alignment_score", 0.6) or 0.6
+    runtime.reflection_evaluator.score_alignment = (
+        lambda reflection, identity: setattr(reflection, "alignment_score", 0.6)
+        or 0.6
+    )
     # Moderate tension triggers reframe
     runtime.ctx.somatic._state = SomaticState(tension=0.6, fatigue=0.3, arousal=0.5)
 
     result = await runtime.run_daydream()
     # Reframe allows promotion
     assert result["daydreams"] >= 1
-    # Spark content should be prefixed with mirror affirmation
-    assert "Pacing is wisdom" in reflection.spark_content or "Stay with the process" in reflection.spark_content
+    # Reframe records mirror strategy metadata without injecting canned text
+    assert reflection.spark_content == "stressed idea"
+    assert reflection.experience_context["mirror_strategy"]["reason"] == "default_process"

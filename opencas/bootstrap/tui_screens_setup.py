@@ -21,6 +21,7 @@ from textual.widgets import (
     TextArea,
 )
 
+from opencas.bootstrap.tui_bootstrap import CURRENT_AGENT_SYSTEMS
 from opencas.bootstrap.tui_components import HelpText, NavButtons, StepHeader
 from opencas.bootstrap.tui_state import STATE, discover_model_choices, scan_openllmauth_profiles
 from opencas.runtime.agent_profile import BUILTIN_AGENT_PROFILES
@@ -28,7 +29,7 @@ from opencas.runtime.agent_profile import BUILTIN_AGENT_PROFILES
 
 class WorkspaceScreen(Screen):
     def compose(self) -> ComposeResult:
-        yield StepHeader(10, 16, "Agent Home & Workspace")
+        yield StepHeader(10, 17, "Agent Home & Workspace")
         yield HelpText(
             "The agent needs a place to keep its memories, and boundaries around where it can work."
         )
@@ -91,7 +92,7 @@ class CredentialsScreen(Screen):
     """Provider credential setup with explanations for new users."""
 
     def compose(self) -> ComposeResult:
-        yield StepHeader(11, 16, "Brains & Credentials")
+        yield StepHeader(11, 17, "Brains & Credentials")
         yield HelpText(
             "OpenCAS needs access to Large Language Models (LLMs) to think, plan, and talk with you. "
             "We use a gateway called open_llm_auth to manage credentials safely."
@@ -122,7 +123,11 @@ class CredentialsScreen(Screen):
             if profiles:
                 yield Label("Profiles found in ~/.open_llm_auth/config.json:", classes="field-label")
                 for pid, label in profiles:
-                    yield Checkbox(label, value=(pid in STATE.selected_profiles), id=f"profile-{pid.replace(":", "_")}")
+                    yield Checkbox(
+                        label,
+                        value=(pid in STATE.selected_profiles),
+                        id=f"profile-{pid.replace(':', '_')}",
+                    )
             else:
                 yield Label(
                     "No profiles found in ~/.open_llm_auth/config.json. "
@@ -197,7 +202,7 @@ class CredentialsScreen(Screen):
                 profiles = scan_openllmauth_profiles()
                 STATE.selected_profiles = [
                     pid for pid, _ in profiles
-                    if self.query_one(f"#profile-{pid.replace(":", "_")}", Checkbox).value
+                    if self.query_one(f"#profile-{pid.replace(':', '_')}", Checkbox).value
                 ]
                 env_input = self.query_one("#input-env-keys", Input).value
                 STATE.credential_env_keys = [
@@ -238,7 +243,7 @@ class CredentialsScreen(Screen):
 class ModelsScreen(Screen):
     def compose(self) -> ComposeResult:
         model_choices = discover_model_choices(STATE)
-        yield StepHeader(12, 16, "Model Preferences")
+        yield StepHeader(12, 17, "Model Preferences")
         yield HelpText(
             "Which AI models should the agent use for thinking and remembering? "
             "If you don't know, the defaults are solid starting points."
@@ -359,7 +364,7 @@ class ModelsScreen(Screen):
 
 class AdvancedScreen(Screen):
     def compose(self) -> ComposeResult:
-        yield StepHeader(13, 16, "Runtime & Retrieval Settings")
+        yield StepHeader(13, 17, "Runtime & Retrieval Settings")
         yield HelpText(
             "These settings control the runtime loop, the web dashboard, and how semantic retrieval is backed."
         )
@@ -448,7 +453,7 @@ class AdvancedScreen(Screen):
             "only change them if you know you need different trade-offs."
         )
 
-        yield NavButtons(show_back=True, next_label="Integrations →")
+        yield NavButtons(show_back=True, next_label="Agent Systems →")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "btn-back":
@@ -474,16 +479,144 @@ class AdvancedScreen(Screen):
             STATE.hnsw_enabled = self.query_one("#sw-hnsw-enabled", Switch).value
             STATE.hnsw_m = self.query_one("#input-hnsw-m", Input).value or "16"
             STATE.hnsw_ef_construction = self.query_one("#input-hnsw-ef", Input).value or "200"
+            self.app.push_screen("agent_systems")
+
+
+# -----------------------------------------------------------------------------
+# Screen 14: Current Agent Systems
+# -----------------------------------------------------------------------------
+
+class AgentSystemsScreen(Screen):
+    def compose(self) -> ComposeResult:
+        yield StepHeader(14, 17, "Current Agent Systems")
+        yield HelpText(
+            "These settings align first boot with the current OpenCAS runtime substrate."
+        )
+
+        systems_md = f"""
+### Always-on substrate
+{_markdown_list(CURRENT_AGENT_SYSTEMS["always_on"])}
+
+### Conversation guards
+{_markdown_list(CURRENT_AGENT_SYSTEMS["conversation_guards"])}
+
+### Operator channels
+{_markdown_list(CURRENT_AGENT_SYSTEMS["operator_channels"])}
+        """
+        yield Markdown(systems_md)
+
+        yield Static()
+        yield Label("Approval routing:", classes="field-label")
+        yield Select(
+            [
+                ("Auto-review eligible escalations", "auto_review"),
+                ("Default approval routing", "default"),
+            ],
+            allow_blank=False,
+            value=STATE.approval_mode,
+            id="select-approval-mode",
+        )
+        yield HelpText(
+            "Auto-review keeps ordinary work moving while preserving policy review for "
+            "ambiguous or high-impact requests."
+        )
+
+        yield Static()
+        yield Horizontal(
+            Label("Enable desktop body-double context  ", classes="field-label"),
+            Switch(value=STATE.desktop_context_enabled, id="sw-desktop-context-enabled"),
+        )
+        yield HelpText(
+            "Disabled by default. When enabled, the runtime starts with explicit desktop "
+            "context settings instead of guessing about screenshot, OCR, or speech capability."
+        )
+
+        yield Label("Desktop capture interval (seconds):", classes="field-label")
+        yield Input(
+            value=STATE.desktop_capture_interval_seconds,
+            id="input-desktop-capture-interval",
+        )
+        yield Label("Minimum spoken nudge interval (seconds):", classes="field-label")
+        yield Input(
+            value=STATE.desktop_min_speech_interval_seconds,
+            id="input-desktop-min-speech-interval",
+        )
+        yield Label("Capture backend:", classes="field-label")
+        yield Input(
+            value=STATE.desktop_capture_backend,
+            placeholder="auto",
+            id="input-desktop-capture-backend",
+        )
+        yield Label("Max spoken characters:", classes="field-label")
+        yield Input(
+            value=STATE.desktop_max_spoken_chars,
+            id="input-desktop-max-spoken-chars",
+        )
+
+        yield Horizontal(
+            Label("Use vision analysis  ", classes="field-label"),
+            Switch(value=STATE.desktop_vision_enabled, id="sw-desktop-vision-enabled"),
+        )
+        yield Horizontal(
+            Label("Use OCR  ", classes="field-label"),
+            Switch(value=STATE.desktop_ocr_enabled, id="sw-desktop-ocr-enabled"),
+        )
+        yield Horizontal(
+            Label("Allow text-to-speech nudges  ", classes="field-label"),
+            Switch(value=STATE.desktop_tts_enabled, id="sw-desktop-tts-enabled"),
+        )
+        yield Horizontal(
+            Label("Play generated audio  ", classes="field-label"),
+            Switch(value=STATE.desktop_play_audio, id="sw-desktop-play-audio"),
+        )
+
+        yield NavButtons(show_back=True, next_label="Integrations →")
+
+    def on_button_pressed(self, event: Button.Pressed) -> None:
+        if event.button.id == "btn-back":
+            self.app.pop_screen()
+            return
+        if event.button.id == "btn-next":
+            STATE.approval_mode = str(
+                self.query_one("#select-approval-mode", Select).value or "auto_review"
+            )
+            STATE.desktop_context_enabled = self.query_one(
+                "#sw-desktop-context-enabled", Switch
+            ).value
+            STATE.desktop_capture_interval_seconds = (
+                self.query_one("#input-desktop-capture-interval", Input).value or "300"
+            )
+            STATE.desktop_min_speech_interval_seconds = (
+                self.query_one("#input-desktop-min-speech-interval", Input).value or "60"
+            )
+            STATE.desktop_capture_backend = (
+                self.query_one("#input-desktop-capture-backend", Input).value or "auto"
+            )
+            STATE.desktop_max_spoken_chars = (
+                self.query_one("#input-desktop-max-spoken-chars", Input).value or "360"
+            )
+            STATE.desktop_vision_enabled = self.query_one(
+                "#sw-desktop-vision-enabled", Switch
+            ).value
+            STATE.desktop_ocr_enabled = self.query_one(
+                "#sw-desktop-ocr-enabled", Switch
+            ).value
+            STATE.desktop_tts_enabled = self.query_one(
+                "#sw-desktop-tts-enabled", Switch
+            ).value
+            STATE.desktop_play_audio = self.query_one(
+                "#sw-desktop-play-audio", Switch
+            ).value
             self.app.push_screen("integrations")
 
 
 # -----------------------------------------------------------------------------
-# Screen 14: Integrations
+# Screen 15: Integrations
 # -----------------------------------------------------------------------------
 
 class IntegrationsScreen(Screen):
     def compose(self) -> ComposeResult:
-        yield StepHeader(14, 16, "Integrations & Safety")
+        yield StepHeader(15, 17, "Integrations & Safety")
         yield HelpText(
             "These options cover on-demand MCP servers, Telegram access, and execution sandboxing."
         )
@@ -603,12 +736,12 @@ class IntegrationsScreen(Screen):
 
 
 # -----------------------------------------------------------------------------
-# Screen 15: Review
+# Screen 16: Review
 # -----------------------------------------------------------------------------
 
 class ReviewScreen(Screen):
     def compose(self) -> ComposeResult:
-        yield StepHeader(15, 16, "Review Your Configuration")
+        yield StepHeader(16, 17, "Review Your Configuration")
 
         extra_roots = [r.strip() for r in STATE.workspace_extra.split(",") if r.strip()]
         profiles_txt = ", ".join(STATE.selected_profiles) if STATE.selected_profiles else "(auto-detect)"
@@ -617,6 +750,8 @@ class ReviewScreen(Screen):
         mcp_servers_txt = "configured" if STATE.mcp_servers_json.strip() else "(none)"
         telegram_allow_txt = STATE.telegram_allow_from or "(none)"
         sandbox_roots_txt = STATE.sandbox_allowed_roots or "(none)"
+        systems_txt = ", ".join(CURRENT_AGENT_SYSTEMS["always_on"])
+        guards_txt = ", ".join(CURRENT_AGENT_SYSTEMS["conversation_guards"])
 
         collab_prefs = []
         if STATE.collab_pair:
@@ -687,6 +822,13 @@ class ReviewScreen(Screen):
 - **HNSW M / ef_construction:** {STATE.hnsw_m} / {STATE.hnsw_ef_construction}
 
 ### Integrations & Safety
+- **Approval mode:** {STATE.approval_mode}
+- **Current substrate:** {systems_txt}
+- **Conversation guards:** {guards_txt}
+- **Desktop context:** {'enabled' if STATE.desktop_context_enabled else 'disabled'}
+- **Desktop capture cadence:** {STATE.desktop_capture_interval_seconds}s
+- **Desktop speech cadence:** {STATE.desktop_min_speech_interval_seconds}s
+- **Desktop vision/OCR/TTS/audio:** {'on' if STATE.desktop_vision_enabled else 'off'} / {'on' if STATE.desktop_ocr_enabled else 'off'} / {'on' if STATE.desktop_tts_enabled else 'off'} / {'on' if STATE.desktop_play_audio else 'off'}
 - **MCP auto-register:** {'enabled' if STATE.mcp_auto_register else 'disabled'}
 - **MCP servers:** {mcp_servers_txt}
 - **Telegram:** {'enabled' if STATE.telegram_enabled else 'disabled'}
@@ -714,3 +856,7 @@ class ReviewScreen(Screen):
             self.app.pop_screen()
         elif event.button.id == "btn-next":
             self.app.push_screen("bootstrap")
+
+
+def _markdown_list(items: list[str]) -> str:
+    return "\n".join(f"- `{item}`" for item in items)

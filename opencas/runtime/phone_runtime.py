@@ -449,7 +449,7 @@ async def configure_runtime_phone_session_profiles(runtime: Any, payload: Mappin
             if str(item).strip()
         ]
         employer.greeting = str(payload.get("employer_greeting") or "").strip()
-        employer.prompt_profile = str(payload.get("employer_prompt_profile") or "worksafe_owner").strip() or "worksafe_owner"
+        employer.prompt_profile = str(payload.get("employer_prompt_profile") or "worksafe_bulma").strip() or "worksafe_bulma"
         employer.allowed_actions = list(payload.get("employer_allowed_actions") or ["leave_message", "knowledge_qa"])
         employer.workspace_mounts = [
             PhoneWorkspaceMount(

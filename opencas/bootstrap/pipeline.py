@@ -1,13 +1,11 @@
-from __future__ import annotations
 """Staged bootstrap pipeline for OpenCAS core substrate."""
 
+from __future__ import annotations
 
 import asyncio
 import logging
-import sys
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 from open_llm_auth.auth.manager import ProviderManager
 
@@ -21,10 +19,8 @@ from opencas.embeddings import (
 )
 from opencas.embeddings.backfill import EmbeddingBackfill
 from opencas.embeddings.qdrant_startup import ensure_local_qdrant
-from opencas.execution.receipt_store import ExecutionReceiptStore
+from opencas.execution import TaskStore
 from opencas.identity import IdentityManager, IdentityStore, SelfKnowledgeRegistry
-from opencas.sandbox import SandboxConfig
-from opencas.somatic import SomaticManager, SomaticStore
 from opencas.infra import EventBus, HookBus, HookSpec, TypedHookRegistry
 from opencas.infra.hook_bus import (
     PRE_COMMAND_EXECUTE,
@@ -32,10 +28,16 @@ from opencas.infra.hook_bus import (
     PRE_FILE_WRITE,
     PRE_TOOL_EXECUTE,
 )
+from opencas.memory import MemoryStore
+from opencas.sandbox import SandboxConfig
+from opencas.somatic import SomaticManager, SomaticStore
 from opencas.telemetry import EventKind, TelemetryStore, TokenTelemetry, Tracer
 
 from .config import BootstrapConfig
 from .context import BootstrapContext
+from .pipeline_context import build_bootstrap_context, initialize_workspace_index
+from .pipeline_services import initialize_runtime_services
+from .pipeline_stores import initialize_runtime_stores
 from .pipeline_support import (
     emit_moral_warning,
     hnsw_runtime_supported,
@@ -45,9 +47,6 @@ from .pipeline_support import (
     runtime_guard,
     stage,
 )
-from .pipeline_context import build_bootstrap_context, initialize_workspace_index
-from .pipeline_services import initialize_runtime_services
-from .pipeline_stores import initialize_runtime_stores
 from .provider_material import materialize_provider_material
 
 
@@ -131,6 +130,8 @@ class BootstrapPipeline:
         context_store = stores.context_store
         work_store = stores.work_store
         commitment_store = stores.commitment_store
+        self_inspection_store = stores.self_inspection_store
+        wellbeing_store = stores.wellbeing_store
         portfolio_store = stores.portfolio_store
         executive = stores.executive
 
@@ -361,6 +362,8 @@ class BootstrapPipeline:
             workspace_index=workspace_index,
             health_monitor=health_monitor,
             commitment_store=commitment_store,
+            self_inspection_store=self_inspection_store,
+            wellbeing_store=wellbeing_store,
             portfolio_store=portfolio_store,
             tom_store=tom_store,
             self_knowledge_registry=self_knowledge_registry,

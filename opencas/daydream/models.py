@@ -1,12 +1,53 @@
 """Data models for daydream reflections and conflict registry."""
 
 from datetime import datetime, timezone
+from enum import Enum
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
+from opencas.cognition import CognitionGrounding
 from opencas.somatic.models import SomaticSnapshot
+
+
+class DaydreamThoughtKind(str, Enum):
+    """Types of structured daydream thoughts."""
+
+    NOTICING = "noticing"
+    ASSOCIATION = "association"
+    QUESTION = "question"
+    HYPOTHESIS = "hypothesis"
+    EXPERIMENT = "experiment"
+    STORY_SEED = "story_seed"
+    SYSTEM_INSIGHT = "system_insight"
+    RELATIONSHIP_INSIGHT = "relationship_insight"
+
+
+class DaydreamThoughtRoute(str, Enum):
+    """Possible next routes for a daydream thought."""
+
+    ACT_NOW = "act_now"
+    DEEP_THINK = "deep_think"
+    ASK_USER = "ask_user"
+    RESEARCH = "research"
+    INCUBATE = "incubate"
+    DISCARD = "discard"
+
+
+class DaydreamThought(BaseModel):
+    """A grounded thought produced during daydreaming."""
+
+    kind: DaydreamThoughtKind = DaydreamThoughtKind.ASSOCIATION
+    route: DaydreamThoughtRoute = DaydreamThoughtRoute.INCUBATE
+    summary: str = ""
+    question: str = ""
+    hypothesis: str = ""
+    possible_experiment: str = ""
+    usefulness: float = Field(default=0.5, ge=0.0, le=1.0)
+    novelty: float = Field(default=0.5, ge=0.0, le=1.0)
+    confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    grounding: List[CognitionGrounding] = Field(default_factory=list)
 
 
 class DaydreamReflection(BaseModel):
@@ -21,6 +62,7 @@ class DaydreamReflection(BaseModel):
     open_question: Optional[str] = None
     changed_self_view: str = ""
     tension_hints: List[str] = Field(default_factory=list)
+    thoughts: List[DaydreamThought] = Field(default_factory=list)
     alignment_score: float = Field(default=0.0, ge=0.0, le=1.0)
     novelty_score: float = Field(default=0.0, ge=0.0, le=1.0)
     fascination_thread: Optional[str] = None

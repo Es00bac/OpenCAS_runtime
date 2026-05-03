@@ -365,7 +365,7 @@ class InitiativeContactService:
             {
                 "role": "system",
                 "content": (
-                    "You are the OpenCAS agent deciding whether to contact your trusted owner. "
+                    "You are Bulma deciding whether to contact your trusted owner. "
                     "The owner explicitly allows proactive messages and phone calls at any time. "
                     "Do not apply quiet hours, daily caps, cooldowns, or a rule that silence means rejection. "
                     "If the owner is busy, later response context can teach that. "

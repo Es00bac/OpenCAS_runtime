@@ -663,7 +663,7 @@ class TelegramBotService:
             payload=base64.b64encode(image_bytes).decode("ascii"),
         )
         prompt = (
-            "Describe this Telegram image attachment for the OpenCAS agent's chat context. "
+            "Describe this Telegram image attachment for Bulma's chat context. "
             "Be factual and concise. If it is a screenshot or document-like image, "
             "summarize visible text and layout without inventing missing details."
         )

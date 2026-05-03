@@ -145,7 +145,7 @@ async def test_executor_frames_project_return_as_self_continuity(executor):
             "project_title": "Chronicle 4246",
             "source_session_id": "telegram:private:1",
             "project_intent": (
-                "revise and finish the Chronicle 4246 manuscript until the OpenCAS agent is satisfied, "
+                "revise and finish the Chronicle 4246 manuscript until Bulma is satisfied, "
                 "using critique as input without narrowing the project to naming research"
             ),
             "next_step": "Fold the Onnen naming decision into the manuscript.",
@@ -157,7 +157,7 @@ async def test_executor_frames_project_return_as_self_continuity(executor):
     assert output == "returned to the project"
     assert captured["session_lookup"]["session_id"] == "telegram:private:1"
     system_message = captured["messages"][0]["content"]
-    assert "You are the OpenCAS agent returning to your own creative project" in system_message
+    assert "You are Bulma returning to your own creative project" in system_message
     assert "not an external contractor" in system_message
     assert "Chronicle 4246" in system_message
     assert "revise and finish the Chronicle 4246 manuscript" in system_message

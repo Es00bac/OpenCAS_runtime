@@ -12,9 +12,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from opencas.api.routes.operations import (
-    QUALIFICATION_RERUN_HISTORY_PATH,
     QUALIFICATION_SUMMARY_PATH,
-    VALIDATION_RUNS_DIR,
     build_operations_router,
 )
 from opencas.autonomy.commitment import Commitment, CommitmentStatus
@@ -257,6 +255,41 @@ def test_list_sessions() -> None:
         {"scope_key": "test-browser", "process_count": 0, "pty_count": 0, "browser_count": 1},
     ]
     assert data["current_scope"] is None
+
+
+def test_compact_memory_backlog_endpoint_clamps_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    runtime = _make_mock_runtime()
+    calls = []
+
+    async def fake_compact_runtime_backlog(runtime_arg, **kwargs):
+        calls.append((runtime_arg, kwargs))
+        return {"available": True, "sessions_compacted": 2, "episodes_compacted": 24}
+
+    monkeypatch.setattr(
+        "opencas.api.routes.operations.compact_runtime_backlog",
+        fake_compact_runtime_backlog,
+    )
+    app = _make_test_app(runtime)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/operations/maintenance/compact-backlog"
+        "?max_sessions=99&min_session_lag=0&tail_size=999&max_candidates=99999"
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["episodes_compacted"] == 24
+    assert calls == [
+        (
+            runtime,
+            {
+                "max_sessions": 20,
+                "min_session_lag": 1,
+                "tail_size": 200,
+                "max_candidates": 5000,
+            },
+        )
+    ]
 
 
 def test_get_qualification_summary() -> None:

@@ -641,7 +641,7 @@ def build_memory_router(runtime: Any) -> APIRouter:
         temporal_weight: float = MemoryRetriever.DEFAULT_FUSION_WEIGHTS["temporal_echo"],
         reliability_weight: float = MemoryRetriever.DEFAULT_FUSION_WEIGHTS["reliability"],
     ) -> RetrievalInspectResponse:
-        retriever = _build_memory_retriever(runtime)
+        retriever = build_memory_retriever(runtime)
         inspection = await retriever.inspect(
             query=query,
             session_id=session_id,

@@ -4,38 +4,39 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timedelta, timezone
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
-from opencas.infra import BaaCompletedEvent
 from opencas.identity import IdentityManager, IdentityStore
-from opencas.runtime.continuity_breadcrumbs import build_runtime_burst_breadcrumb
-from opencas.runtime.continuity_breadcrumbs import build_burst_breadcrumb
-from opencas.runtime.continuity_breadcrumbs import parse_burst_breadcrumb
-from opencas.runtime.continuity_breadcrumbs import is_recoverable_burst_breadcrumb
-from opencas.runtime.continuity_breadcrumbs import recover_burst_continuity_context
-from opencas.runtime.continuity_breadcrumbs import record_burst_continuity
+from opencas.infra import BaaCompletedEvent
 from opencas.relational import MusubiStore, RelationalEngine
 from opencas.runtime.consolidation_state import (
     consolidation_delay_until_due,
     load_consolidation_runtime_state,
     persist_consolidation_runtime_state,
 )
+from opencas.runtime.continuity_breadcrumbs import (
+    build_burst_breadcrumb,
+    build_runtime_burst_breadcrumb,
+    is_recoverable_burst_breadcrumb,
+    parse_burst_breadcrumb,
+    record_burst_continuity,
+    recover_burst_continuity_context,
+)
+from opencas.runtime.episodic_runtime import run_runtime_continuity_check
 from opencas.runtime.maintenance_runtime import (
     close_runtime_stores,
+    compact_runtime_backlog,
     extract_runtime_response_content,
     handle_runtime_baa_completed,
     maybe_compact_runtime_session,
     maybe_record_runtime_somatic_snapshot,
     run_runtime_consolidation,
-    sync_runtime_executive_snapshot,
     trace_runtime_event,
 )
-from opencas.runtime.episodic_runtime import run_runtime_continuity_check
 from opencas.tom import IntentionStatus
 
 
@@ -164,6 +165,39 @@ async def test_run_runtime_consolidation_updates_activity_and_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_runtime_consolidation_attaches_available_compaction_backlog() -> None:
+    activity = []
+    episodes = [SimpleNamespace(session_id="lagging") for _ in range(25)]
+
+    async def compact_session(session_id, tail_size=10, min_removed_count=1):
+        return SimpleNamespace(removed_count=15, compaction_id=uuid4())
+
+    runtime = SimpleNamespace(
+        consolidation=SimpleNamespace(
+            run=lambda: _completed(SimpleNamespace(model_dump=lambda mode='json': {"clusters": 2}))
+        ),
+        ctx=SimpleNamespace(
+            memory=SimpleNamespace(
+                list_non_compacted_episodes=lambda limit=1000: _completed(episodes[:limit]),
+                count_non_compacted_episodes=lambda: _completed(len(episodes)),
+            )
+        ),
+        compactor=SimpleNamespace(compact_session=compact_session),
+        _set_activity=lambda value: activity.append(value),
+        _trace=lambda *args, **kwargs: None,
+        _last_consolidation_result=None,
+    )
+
+    payload = await run_runtime_consolidation(runtime)
+
+    assert payload["clusters"] == 2
+    assert payload["compaction_backlog"]["sessions_compacted"] == 1
+    assert payload["compaction_backlog"]["episodes_compacted"] == 15
+    assert runtime._last_consolidation_result == payload
+    assert activity == ["consolidating", "idle"]
+
+
+@pytest.mark.asyncio
 async def test_run_runtime_consolidation_persists_last_run_timestamp(tmp_path: Path) -> None:
     activity = []
     runtime = SimpleNamespace(
@@ -205,6 +239,44 @@ async def test_run_runtime_consolidation_marks_budget_timeout() -> None:
     assert payload["budget_exhausted"] is True
     assert payload["budget_reason"] == "timeout"
     assert activity == ["consolidating", "idle"]
+
+
+@pytest.mark.asyncio
+async def test_compact_runtime_backlog_compacts_lagging_sessions_by_size() -> None:
+    calls = []
+    episodes = [
+        *[SimpleNamespace(session_id="large") for _ in range(25)],
+        *[SimpleNamespace(session_id="small") for _ in range(8)],
+        *[SimpleNamespace(session_id="medium") for _ in range(18)],
+    ]
+
+    async def compact_session(session_id, tail_size=10, min_removed_count=1):
+        calls.append((session_id, tail_size, min_removed_count))
+        return SimpleNamespace(removed_count=15 if session_id == "large" else 8, compaction_id=uuid4())
+
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            memory=SimpleNamespace(
+                list_non_compacted_episodes=lambda limit=1000: _completed(episodes[:limit]),
+                count_non_compacted_episodes=lambda: _completed(len(episodes)),
+            )
+        ),
+        compactor=SimpleNamespace(compact_session=compact_session),
+        _trace=lambda *args, **kwargs: None,
+    )
+
+    result = await compact_runtime_backlog(
+        runtime,
+        max_sessions=2,
+        min_session_lag=10,
+        tail_size=10,
+        max_candidates=100,
+    )
+
+    assert [call[0] for call in calls] == ["large", "medium"]
+    assert result["sessions_compacted"] == 2
+    assert result["episodes_compacted"] == 23
+    assert result["remaining_lag"] == 28
 
 
 def test_consolidation_delay_until_due_uses_persisted_last_run(tmp_path: Path) -> None:
@@ -588,6 +660,87 @@ async def test_next_session_recovers_intent_from_latest_breadcrumb(monkeypatch: 
     assert expected_recovery in mgr.continuity.last_continuity_monologue
     assert "intent: resume context after 2.0 hours" in mgr.continuity.continuity_breadcrumbs[-1]
     assert is_recoverable_burst_breadcrumb(breadcrumb, 0.73, note=burst.note)
+
+
+@pytest.mark.asyncio
+async def test_continuity_decay_uses_recent_activity_when_shutdown_timestamp_is_stale(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = IdentityStore(tmp_path / "identity")
+    mgr = IdentityManager(store)
+    mgr.load()
+    mgr._continuity.continuous_present_score = 1.0
+    mgr._continuity.last_shutdown_time = datetime.now(timezone.utc) - timedelta(hours=32)
+    mgr.save()
+    recent_episode = SimpleNamespace(created_at=datetime.now(timezone.utc) - timedelta(minutes=4))
+    traced = []
+
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            config=SimpleNamespace(session_id="sess-recent", continuous_present_enabled=True),
+            identity=mgr,
+            relational=SimpleNamespace(state=SimpleNamespace(musubi=0.73)),
+            somatic=SimpleNamespace(
+                state=SimpleNamespace(fatigue=0.0, tension=0.0),
+                emit_appraisal_event=lambda *args, **kwargs: None,
+            ),
+        ),
+        memory=SimpleNamespace(list_episodes=lambda *args, **kwargs: _completed([recent_episode])),
+        _trace=lambda event, payload=None: traced.append((event, payload or {})),
+    )
+
+    async def _fake_record_runtime_episode(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("opencas.runtime.episodic_runtime.record_runtime_episode", _fake_record_runtime_episode)
+
+    await run_runtime_continuity_check(runtime)
+
+    assert mgr.continuity.continuous_present_score > 0.99
+    continuity_traces = [payload for event, payload in traced if event == "continuity_check"]
+    assert continuity_traces
+    assert continuity_traces[-1]["sleep_hours"] < 0.2
+    assert "32.0 hours" not in (mgr.continuity.last_continuity_monologue or "")
+
+
+@pytest.mark.asyncio
+async def test_continuity_resume_language_marks_low_score_as_thinned(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = IdentityStore(tmp_path / "identity")
+    mgr = IdentityManager(store)
+    mgr.load()
+    mgr._continuity.continuous_present_score = 1.0
+    mgr._continuity.last_shutdown_time = datetime.now(timezone.utc) - timedelta(hours=32)
+    mgr.save()
+
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            config=SimpleNamespace(session_id="sess-low", continuous_present_enabled=True),
+            identity=mgr,
+            relational=SimpleNamespace(state=SimpleNamespace(musubi=0.73)),
+            somatic=SimpleNamespace(
+                state=SimpleNamespace(fatigue=0.0, tension=0.0),
+                emit_appraisal_event=lambda *args, **kwargs: None,
+            ),
+        ),
+        memory=SimpleNamespace(list_episodes=lambda *args, **kwargs: _completed([])),
+        _trace=lambda *args, **kwargs: None,
+    )
+
+    async def _fake_record_runtime_episode(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("opencas.runtime.episodic_runtime.record_runtime_episode", _fake_record_runtime_episode)
+
+    await run_runtime_continuity_check(runtime)
+
+    monologue = mgr.continuity.last_continuity_monologue or ""
+    assert mgr.continuity.continuous_present_score < 0.4
+    assert "continuity path is thinned" in monologue
+    assert "unbroken" not in monologue.lower()
 
 
 @pytest.mark.asyncio

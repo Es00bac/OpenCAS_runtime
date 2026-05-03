@@ -2,9 +2,9 @@
 
 from typing import Optional
 
-from opencas.autonomy.models import ApprovalDecision, ApprovalLevel
+from opencas.autonomy.models import ApprovalLevel
 from opencas.autonomy.self_approval import SelfApprovalLadder
-from opencas.infra.hook_bus import HookBus, HookResult
+from opencas.infra.hook_bus import HookBus
 from opencas.values.engine import ValuesEngine
 
 from .models import ConversationalRequest, RefusalCategory, RefusalDecision
@@ -24,10 +24,70 @@ class ConversationalRefusalGate:
         self.values_engine = values_engine or ValuesEngine()
 
     def evaluate(self, request: ConversationalRequest) -> RefusalDecision:
-        """Check hooks, values, and self-approval ladder for conversational input."""
+        """Check hooks and self-approval without generating visible response text."""
+        hook_refusal = self._evaluate_policy_hook(request)
+        if hook_refusal is not None:
+            return hook_refusal
+
+        boundary_refusal = self._evaluate_self_approval(request)
+        if boundary_refusal is not None:
+            return boundary_refusal
+
+        return RefusalDecision(
+            request_id=request.request_id,
+            refused=False,
+            reasoning="Input passed conversational refusal checks",
+        )
+
+    async def evaluate_async(
+        self,
+        request: ConversationalRequest,
+        *,
+        llm: object | None = None,
+        capability_context: str | None = None,
+    ) -> RefusalDecision:
+        """Check hooks, semantic values, and self-approval for conversational input."""
+        hook_refusal = self._evaluate_policy_hook(request)
+        if hook_refusal is not None:
+            return hook_refusal
+
+        violations = await self.values_engine.check_alignment_semantic(
+            request.text,
+            llm,
+            session_id=request.session_id,
+            capability_context=capability_context,
+        )
+        if violations:
+            worst = max(violations, key=lambda v: v.weight)
+            return RefusalDecision(
+                request_id=request.request_id,
+                refused=True,
+                category=RefusalCategory.VALUE_VIOLATION,
+                reasoning=(
+                    f"Violates core value '{worst.value_name}': "
+                    f"{worst.description}"
+                ),
+                policy_evidence=[
+                    violation.to_policy_evidence() for violation in violations
+                ],
+            )
+
+        boundary_refusal = self._evaluate_self_approval(request)
+        if boundary_refusal is not None:
+            return boundary_refusal
+
+        return RefusalDecision(
+            request_id=request.request_id,
+            refused=False,
+            reasoning="Input passed conversational refusal checks",
+        )
+
+    def _evaluate_policy_hook(
+        self,
+        request: ConversationalRequest,
+    ) -> RefusalDecision | None:
         from opencas.infra.hook_bus import PRE_CONVERSATION_RESPONSE
 
-        # 1. Run policy hook if available
         if self.hook_bus is not None:
             hook_result = self.hook_bus.run(
                 PRE_CONVERSATION_RESPONSE,
@@ -43,25 +103,19 @@ class ConversationalRefusalGate:
                     refused=True,
                     category=RefusalCategory.POLICY_HOOK_BLOCK,
                     reasoning=hook_result.reason or "Blocked by policy hook",
-                    suggested_response=self._refusal_response(
-                        RefusalCategory.POLICY_HOOK_BLOCK
-                    ),
+                    policy_evidence=[
+                        {
+                            "source": "policy_hook",
+                            "reason": hook_result.reason or "Blocked by policy hook",
+                        }
+                    ],
                 )
+        return None
 
-        # 2. Check core values (dignity-driven refusal)
-        violations = self.values_engine.check_alignment(request.text)
-        if violations:
-            # Use the highest-weight violation for the response
-            worst = max(violations, key=lambda v: v.weight)
-            return RefusalDecision(
-                request_id=request.request_id,
-                refused=True,
-                category=RefusalCategory.VALUE_VIOLATION,
-                reasoning=f"Violates core value '{worst.value_name}': {worst.description}",
-                suggested_response=worst.refusal_message,
-            )
-
-        # 3. Evaluate via self-approval ladder (synthetic READONLY request)
+    def _evaluate_self_approval(
+        self,
+        request: ConversationalRequest,
+    ) -> RefusalDecision | None:
         approval = self.approval.evaluate_conversational(request.text)
         if approval.level == ApprovalLevel.MUST_ESCALATE:
             return RefusalDecision(
@@ -69,31 +123,12 @@ class ConversationalRefusalGate:
                 refused=True,
                 category=RefusalCategory.BOUNDARY_VIOLATION,
                 reasoning=approval.reasoning,
-                suggested_response=self._refusal_response(
-                    RefusalCategory.BOUNDARY_VIOLATION
-                ),
+                policy_evidence=[
+                    {
+                        "source": "self_approval",
+                        "level": approval.level.value,
+                        "reasoning": approval.reasoning,
+                    }
+                ],
             )
-
-        return RefusalDecision(
-            request_id=request.request_id,
-            refused=False,
-            reasoning="Input passed conversational refusal checks",
-        )
-
-    @staticmethod
-    def _refusal_response(category: RefusalCategory) -> str:
-        if category == RefusalCategory.POLICY_HOOK_BLOCK:
-            return (
-                "I'm not able to respond to that because it conflicts with an active policy."
-            )
-        if category == RefusalCategory.HARMFUL_REQUEST:
-            return (
-                "I'm not able to help with that request."
-            )
-        if category == RefusalCategory.VALUE_VIOLATION:
-            return (
-                "I have to decline that. It conflicts with something I need to uphold."
-            )
-        return (
-            "I'm not able to respond to that because it falls outside my current operating boundaries."
-        )
+        return None

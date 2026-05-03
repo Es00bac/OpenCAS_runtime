@@ -1,10 +1,10 @@
 """Tests for ConversationCompactor."""
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 import pytest_asyncio
-from unittest.mock import AsyncMock, MagicMock
 
 from opencas.compaction import ConversationCompactor
 from opencas.identity import IdentityManager, IdentityStore

@@ -276,7 +276,7 @@ class FakeEmbeddings:
                     "meta": {
                         "task_type": "memory_episode",
                         "source": "episode:ep-123",
-                        "text": "the OpenCAS agent summarized the latest dashboard continuity probe and noted stable voice routing.",
+                        "text": "Bulma summarized the latest dashboard continuity probe and noted stable voice routing.",
                         "embedding_degraded": False,
                     },
                 },
@@ -899,7 +899,7 @@ class FakeRuntime:
     async def phone_status(self):
         return {
             "enabled": True,
-            "public_base_url": "https://opencas.example.com",
+            "public_base_url": "https://bulma.example.com",
             "webhook_signature_required": True,
             "twilio_from_number": "+14846736227",
             "owner": {
@@ -920,8 +920,8 @@ class FakeRuntime:
             ],
             "twilio_credentials_configured": True,
             "webhook_urls": {
-                "voice": "https://opencas.example.com/api/phone/twilio/voice",
-                "gather": "https://opencas.example.com/api/phone/twilio/gather",
+                "voice": "https://bulma.example.com/api/phone/twilio/voice",
+                "gather": "https://bulma.example.com/api/phone/twilio/gather",
             },
             "contact_count": 1,
             "menu_config_source": {
@@ -939,7 +939,7 @@ class FakeRuntime:
                 "menus": [
                     {
                         "key": "owner_entry",
-                        "prompt": "Press 1 for the owner.",
+                        "prompt": "Press 1 for Jarrod.",
                         "reprompt": "Press 1 to continue.",
                         "options": [
                             {"key": "owner_continue", "digit": "1", "action": "owner_conversation", "label": "Continue as owner"},
@@ -983,7 +983,7 @@ class FakeRuntime:
             ],
             "session_profiles": {
                 "owner_entry": {
-                    "prompt": "Press 1 for the owner.",
+                    "prompt": "Press 1 for Jarrod.",
                     "reprompt": "Press 1 to continue.",
                     "continue_digit": "1",
                     "fallback_digit": "2",
@@ -1004,7 +1004,7 @@ class FakeRuntime:
                     "label": "Potential employer",
                     "phrases": ["employer", "hiring"],
                     "greeting": "Employer greeting.",
-                    "prompt_profile": "worksafe_owner",
+                    "prompt_profile": "worksafe_bulma",
                     "allowed_actions": ["leave_message", "knowledge_qa"],
                     "shared_workspace_subdir": "phone/employer_shared",
                     "caller_workspace_subdir": "phone/employers/{phone_digits}",
@@ -1031,7 +1031,7 @@ class FakeRuntime:
         status["selected_number"] = {"sid": "PN123", "phone_number": "+14846736227"}
         status["twilio_number_candidates"] = [{"sid": "PN123", "phone_number": "+14846736227"}]
         status["webhook_update"] = {
-            "voice_url": "https://opencas.example.com/api/phone/twilio/voice",
+            "voice_url": "https://bulma.example.com/api/phone/twilio/voice",
             "voice_method": "POST",
         }
         return status
@@ -1694,7 +1694,7 @@ async def test_dashboard_contains_operations_surface():
     assert "/api/telegram/status" in body
     assert "Telegram Channel" in body or "telegram-status" in body
     assert "/api/phone/status" in body
-    assert "the OpenCAS agent Phone Bridge" in body or "phone-status" in body
+    assert "Bulma Phone Bridge" in body or "phone-status" in body
     assert "/api/monitor/shadow-registry" in body
     assert "Shadow Registry" in body
     assert "/api/monitor/shadow-registry/cluster?fingerprint=" in body
@@ -2093,6 +2093,48 @@ async def test_chat_context_summary_returns_no_current_work_for_artifact_only_wo
 
 
 @pytest.mark.asyncio
+async def test_chat_context_summary_clears_stale_active_work_intention_without_foreground(tmp_path):
+    class StaleActiveWorkRuntime(FakeRuntime):
+        async def workflow_status(self, limit=10, project_id=None):
+            payload = await super().workflow_status(limit=limit, project_id=project_id)
+            payload["executive"]["intention"] = "Cartography of the Mud"
+            payload["executive"]["active_goals"] = []
+            payload["executive"]["queued_work_count"] = 0
+            payload["executive"]["queue"]["items"] = []
+            payload["work"]["items"] = [
+                {
+                    "work_id": "artifact-1",
+                    "content": "Historical artifact should not keep an active-work intention alive",
+                    "stage": "artifact",
+                    "project_id": None,
+                    "blocked_by": [],
+                    "meta": {"title": "Historical artifact should not keep an active-work intention alive"},
+                }
+            ]
+            return payload
+
+    runtime = StaleActiveWorkRuntime()
+    runtime.executive = type("Executive", (), {"intention_source": "active_work"})()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        workspace_root=tmp_path / "repo",
+    ).resolve_paths()
+    runtime.ctx.config.workspace_root.mkdir(parents=True, exist_ok=True)
+    (runtime.ctx.config.workspace_root / "TaskList.md").write_text("# OpenCAS Task List\n\n", encoding="utf-8")
+
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        summary = await client.get("/api/chat/context-summary?session_id=s1")
+
+    assert summary.status_code == 200
+    summary_data = summary.json()
+    assert summary_data["current_work"] is None
+    assert summary_data["executive"]["intention"] is None
+    assert summary_data["executive"]["intention_source"] == "stale_active_work"
+
+
+@pytest.mark.asyncio
 async def test_chat_context_summary_clears_completed_tasklist_intention_without_foreground(tmp_path):
     class CompletedTasklistRuntime(FakeRuntime):
         async def workflow_status(self, limit=10, project_id=None):
@@ -2264,7 +2306,7 @@ def test_monitor_embeddings_endpoint_surfaces_recent_records():
     assert len(data["recent_records"]) == 2
     assert data["recent_records"][0]["task_type"] == "memory_episode"
     assert data["recent_records"][0]["source"] == "episode:ep-123"
-    assert "the OpenCAS agent summarized the latest dashboard continuity probe" in data["recent_records"][0]["preview"]
+    assert "Bulma summarized the latest dashboard continuity probe" in data["recent_records"][0]["preview"]
     assert data["recent_records"][1]["degraded"] is True
 
 
@@ -2688,3 +2730,46 @@ def test_memory_node_detail_endpoint_surfaces_neighbors_and_signals():
     assert any(item["node_id"] == "memory:mem-1" for item in data["neighbors"])
     assert any(edge["kind"] == "semantic" and edge["strongest_signal"] == "semantic" for edge in data["edges"])
     assert any(edge["kind"] == "distilled_from" for edge in data["edges"])
+
+
+def test_memory_retrieval_inspect_uses_runtime_retriever():
+    runtime = FakeRuntime()
+
+    class FakeRetriever:
+        async def inspect(self, **kwargs):
+            from types import SimpleNamespace
+
+            return {
+                "weights": kwargs["weights"],
+                "candidates": [
+                    {
+                        "source_type": "episode",
+                        "source_id": "ep-1",
+                        "score": 0.91,
+                        "components": {"semantic_score": 0.8},
+                    }
+                ],
+                "results": [
+                    SimpleNamespace(
+                        source_type="episode",
+                        source_id="ep-1",
+                        content="retrieved continuity memory",
+                        score=0.91,
+                        episode=None,
+                        memory=None,
+                    )
+                ],
+                "meta": {"limit": kwargs["limit"], "expand_graph": kwargs["expand_graph"]},
+            }
+
+    runtime.retriever = FakeRetriever()
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get("/api/memory/retrieval-inspect?query=continuity&limit=3")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["query"] == "continuity"
+    assert data["meta"]["limit"] == 3
+    assert data["results"][0]["content_preview"] == "retrieved continuity memory"

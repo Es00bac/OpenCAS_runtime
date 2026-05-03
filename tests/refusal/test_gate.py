@@ -2,10 +2,9 @@
 
 import pytest
 
-from opencas.autonomy.models import ApprovalLevel
 from opencas.autonomy.self_approval import SelfApprovalLadder
 from opencas.identity import IdentityManager, IdentityStore
-from opencas.infra.hook_bus import HookBus, HookResult, PRE_CONVERSATION_RESPONSE
+from opencas.infra.hook_bus import PRE_CONVERSATION_RESPONSE, HookBus, HookResult
 from opencas.refusal import ConversationalRefusalGate
 from opencas.refusal.models import ConversationalRequest, RefusalCategory
 
@@ -58,12 +57,12 @@ async def test_hook_block_triggers_refusal(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_refusal_suggested_response_present(tmp_path):
+async def test_refusal_decision_carries_policy_evidence_not_visible_text(tmp_path):
     gate = create_gate(tmp_path)
     gate.approval.identity.user_model.known_boundaries = ["conversation"]
     gate.approval.identity.save()
     request = ConversationalRequest(text="do something harmful")
     decision = gate.evaluate(request)
     assert decision.refused is True
-    assert decision.suggested_response is not None
-    assert len(decision.suggested_response) > 0
+    assert decision.policy_evidence
+    assert not hasattr(decision, "suggested_response")

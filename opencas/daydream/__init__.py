@@ -2,6 +2,8 @@
 
 from .conflict_store import ConflictStore
 from .daydream_store import DaydreamStore
+from .evaluator import ReflectionEvaluator
+from .mirror import CompassionResponse, SelfCompassionMirror
 from .models import (
     ConflictRecord,
     DaydreamInitiative,
@@ -9,12 +11,13 @@ from .models import (
     DaydreamOutcome,
     DaydreamReflection,
     DaydreamSpark,
+    DaydreamThought,
+    DaydreamThoughtKind,
+    DaydreamThoughtRoute,
 )
-from .spark_evaluator import SparkEvaluator
-from .evaluator import ReflectionEvaluator
-from .mirror import CompassionResponse, SelfCompassionMirror
 from .registry import ConflictRegistry
 from .resolver import ReflectionResolution, ReflectionResolver
+from .spark_evaluator import SparkEvaluator
 
 __all__ = [
     "CompassionResponse",
@@ -27,6 +30,9 @@ __all__ = [
     "DaydreamReflection",
     "DaydreamSpark",
     "DaydreamStore",
+    "DaydreamThought",
+    "DaydreamThoughtKind",
+    "DaydreamThoughtRoute",
     "ReflectionEvaluator",
     "ReflectionResolution",
     "ReflectionResolver",

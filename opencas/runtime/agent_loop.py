@@ -2,58 +2,33 @@
 
 from __future__ import annotations
 
-import asyncio
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from opencas.api import LLMClient
-from opencas.autonomy import WorkObject, WorkStage
-from opencas.autonomy.boredom import BoredomPhysics
+from opencas.autonomy import WorkObject
 from opencas.autonomy.commitment import Commitment
-from opencas.autonomy.executive import ExecutiveState
 from opencas.autonomy.commitment_extraction import SelfCommitmentCandidate
-from opencas.autonomy.creative_ladder import CreativeLadder
-from opencas.autonomy.models import ActionRequest, ActionRiskTier
-from opencas.autonomy.portfolio import PortfolioStore
-from opencas.autonomy.self_approval import SelfApprovalLadder
-from opencas.autonomy.spark_router import SparkRouter
-from opencas.infra import BaaCompletedEvent
+from opencas.autonomy.models import ActionRequest
 from opencas.bootstrap import BootstrapContext
-from opencas.tools import ToolRegistry, ToolUseContext, ToolUseLoop
-from opencas.memory import Episode, EpisodeKind, MemoryStore
-from opencas.memory.fabric.graph import EpisodeGraph
-from opencas.telemetry import Tracer
-from opencas.tom import ToMEngine
-from opencas.phone_config import PhoneRuntimeConfig
-
-from opencas.execution import (
-    BoundedAssistantAgent,
-    BrowserSupervisor,
-    ProcessSupervisor,
-    PtySupervisor,
-    ReliabilityCoordinator,
-)
-from opencas.context import ContextBuilder, MemoryRetriever, MessageRole
-from opencas.compaction import ConversationCompactor
-from opencas.consolidation import NightlyConsolidationEngine
-from opencas.identity import IdentityRebuilder
-
 from opencas.daydream import (
-    ConflictRegistry,
     DaydreamReflection,
-    DaydreamStore,
-    ReflectionEvaluator,
-    ReflectionResolver,
-    SelfCompassionMirror,
 )
-from opencas.daydream.spark_evaluator import SparkEvaluator
+from opencas.infra import BaaCompletedEvent
+from opencas.memory import Episode, EpisodeKind, MemoryStore
+from opencas.phone_config import PhoneRuntimeConfig
 from opencas.runtime.agent_profile import get_agent_profile
-from opencas.runtime.readiness import AgentReadiness, ReadinessState
+from opencas.runtime.readiness import AgentReadiness
 from opencas.runtime.single_instance import SingleInstanceLock
-from opencas.somatic import SomaticModulators
+from opencas.telegram_config import TelegramRuntimeConfig
+from opencas.tools import ToolUseContext
 
-from .daydream import DaydreamGenerator
+from .continuity_breadcrumbs import current_runtime_focus, record_burst_continuity
+from .conversation_recovery import (
+    complete_conversation_turn_marker,
+    start_conversation_turn_marker,
+)
 from .conversation_turns import (
     execute_conversation_tool_loop,
     finalize_assistant_turn,
@@ -61,19 +36,10 @@ from .conversation_turns import (
     persist_tool_loop_messages,
     persist_user_turn,
 )
-from .conversation_recovery import (
-    complete_conversation_turn_marker,
-    start_conversation_turn_marker,
-)
-from .continuity_breadcrumbs import current_runtime_focus, record_burst_continuity
 from .cycle_phases import (
     drain_executive_cycle_queue,
     enqueue_promoted_cycle_work,
     evaluate_workspace_intervention,
-)
-from .lifecycle import (
-    run_autonomous_runtime,
-    run_autonomous_with_server_runtime,
 )
 from .episodic_runtime import (
     capture_runtime_self_commitments,
@@ -82,11 +48,9 @@ from .episodic_runtime import (
     record_runtime_episode,
     run_runtime_continuity_check,
 )
-from .reflection_runtime import (
-    build_runtime_metacognition_status,
-    rebuild_runtime_identity,
-    run_runtime_daydream,
-    run_runtime_daydream_inner,
+from .lifecycle import (
+    run_autonomous_runtime,
+    run_autonomous_with_server_runtime,
 )
 from .maintenance_runtime import (
     close_runtime_stores,
@@ -97,6 +61,32 @@ from .maintenance_runtime import (
     run_runtime_consolidation,
     sync_runtime_executive_snapshot,
     trace_runtime_event,
+)
+from .phone_runtime import (
+    autoconfigure_runtime_phone,
+    call_owner_via_runtime_phone,
+    configure_runtime_phone,
+    configure_runtime_phone_menu_config,
+    get_runtime_phone_call_detail,
+    get_runtime_phone_status,
+    get_runtime_recent_phone_calls,
+    handle_runtime_phone_gather_webhook,
+    handle_runtime_phone_media_stream,
+    handle_runtime_phone_poll_webhook,
+    handle_runtime_phone_voice_webhook,
+    runtime_phone_settings,
+)
+from .reflection_runtime import (
+    build_runtime_metacognition_status,
+    rebuild_runtime_identity,
+    run_runtime_daydream,
+    run_runtime_daydream_inner,
+)
+from .runtime_setup import (
+    initialize_runtime_autonomy,
+    initialize_runtime_channels,
+    initialize_runtime_execution,
+    initialize_runtime_memory_surfaces,
 )
 from .status_views import (
     build_consolidation_status,
@@ -111,27 +101,7 @@ from .telegram_runtime import (
     runtime_telegram_settings,
     start_runtime_telegram,
 )
-from .phone_runtime import (
-    autoconfigure_runtime_phone,
-    call_owner_via_runtime_phone,
-    configure_runtime_phone,
-    configure_runtime_phone_menu_config,
-    get_runtime_phone_call_detail,
-    get_runtime_recent_phone_calls,
-    handle_runtime_phone_media_stream,
-    get_runtime_phone_status,
-    handle_runtime_phone_gather_webhook,
-    handle_runtime_phone_poll_webhook,
-    handle_runtime_phone_voice_webhook,
-    runtime_phone_settings,
-)
 from .tool_registration import register_runtime_default_tools
-from .runtime_setup import (
-    initialize_runtime_autonomy,
-    initialize_runtime_channels,
-    initialize_runtime_execution,
-    initialize_runtime_memory_surfaces,
-)
 from .tool_runtime import (
     build_runtime_tool_use_context,
     disable_runtime_plugin,
@@ -147,8 +117,10 @@ from .tool_runtime import (
     submit_runtime_repair,
     uninstall_runtime_plugin,
 )
-from opencas.telegram_config import TelegramRuntimeConfig
-from opencas.telegram_integration import TelegramBotService
+from .wellbeing_runtime import (
+    record_runtime_daydream_wellbeing,
+    run_runtime_wellbeing_maintenance,
+)
 
 
 class AgentRuntime:
@@ -421,8 +393,13 @@ class AgentRuntime:
 
             # Refusal is handled first so unsafe turns never leak into the tool loop.
             from opencas.refusal.models import ConversationalRequest
+            from opencas.runtime.capability_context import build_runtime_capability_context
             conv_request = ConversationalRequest(text=user_input, session_id=sid)
-            refusal = self.refusal_gate.evaluate(conv_request)
+            refusal = await self.refusal_gate.evaluate_async(
+                conv_request,
+                llm=self.llm,
+                capability_context=build_runtime_capability_context(self),
+            )
             if refusal.refused:
                 response = await handle_refusal_turn(
                     self,
@@ -467,6 +444,12 @@ class AgentRuntime:
                 user_input=user_input,
                 content=artifacts.content,
                 manifest=artifacts.manifest,
+                assistant_meta_extra=(
+                    {"response_integrity": artifacts.integrity_review}
+                    if artifacts.integrity_review
+                    else None
+                ),
+                tool_use_inspections=artifacts.tool_use_inspections,
             )
             if turn_marker_id:
                 try:
@@ -762,7 +745,7 @@ class AgentRuntime:
         """Reject the retired OpenBulma v4 one-time importer."""
         raise RuntimeError(
             "The OpenBulma v4 importer has been decommissioned after the one-time "
-            "the OpenCAS agent cutover. Restore it from git history only for an explicit "
+            "Bulma cutover. Restore it from git history only for an explicit "
             "forensic migration task."
         )
 
@@ -805,6 +788,18 @@ class AgentRuntime:
     async def _close_stores(self) -> None:
         """Gracefully close all SQLite stores."""
         await close_runtime_stores(self)
+
+    async def run_wellbeing_maintenance(
+        self,
+        *,
+        force_action: str | None = None,
+    ) -> Dict[str, Any]:
+        """Run a bounded operational wellbeing maintenance pass."""
+        return await run_runtime_wellbeing_maintenance(self, force_action=force_action)
+
+    async def record_daydream_wellbeing(self, reflection: Any) -> Dict[str, Any]:
+        """Record daydream thoughts into wellbeing/fascination state."""
+        return await record_runtime_daydream_wellbeing(self, reflection)
 
     def control_plane_status(self) -> Dict[str, Any]:
         """Return a monitoring snapshot of workspace, sandbox, and execution state."""

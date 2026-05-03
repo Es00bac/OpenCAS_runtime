@@ -220,7 +220,7 @@ class TestAffectiveRegistrySmokeTest:
 
     def test_smoke_test_target_path(self, tmp_path: Path):
         """Simulate the real target path and verify append-only semantics."""
-        # We can't write to /tmp/opencas-public-fixture/openbulma/tmp in tests,
+        # We can't write to /mnt/xtra/openbulma-v4/tmp in tests,
         # so we verify the writer works with a path that has the same
         # structural characteristics (deep nested directory).
         target = tmp_path / "mnt" / "xtra" / "openbulma-v4" / "tmp" / "baa-neural-link-smoke-test"

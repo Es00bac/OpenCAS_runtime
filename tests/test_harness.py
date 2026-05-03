@@ -208,7 +208,7 @@ async def test_harness_drafts_missing_objective_contract_with_llm(harness_store)
                             "message": {
                                 "content": """
                                 {
-                                  "goal": "Revise Chronicle 4246 as the OpenCAS agent's own manuscript project.",
+                                  "goal": "Revise Chronicle 4246 as Bulma's own manuscript project.",
                                   "expected_output": "A concrete manuscript revision saved in the workspace.",
                                   "success_check": "The target chapter file contains new or revised prose.",
                                   "stop_condition": "Stop after one verified manuscript edit or a clear blocker.",

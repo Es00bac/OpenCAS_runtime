@@ -18,7 +18,7 @@ from opencas.telemetry import EventKind, Tracer
 
 
 class AgentScheduler:
-    """Drives runtime cycles, consolidation, and BAA heartbeat on intervals."""
+    """Drives runtime cycles, consolidation, wellbeing maintenance, and heartbeat."""
 
     def __init__(
         self,
@@ -28,6 +28,7 @@ class AgentScheduler:
         baa_heartbeat_interval: int = 120,
         daydream_interval: int = 720,
         schedule_interval: int = 60,
+        wellbeing_interval: float = 1800,
         readiness: Optional[AgentReadiness] = None,
         tracer: Optional[Tracer] = None,
         lane_manager: Optional[LaneManager] = None,
@@ -47,6 +48,7 @@ class AgentScheduler:
         self.baa_heartbeat_interval = baa_heartbeat_interval
         self.daydream_interval = daydream_interval
         self.schedule_interval = schedule_interval
+        self.wellbeing_interval = max(0.0, float(wellbeing_interval))
         self.readiness = readiness
         self.tracer = tracer
         self._running = False
@@ -69,6 +71,10 @@ class AgentScheduler:
             "max_cluster_summaries": 6,
             "max_candidates": 100,
             "max_prompt_chars": 12000,
+            "max_compaction_sessions": 8,
+            "max_compaction_candidates": 1000,
+            "min_compaction_session_lag": 20,
+            "compaction_tail_size": 10,
         }
         self._lane_manager = lane_manager or LaneManager(
             configs={
@@ -520,6 +526,36 @@ class AgentScheduler:
             except Exception as exc:
                 self._trace("desktop_context_error", {"error": str(exc)})
 
+    async def _wellbeing_maintenance_loop(self) -> None:
+        while self._running:
+            interval = self.wellbeing_interval or float(self.schedule_interval)
+            await asyncio.sleep(interval)
+            if not self._running:
+                break
+            if not self._should_run_cycle():
+                continue
+            block_reason = self._background_llm_block_reason(
+                require_idle=True,
+                require_quiet_baa=True,
+                require_conversation_quiet=True,
+            )
+            if block_reason is not None:
+                self._trace("wellbeing_maintenance_skipped", {"reason": block_reason})
+                continue
+            runner = getattr(self.runtime, "run_wellbeing_maintenance", None)
+            if not callable(runner):
+                continue
+            try:
+                result = runner()
+                if inspect.isawaitable(result):
+                    result = await result
+                payload = result if isinstance(result, dict) else {"result": str(result)}
+                self._trace("wellbeing_maintenance_complete", payload)
+            except Exception as exc:
+                self._trace("wellbeing_maintenance_error", {"error": str(exc)})
+                if self.readiness:
+                    self.readiness.degraded(f"wellbeing maintenance failed: {exc}")
+
     async def _telemetry_prune_loop(self) -> None:
         last_prune = 0.0
         while self._running:
@@ -573,6 +609,7 @@ class AgentScheduler:
             self._schedule_loop(),
             self._initiative_contact_loop(),
             self._desktop_context_loop(),
+            self._wellbeing_maintenance_loop(),
             self._telemetry_prune_loop(),
         )
 

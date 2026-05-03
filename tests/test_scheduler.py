@@ -1,17 +1,18 @@
 """Tests for AgentScheduler background loop orchestration."""
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
 import pytest
 import pytest_asyncio
 
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
 from opencas.runtime import AgentRuntime
-from opencas.runtime.scheduler import AgentScheduler
 from opencas.runtime.readiness import AgentReadiness, ReadinessState
+from opencas.runtime.scheduler import AgentScheduler
 
 
 @pytest_asyncio.fixture
@@ -116,6 +117,9 @@ def test_scheduler_default_consolidation_budget_is_worker_bounded(runtime: Agent
 
     assert scheduler.consolidation_budget["max_candidates"] == 100
     assert scheduler.consolidation_budget["worker_timeout_seconds"] == 300
+    assert scheduler.consolidation_budget["max_compaction_sessions"] == 8
+    assert scheduler.consolidation_budget["max_compaction_candidates"] == 1000
+    assert scheduler.consolidation_budget["min_compaction_session_lag"] == 20
 
 
 @pytest.mark.asyncio
@@ -516,6 +520,92 @@ async def test_scheduler_runs_initiative_contact_loop() -> None:
     await asyncio.sleep(0.04)
     await scheduler.stop()
     runtime.maybe_run_initiative_contact.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_runs_wellbeing_maintenance_when_idle() -> None:
+    class FakeExecutive:
+        def recommend_pause(self) -> bool:
+            return False
+
+    class FakeBAA:
+        queue_size = 0
+        held_size = 0
+        active_count = 0
+        start = AsyncMock()
+        stop = AsyncMock()
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.executive = FakeExecutive()
+            self.baa = FakeBAA()
+            self.ctx = SimpleNamespace(health_monitor=None, somatic=None)
+            self._activity = "idle"
+            self.run_cycle = AsyncMock(return_value={})
+            self.run_consolidation = AsyncMock(return_value={})
+            self.run_daydream = AsyncMock(return_value={})
+            self.run_wellbeing_maintenance = AsyncMock(return_value={"status": "recorded"})
+
+    runtime = FakeRuntime()
+    readiness = AgentReadiness()
+    readiness.ready("test ready")
+    scheduler = AgentScheduler(
+        runtime=runtime,
+        cycle_interval=3600,
+        consolidation_interval=3600,
+        daydream_interval=3600,
+        schedule_interval=3600,
+        wellbeing_interval=0.01,
+        baa_heartbeat_interval=3600,
+        readiness=readiness,
+    )
+    await scheduler.start()
+    await asyncio.sleep(0.04)
+    await scheduler.stop()
+    runtime.run_wellbeing_maintenance.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_skips_wellbeing_maintenance_when_runtime_is_active() -> None:
+    class FakeExecutive:
+        def recommend_pause(self) -> bool:
+            return False
+
+    class FakeBAA:
+        queue_size = 0
+        held_size = 0
+        active_count = 0
+        start = AsyncMock()
+        stop = AsyncMock()
+
+    class FakeRuntime:
+        def __init__(self) -> None:
+            self.executive = FakeExecutive()
+            self.baa = FakeBAA()
+            self.ctx = SimpleNamespace(health_monitor=None, somatic=None)
+            self._activity = "chat"
+            self.run_cycle = AsyncMock(return_value={})
+            self.run_consolidation = AsyncMock(return_value={})
+            self.run_daydream = AsyncMock(return_value={})
+            self.run_wellbeing_maintenance = AsyncMock(return_value={"status": "recorded"})
+
+    runtime = FakeRuntime()
+    readiness = AgentReadiness()
+    readiness.ready("test ready")
+    scheduler = AgentScheduler(
+        runtime=runtime,
+        cycle_interval=3600,
+        consolidation_interval=3600,
+        daydream_interval=3600,
+        schedule_interval=3600,
+        wellbeing_interval=0.01,
+        baa_heartbeat_interval=3600,
+        readiness=readiness,
+    )
+    await scheduler.start()
+    await asyncio.sleep(0.04)
+    await scheduler.stop()
+    runtime.run_wellbeing_maintenance.assert_not_awaited()
 
 
 @pytest.mark.asyncio

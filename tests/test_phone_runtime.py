@@ -337,7 +337,7 @@ async def test_configure_runtime_phone_persists_and_rebuilds(monkeypatch: pytest
             enabled=True,
             owner_phone_number="+15551234567",
             twilio_from_number="+15557654321",
-            public_base_url="https://opencas.example.com",
+            public_base_url="https://bulma.example.com",
         ),
     )
 
@@ -371,7 +371,7 @@ async def test_autoconfigure_runtime_phone_persists_selected_twilio_number(
     status = await autoconfigure_runtime_phone(
         runtime,
         enabled=True,
-        public_base_url="https://opencas.example.com",
+        public_base_url="https://bulma.example.com",
         owner_phone_number="+15551234567",
         owner_display_name="Cabew",
     )
@@ -412,8 +412,8 @@ async def test_configure_runtime_phone_session_profiles_persists_editable_menu(
     status = await configure_runtime_phone_session_profiles(
         runtime,
         {
-            "owner_entry_prompt": "Press 1 for the owner.",
-            "owner_entry_reprompt": "Press 1 for the owner now.",
+            "owner_entry_prompt": "Press 1 for Jarrod.",
+            "owner_entry_reprompt": "Press 1 for Jarrod now.",
             "owner_pin_prompt": "Enter owner pin.",
             "owner_pin_retry_prompt": "Retry pin.",
             "owner_pin_success_message": "Verified.",
@@ -425,7 +425,7 @@ async def test_configure_runtime_phone_session_profiles_persists_editable_menu(
             "employer_label": "Employer lane",
             "employer_phrases": ["employer", "recruiter"],
             "employer_greeting": "Employer greeting.",
-            "employer_prompt_profile": "worksafe_owner",
+            "employer_prompt_profile": "worksafe_bulma",
             "employer_allowed_actions": ["leave_message", "knowledge_qa"],
             "employer_shared_workspace_subdir": "phone/employer_shared",
             "employer_caller_workspace_subdir": "phone/employers/{phone_digits}",

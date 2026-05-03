@@ -9,10 +9,12 @@ from opencas.autonomy.commitment_store import CommitmentStore
 from opencas.autonomy.executive import ExecutiveState
 from opencas.autonomy.portfolio import PortfolioStore
 from opencas.autonomy.work_store import WorkStore
+from opencas.cognition import SelfInspectionStore
 from opencas.context import SessionContextStore
 from opencas.execution import TaskStore
 from opencas.execution.receipt_store import ExecutionReceiptStore
 from opencas.memory import MemoryStore
+from opencas.wellbeing import WellbeingStore
 
 from .config import BootstrapConfig
 from .live_objective import read_tasklist_live_objective
@@ -32,6 +34,8 @@ class RuntimeStoreBundle:
     context_store: SessionContextStore
     work_store: WorkStore
     commitment_store: CommitmentStore
+    self_inspection_store: SelfInspectionStore
+    wellbeing_store: WellbeingStore
     portfolio_store: PortfolioStore
     executive: ExecutiveState
 
@@ -66,9 +70,13 @@ async def initialize_runtime_stores(
 
     commitment_store = CommitmentStore(config.state_dir / "commitments.db")
     await commitment_store.connect()
+    self_inspection_store = SelfInspectionStore(config.state_dir / "self_inspection.db")
+    await self_inspection_store.connect()
+    wellbeing_store = WellbeingStore(config.state_dir / "wellbeing.db")
+    await wellbeing_store.connect()
     portfolio_store = PortfolioStore(config.state_dir / "portfolio.db")
     await portfolio_store.connect()
-    stage("commitment_portfolio_online")
+    stage("commitment_self_inspection_wellbeing_portfolio_online")
 
     executive = ExecutiveState(
         identity=identity,
@@ -93,6 +101,8 @@ async def initialize_runtime_stores(
         context_store=context_store,
         work_store=work_store,
         commitment_store=commitment_store,
+        self_inspection_store=self_inspection_store,
+        wellbeing_store=wellbeing_store,
         portfolio_store=portfolio_store,
         executive=executive,
     )

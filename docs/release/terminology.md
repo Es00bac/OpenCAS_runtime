@@ -44,7 +44,7 @@ Reducing the active context window by summarizing older conversation turns into 
 The process of combining multiple retrieval signals (semantic vector similarity, keyword match, recency, graph edges, salience, emotional resonance, temporal echo, reliability) into a single ranked result list using Reciprocal Rank Fusion (RRF). This is how the agent selects relevant memories for a given conversation turn.
 
 **Embedding**
-A dense vector representation of a piece of text, used for semantic similarity search. OpenCAS uses `google/embeddinggemma-300m` as the active default and stores native 768-dimensional vectors for that lane. Embeddings are cached to SQLite and are reused for identical source text. A deterministic local hash fallback is used when generation is unavailable.
+ A dense vector representation of a piece of text, used for semantic similarity search. OpenCAS uses `google/embeddinggemma-300m` as the active default and stores vectors in a 3072-dim canonical space, with local 768-native outputs padded with explicit metadata. Embeddings are cached to SQLite and never recomputed for identical source text. A deterministic local hash fallback is used when generation is unavailable.
 
 **Embedding Backfill**
 A background task that computes embeddings for any memory records that were stored without one, for example during offline operation or before the embedding model was configured.
@@ -129,9 +129,6 @@ The control layer that decides whether a failed task should retry, salvage, or s
 **Salvage Packet**
 The durable retry metadata attached to a failed task. It captures the last meaningful attempt state so the governor can resume without losing provenance.
 
-**Project Return**
-A resumable record for unfinished work. It stores the canonical artifact, recent attempt evidence, blocked/resumable status, creative continuity notes, and a next-step hint so the agent can return to unfinished work deliberately.
-
 ---
 
 ## Scheduling
@@ -180,15 +177,6 @@ The central registry of callable tools available to the agent. Tools are validat
 
 **Workflow Tools**
 Higher-level composite tools that reduce round-trips for common patterns. Examples: `workflow_create_writing_task` (scaffold + commitment + plan in one call), `workflow_repo_triage` (quick repo and work summary), `workflow_supervise_session` (start, observe, and interact with a PTY terminal session), and `workflow_create_schedule` (create a durable scheduled task). Designed to reduce tool-call round-trips for common operator patterns.
-
-**Tool-Use Memory**
-Compact historical memory about which tools helped with which kinds of tasks. It lets the agent consult prior outcomes and tool metadata when choosing a tool instead of keeping every tool description in active context all the time.
-
-**Semantic Tool Router**
-The embedding-backed tool-selection helper. It indexes tool metadata so the runtime can retrieve a small relevant toolbox for the current task.
-
-**Objective Contract**
-A task-specific success contract drafted for the work being attempted. It describes expected outputs, verification, and completion boundaries so execution does not falsely mark vague or unfinished work complete.
 
 **Tool Loop Guard**
 A circuit breaker inside the agent's tool-use loop. Stops execution after 24 rounds or if the same tool call is made identically twice in a row. Prevents runaway tool loops.

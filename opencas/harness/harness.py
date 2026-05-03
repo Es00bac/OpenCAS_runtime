@@ -428,7 +428,7 @@ class AgenticHarness:
                     {
                         "role": "system",
                         "content": (
-                            "You are the OpenCAS agent drafting an outcome contract for your own "
+                            "You are Bulma drafting an outcome contract for your own "
                             "autonomous work before execution begins."
                         ),
                     },

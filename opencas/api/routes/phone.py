@@ -84,7 +84,7 @@ class PhoneSessionProfilesUpdateRequest(BaseModel):
     employer_label: str = "Potential employer"
     employer_phrases: list[str] = Field(default_factory=list)
     employer_greeting: str = ""
-    employer_prompt_profile: str = "worksafe_owner"
+    employer_prompt_profile: str = "worksafe_bulma"
     employer_allowed_actions: list[PhoneAllowedAction] = Field(
         default_factory=lambda: ["leave_message", "knowledge_qa"]
     )

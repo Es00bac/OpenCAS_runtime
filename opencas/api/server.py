@@ -7,11 +7,12 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from opencas.telemetry.models import TelemetryEvent
+
 from .chat_service import perform_chat_turn
 from .websocket_bridge import WebSocketBridge
 
@@ -108,20 +109,21 @@ def create_app(runtime: Any) -> FastAPI:
             bridge.disconnect(websocket)
 
     # Dashboard routers
-    from .routes.config import build_config_router
-    from .routes.monitor import build_monitor_router
-    from .routes.platform import build_platform_router
     from .routes.chat import build_chat_router
+    from .routes.config import build_config_router
     from .routes.daydream import build_daydream_router
-    from .routes.memory import build_memory_router
-    from .routes.operations import build_operations_router
-    from .routes.usage import build_usage_router
-    from .routes.identity import build_identity_router
     from .routes.executive import build_executive_router
+    from .routes.identity import build_identity_router
+    from .routes.memory import build_memory_router
+    from .routes.monitor import build_monitor_router
+    from .routes.operations import build_operations_router
     from .routes.phone import build_phone_router
-    from .routes.telegram import build_telegram_router
+    from .routes.platform import build_platform_router
     from .routes.schedule import build_schedule_router
+    from .routes.telegram import build_telegram_router
     from .routes.telemetry import build_telemetry_router
+    from .routes.usage import build_usage_router
+    from .routes.wellbeing import build_wellbeing_router
 
     app.include_router(build_config_router(runtime))
     app.include_router(build_monitor_router(runtime))
@@ -131,6 +133,7 @@ def create_app(runtime: Any) -> FastAPI:
     app.include_router(build_memory_router(runtime))
     app.include_router(build_operations_router(runtime))
     app.include_router(build_usage_router(runtime))
+    app.include_router(build_wellbeing_router(runtime))
     app.include_router(build_identity_router(runtime))
     app.include_router(build_executive_router(runtime))
     app.include_router(build_phone_router(runtime))

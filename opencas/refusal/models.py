@@ -35,4 +35,4 @@ class RefusalDecision(BaseModel):
     refused: bool
     category: Optional[RefusalCategory] = None
     reasoning: str = ""
-    suggested_response: Optional[str] = None
+    policy_evidence: List[Dict[str, Any]] = Field(default_factory=list)

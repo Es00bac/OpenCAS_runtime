@@ -2,23 +2,35 @@
 
 from __future__ import annotations
 
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
+
+from opencas.api.operations_activity import ActivityOperationsService
+from opencas.api.operations_browser import BrowserSessionService, register_browser_routes
+from opencas.api.operations_models import (
+    CommitmentListResponse,
+    CommitmentUpdateRequest,
+    PlanListResponse,
+    PlanUpdateRequest,
+    ProcessDetailResponse,
+    PtyInputRequest,
+    ReceiptListResponse,
+    SessionListResponse,
+    TaskListResponse,
+    WorkListResponse,
+    WorkUpdateRequest,
+)
 from opencas.api.operations_monitoring import (
     build_approval_audit_snapshot,
     build_cost_snapshot,
     build_hardening_snapshot,
     build_memory_value_snapshot,
 )
-from opencas.api.operations_activity import ActivityOperationsService
-from opencas.api.operations_browser import BrowserSessionService, register_browser_routes
 from opencas.api.operations_qualification import (
-    QualificationOperationsService,
     QualificationLabelDetailResponse,
+    QualificationOperationsService,
     QualificationRerunDetailResponse,
     QualificationRerunRequest,
     QualificationSummaryResponse,
@@ -28,26 +40,6 @@ from opencas.api.operations_qualification import (
 )
 from opencas.api.operations_sessions import SessionOperationsService
 from opencas.api.operations_tasking import TaskingOperationsService
-from opencas.api.operations_models import (
-    CommitmentEntry,
-    CommitmentListResponse,
-    CommitmentUpdateRequest,
-    PlanListResponse,
-    PlanSummary,
-    PlanUpdateRequest,
-    ProcessDetailResponse,
-    PtyInputRequest,
-    ReceiptEntry,
-    ReceiptListResponse,
-    SessionEntry,
-    SessionListResponse,
-    SessionScopeEntry,
-    TaskEntry,
-    TaskListResponse,
-    WorkItemEntry,
-    WorkListResponse,
-    WorkUpdateRequest,
-)
 from opencas.api.operator_actions import (
     append_operator_action,
     load_recent_operator_actions,
@@ -55,6 +47,7 @@ from opencas.api.operator_actions import (
     truncate_operator_text,
 )
 from opencas.api.qualification_models import QualificationArtifactsPaths
+from opencas.runtime.maintenance_runtime import compact_runtime_backlog
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 QUALIFICATION_SUMMARY_PATH = REPO_ROOT / "dev-notes" / "qualification" / "live_validation_summary.json"
@@ -270,6 +263,21 @@ def build_operations_router(runtime: Any) -> APIRouter:
             runtime,
             window_days=max(1, min(window_days, 30)),
             bucket_hours=max(1, min(bucket_hours, 24)),
+        )
+
+    @r.post("/maintenance/compact-backlog")
+    async def compact_memory_backlog(
+        max_sessions: int = 8,
+        min_session_lag: int = 20,
+        tail_size: int = 10,
+        max_candidates: int = 1000,
+    ) -> Dict[str, Any]:
+        return await compact_runtime_backlog(
+            runtime,
+            max_sessions=max(1, min(max_sessions, 20)),
+            min_session_lag=max(1, min(min_session_lag, 1000)),
+            tail_size=max(1, min(tail_size, 200)),
+            max_candidates=max(1, min(max_candidates, 5000)),
         )
 
     @r.get("/sessions", response_model=SessionListResponse)

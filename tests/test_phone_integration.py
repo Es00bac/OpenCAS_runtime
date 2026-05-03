@@ -150,7 +150,7 @@ def _phone_service(
     config = PhoneRuntimeConfig(
         enabled=True,
         webhook_signature_required=False,
-        public_base_url="https://opencas.example.com",
+        public_base_url="https://bulma.example.com",
         twilio_from_number="+15557654321",
         owner_phone_number=owner_phone_number,
         owner_display_name="Cabew",
@@ -298,13 +298,13 @@ async def test_owner_gather_queues_background_reply_for_owner_request(
     monkeypatch.setattr(service, "_start_owner_reply_task", lambda **kwargs: "reply-123")
 
     xml = await service.handle_gather_webhook(
-        request_url="https://opencas.example.com/api/phone/twilio/gather",
-        webhook_base_url="https://opencas.example.com",
+        request_url="https://bulma.example.com/api/phone/twilio/gather",
+        webhook_base_url="https://bulma.example.com",
         form_data={"From": "+15551234567", "SpeechResult": "Need you now", "CallSid": "CA-owner"},
         provided_signature=None,
     )
 
-    assert "https://opencas.example.com/api/phone/twilio/poll?reply_token=reply-123" in xml
+    assert "https://bulma.example.com/api/phone/twilio/poll?reply_token=reply-123" in xml
     assert "<Pause length=\"2\"/>" in xml
 
 
@@ -324,7 +324,7 @@ async def test_owner_voice_webhook_returns_owner_menu_gather_twiml(tmp_path: Pat
     assert 'numDigits="1"' in xml
     assert "stream_mode=owner_menu" in xml
     assert "menu_key=owner_entry" in xml
-    assert "Press 1 to continue as the owner" in xml
+    assert "Press 1 to continue as Jarrod" in xml
     assert "<Connect>" not in xml
 
 
@@ -354,10 +354,10 @@ async def test_owner_menu_gather_digit_one_connects_owner_stream(tmp_path: Path)
 
     xml = await service.handle_gather_webhook(
         request_url=(
-            "https://opencas.example.com/api/phone/twilio/gather"
+            "https://bulma.example.com/api/phone/twilio/gather"
             "?stream_mode=owner_menu&menu_key=owner_entry"
         ),
-        webhook_base_url="https://opencas.example.com",
+        webhook_base_url="https://bulma.example.com",
         form_data={"From": "+15551234567", "Digits": "1", "CallSid": "CA-owner-menu"},
         provided_signature=None,
     )
@@ -375,10 +375,10 @@ async def test_screening_gather_digit_one_connects_workspace_stream(tmp_path: Pa
 
     xml = await service.handle_gather_webhook(
         request_url=(
-            "https://opencas.example.com/api/phone/twilio/gather"
+            "https://bulma.example.com/api/phone/twilio/gather"
             "?stream_mode=screening&menu_key=public_main"
         ),
-        webhook_base_url="https://opencas.example.com",
+        webhook_base_url="https://bulma.example.com",
         form_data={"From": "+15550009999", "Digits": "1", "CallSid": "CA-screening-menu"},
         provided_signature=None,
     )
@@ -386,7 +386,7 @@ async def test_screening_gather_digit_one_connects_workspace_stream(tmp_path: Pa
     assert "<Connect>" in xml
     assert "<Stream " in xml
     assert "workspace_assistant" in xml
-    assert "connected to the opencas phone bridge in work mode" in xml.lower()
+    assert "connected to bulma in work mode" in xml.lower()
 
 
 @pytest.mark.asyncio
@@ -541,7 +541,7 @@ async def test_phone_media_stream_screening_digit_one_enters_employer_mode(
                             "callerNumber": "+15550009999",
                             "displayName": "Caller",
                             "streamMode": "screening",
-                            "introMessage": "Hi, this is the OpenCAS agent.",
+                            "introMessage": "Hi, this is Bulma.",
                         },
                     },
                 }
@@ -599,7 +599,7 @@ async def test_phone_media_stream_emits_structured_session_state_traces(
                             "callerNumber": "+15550009999",
                             "displayName": "Caller",
                             "streamMode": "screening",
-                            "introMessage": "Hi, this is the OpenCAS agent.",
+                            "introMessage": "Hi, this is Bulma.",
                         },
                     },
                 }
@@ -670,7 +670,7 @@ async def test_phone_media_stream_owner_pin_dtmf_verifies_before_owner_mode(
 
     assert session.mode == "owner_menu"
     assert any("verified" in text.lower() for text in spoken)
-    assert any("press 1 to continue as the owner" in text.lower() for text in spoken)
+    assert any("press 1 to continue as jarrod" in text.lower() for text in spoken)
 
 
 @pytest.mark.asyncio
@@ -698,7 +698,7 @@ async def test_phone_media_stream_owner_menu_digit_one_enters_owner_mode(
                             "callerNumber": "+15551234567",
                             "displayName": "Cabew",
                             "streamMode": "owner_menu",
-                            "introMessage": "Press 1 to continue as the owner, or press 2 for the main menu.",
+                            "introMessage": "Press 1 to continue as Jarrod, or press 2 for the main menu.",
                         },
                     },
                 }
@@ -744,7 +744,7 @@ async def test_phone_media_stream_owner_menu_digit_one_falls_back_to_local_speec
                             "callerNumber": "+15551234567",
                             "displayName": "Cabew",
                             "streamMode": "owner_menu",
-                            "introMessage": "Press 1 to continue as the owner, or press 2 for the main menu.",
+                            "introMessage": "Press 1 to continue as Jarrod, or press 2 for the main menu.",
                         },
                     },
                 }
@@ -786,7 +786,7 @@ async def test_phone_media_stream_owner_menu_digit_one_does_not_drop_call_on_spe
                             "callerNumber": "+15551234567",
                             "displayName": "Cabew",
                             "streamMode": "owner_menu",
-                            "introMessage": "Press 1 to continue as the owner, or press 2 for the main menu.",
+                            "introMessage": "Press 1 to continue as Jarrod, or press 2 for the main menu.",
                         },
                     },
                 }
@@ -828,7 +828,7 @@ async def test_phone_media_stream_owner_menu_digit_two_routes_to_public_menu(
                             "callerNumber": "+15551234567",
                             "displayName": "Cabew",
                             "streamMode": "owner_menu",
-                            "introMessage": "Press 1 to continue as the owner, or press 2 for the main menu.",
+                            "introMessage": "Press 1 to continue as Jarrod, or press 2 for the main menu.",
                         },
                     },
                 }
@@ -871,7 +871,7 @@ async def test_finalize_employer_call_appends_owner_summary(tmp_path: Path) -> N
     await runtime.ctx.context_store.append(
         session_id,
         MessageRole.ASSISTANT,
-        "the owner builds autonomous AI systems and local-first workflow tooling.",
+        "Jarrod builds autonomous AI systems and local-first workflow tooling.",
         meta={"phone": service._assistant_meta(caller, call_sid="CA-emp")},
     )
 
@@ -899,7 +899,7 @@ async def test_finalize_employer_call_appends_owner_summary(tmp_path: Path) -> N
     assert "Employer is interested in an AI workflow engagement." in summary_path.read_text(encoding="utf-8")
     assert "Employer is interested in an AI workflow engagement." in messages_path.read_text(encoding="utf-8")
     assert notifications
-    assert "the OpenCAS agent received an employment inquiry call." in notifications[0]["text"]
+    assert "Bulma received an employment inquiry call." in notifications[0]["text"]
     assert notifications[0]["document_path"] == audio_path
 
 
@@ -923,8 +923,8 @@ async def test_owner_poll_returns_background_reply_when_ready(tmp_path: Path) ->
     )
 
     xml = await service.handle_poll_webhook(
-        request_url="https://opencas.example.com/api/phone/twilio/poll?reply_token=reply-123",
-        webhook_base_url="https://opencas.example.com",
+        request_url="https://bulma.example.com/api/phone/twilio/poll?reply_token=reply-123",
+        webhook_base_url="https://bulma.example.com",
         form_data={"From": "+15551234567", "CallSid": "CA-owner"},
         provided_signature=None,
         reply_token="reply-123",
@@ -983,8 +983,8 @@ async def test_low_trust_qa_uses_workspace_knowledge_only(tmp_path: Path, monkey
     monkeypatch.setattr(service, "_build_voice_prompt_verb", _fake_voice_prompt)
 
     xml = await service.handle_gather_webhook(
-        request_url="https://opencas.example.com/api/phone/twilio/gather",
-        webhook_base_url="https://opencas.example.com",
+        request_url="https://bulma.example.com/api/phone/twilio/gather",
+        webhook_base_url="https://bulma.example.com",
         form_data={"From": "+15550001111", "SpeechResult": "What is Neptune?", "CallSid": "CA-qa"},
         provided_signature=None,
     )
@@ -1055,8 +1055,8 @@ async def test_low_trust_workspace_tools_can_append_notes_without_escape(
     monkeypatch.setattr(service, "_build_voice_prompt_verb", _fake_voice_prompt)
 
     xml = await service.handle_gather_webhook(
-        request_url="https://opencas.example.com/api/phone/twilio/gather",
-        webhook_base_url="https://opencas.example.com",
+        request_url="https://bulma.example.com/api/phone/twilio/gather",
+        webhook_base_url="https://bulma.example.com",
         form_data={"From": "+15550001111", "SpeechResult": "Please note I need a Friday callback", "CallSid": "CA-note"},
         provided_signature=None,
     )
@@ -1085,9 +1085,9 @@ async def test_voicemail_only_contact_is_persisted_without_llm(tmp_path: Path, m
     monkeypatch.setattr(service, "_build_voice_prompt_verb", _fake_voice_prompt)
 
     xml = await service.handle_gather_webhook(
-        request_url="https://opencas.example.com/api/phone/twilio/gather",
-        webhook_base_url="https://opencas.example.com",
-        form_data={"From": "+15550002222", "SpeechResult": "Tell the OpenCAS agent I called", "CallSid": "CA-voicemail"},
+        request_url="https://bulma.example.com/api/phone/twilio/gather",
+        webhook_base_url="https://bulma.example.com",
+        form_data={"From": "+15550002222", "SpeechResult": "Tell Bulma I called", "CallSid": "CA-voicemail"},
         provided_signature=None,
     )
 
@@ -1096,8 +1096,8 @@ async def test_voicemail_only_contact_is_persisted_without_llm(tmp_path: Path, m
     session_entries = runtime.ctx.context_store.entries["phone:+15550002222"]
     assert len(session_entries) == 1
     assert session_entries[0].meta["phone"]["mode"] == "voicemail"
-    assert session_entries[0].content == "Tell the OpenCAS agent I called"
-    assert "Thanks. I saved your message for the OpenCAS agent." in xml
+    assert session_entries[0].content == "Tell Bulma I called"
+    assert "Thanks. I saved your message for Bulma." in xml
 
 
 @pytest.mark.asyncio
@@ -1145,7 +1145,7 @@ async def test_place_owner_call_uses_twilio_rest_api(tmp_path: Path, monkeypatch
     assert captured["data"]["To"] == "+15551234567"
     assert (
         captured["data"]["Url"]
-        == "https://opencas.example.com/api/phone/twilio/voice?call_token=token123"
+        == "https://bulma.example.com/api/phone/twilio/voice?call_token=token123"
     )
 
 
@@ -1185,7 +1185,7 @@ async def test_autoconfigure_twilio_selects_account_number_and_updates_webhook(
                     "incoming_phone_numbers": [
                         {
                             "sid": "PN123",
-                            "friendly_name": "the OpenCAS agent",
+                            "friendly_name": "Bulma",
                             "phone_number": "(484) 673-6227",
                             "voice_url": None,
                             "voice_method": None,
@@ -1200,7 +1200,7 @@ async def test_autoconfigure_twilio_selects_account_number_and_updates_webhook(
             return _FakeResponse(
                 {
                     "sid": "PN123",
-                    "friendly_name": "the OpenCAS agent",
+                    "friendly_name": "Bulma",
                     "phone_number": "(484) 673-6227",
                     "voice_url": data["VoiceUrl"],
                     "voice_method": data["VoiceMethod"],
@@ -1217,7 +1217,7 @@ async def test_autoconfigure_twilio_selects_account_number_and_updates_webhook(
 
     result = await service.autoconfigure_twilio(
         enabled=True,
-        public_base_url="https://opencas.example.com",
+        public_base_url="https://bulma.example.com",
         owner_phone_number="+17203340532",
         owner_display_name="Cabew",
     )
@@ -1230,7 +1230,7 @@ async def test_autoconfigure_twilio_selects_account_number_and_updates_webhook(
     assert captured["get_urls"] == ["https://api.twilio.com/2010-04-01/Accounts/AC123/IncomingPhoneNumbers.json"]
     assert captured["post_urls"] == ["https://api.twilio.com/2010-04-01/Accounts/AC123/IncomingPhoneNumbers/PN123.json"]
     assert captured["post_data"] == {
-        "VoiceUrl": "https://opencas.example.com/api/phone/twilio/voice?bridge_token=bridge-secret",
+        "VoiceUrl": "https://bulma.example.com/api/phone/twilio/voice?bridge_token=bridge-secret",
         "VoiceMethod": "POST",
     }
     assert result["selected_number"]["phone_number"] == "+14846736227"

@@ -5,11 +5,12 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from uuid import uuid4
 from unittest.mock import AsyncMock, MagicMock, patch
+from uuid import uuid4
 
 import pytest
 from fastapi import FastAPI
+
 from opencas.api import provenance_store as ps
 from opencas.api.routes.monitor import build_monitor_router
 from opencas.bootstrap.pipeline import BootstrapPipeline
@@ -17,6 +18,7 @@ from opencas.diagnostics import Doctor, HealthMonitor
 from opencas.diagnostics.models import CheckStatus, DiagnosticCheck, HealthReport
 from opencas.embeddings.models import EmbeddingRecord
 from opencas.infra import EventBus, HealthCheckEvent
+from opencas.memory import EpisodeKind
 from opencas.somatic.models import SomaticSnapshot
 
 
@@ -208,6 +210,43 @@ class TestDoctorNewChecks:
         doctor = Doctor(context=context)
         check = await doctor.check_compaction_lag()
         assert check.status == CheckStatus.FAIL
+
+    @pytest.mark.asyncio
+    async def test_compaction_lag_uses_exact_counter_when_available(self):
+        context = MagicMock()
+        context.memory.count_non_compacted_episodes = AsyncMock(return_value=1435)
+        context.memory.list_non_compacted_episodes = AsyncMock(
+            return_value=[MagicMock()] * 1000
+        )
+        doctor = Doctor(context=context)
+        check = await doctor.check_compaction_lag()
+        assert check.status == CheckStatus.FAIL
+        assert check.details["lag"] == 1435
+        assert check.message == "Non-compacted episodes: 1435"
+
+    @pytest.mark.asyncio
+    async def test_compaction_lag_uses_compactable_backlog_when_available(self):
+        context = MagicMock()
+        context.memory.compaction_backlog_stats = AsyncMock(
+            return_value={
+                "tail_size": 10,
+                "session_count": 91,
+                "total_non_compacted": 999,
+                "compactable_lag": 298,
+                "compactable_session_count": 34,
+                "max_session_lag": 29,
+                "top_sessions": [{"session_id": "s1", "count": 29, "compactable": 19}],
+            }
+        )
+        context.memory.list_non_compacted_episodes = AsyncMock(
+            return_value=[MagicMock(kind=EpisodeKind.TURN, session_id="s1")] * 999
+        )
+        doctor = Doctor(context=context)
+        check = await doctor.check_compaction_lag()
+        assert check.status == CheckStatus.PASS
+        assert check.details["lag"] == 298
+        assert check.details["total_non_compacted"] == 999
+        assert check.message == "Compactable episodes: 298 (total non-compacted: 999)"
 
 
     @pytest.mark.asyncio

@@ -250,7 +250,7 @@ def _infer_project_intent(context_text: str, title: str, next_step: str) -> str:
         marker in text for marker in _PROJECT_INTENT_MARKERS
     ):
         return (
-            f"revise and finish {title} until the OpenCAS agent is satisfied with the manuscript, "
+            f"revise and finish {title} until Bulma is satisfied with the manuscript, "
             "using user critique as input while continuing writing and revision autonomously."
         )
     return (

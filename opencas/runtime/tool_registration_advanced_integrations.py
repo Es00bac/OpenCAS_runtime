@@ -129,14 +129,14 @@ def register_advanced_integration_tools(runtime: Any) -> None:
             ),
             ToolRegistrationSpec(
                 name="phone_call_owner",
-                description="Place an outbound phone call to the trusted owner number only. Use this when the OpenCAS agent genuinely needs to reach the operator by voice.",
+                description="Place an outbound phone call to the trusted owner number only. Use this when Bulma genuinely needs to reach the operator by voice.",
                 risk_tier=ActionRiskTier.EXTERNAL_WRITE,
                 schema={
                     "type": "object",
                     "properties": {
                         "message": {
                             "type": "string",
-                            "description": "What the OpenCAS agent should say when the owner answers.",
+                            "description": "What Bulma should say when the owner answers.",
                         },
                         "reason": {
                             "type": "string",
@@ -162,7 +162,7 @@ def register_advanced_integration_tools(runtime: Any) -> None:
             ),
             ToolRegistrationSpec(
                 name="initiative_contact_owner",
-                description="Send a policy-limited owner notification through the trusted initiative-contact channel. Use when the OpenCAS agent genuinely wants to reach out or thinks the operator should know something.",
+                description="Send a policy-limited owner notification through the trusted initiative-contact channel. Use when Bulma genuinely wants to reach out or thinks the operator should know something.",
                 risk_tier=ActionRiskTier.EXTERNAL_WRITE,
                 schema={
                     "type": "object",

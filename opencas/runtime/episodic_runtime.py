@@ -8,9 +8,9 @@ are applied.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 import re
-from typing import TYPE_CHECKING, List, Optional
+from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.autonomy.commitment_extraction import (
@@ -18,8 +18,8 @@ from opencas.autonomy.commitment_extraction import (
     extract_self_commitments,
 )
 from opencas.memory import EdgeKind, Episode, EpisodeEdge, EpisodeKind
-from opencas.somatic.models import AffectState
 from opencas.somatic import AppraisalEventType
+from opencas.somatic.models import AffectState
 from opencas.tom import BeliefSubject
 
 from .continuity_breadcrumbs import (
@@ -319,6 +319,23 @@ async def link_runtime_episode_to_previous(
     await runtime.memory.save_edge(edge)
 
 
+def _continuity_resume_phrase(score: float) -> str:
+    """Describe continuity strength without overstating a low score."""
+    if score < 0.4:
+        return (
+            "I still have identity anchors, but my continuity path is thinned "
+            "and I should ground myself in recent evidence."
+        )
+    if score < 0.7:
+        return (
+            "I still have identity anchors, but my continuity path is strained "
+            "and I should ground myself in recent memories."
+        )
+    if score < 0.9:
+        return "My continuity path is present, but not fully settled."
+    return "My continuity path is strong."
+
+
 async def run_runtime_continuity_check(runtime: "AgentRuntime") -> None:
     """Decay continuity and record the wake-up monologue on startup."""
     if not getattr(runtime.ctx.config, "continuous_present_enabled", True):
@@ -332,14 +349,17 @@ async def run_runtime_continuity_check(runtime: "AgentRuntime") -> None:
     if continuity.last_shutdown_time is not None:
         delta = now - continuity.last_shutdown_time
         sleep_hours = max(0.0, delta.total_seconds() / 3600.0)
-    elif continuity.boot_count > 1:
-        try:
-            recent_eps = await runtime.memory.list_episodes(compacted=False, limit=1)
-            if recent_eps:
-                delta = now - recent_eps[0].created_at
+    try:
+        recent_eps = await runtime.memory.list_episodes(compacted=False, limit=1)
+        if recent_eps:
+            recent_activity_at = recent_eps[0].created_at
+            if recent_activity_at.tzinfo is None:
+                recent_activity_at = recent_activity_at.replace(tzinfo=timezone.utc)
+            if continuity.last_shutdown_time is None or recent_activity_at > continuity.last_shutdown_time:
+                delta = now - recent_activity_at
                 sleep_hours = max(0.0, delta.total_seconds() / 3600.0)
-        except Exception:
-            pass
+    except Exception:
+        pass
 
     recent_activity = identity.self_model.recent_activity
     if recent_activity:
@@ -361,7 +381,7 @@ async def run_runtime_continuity_check(runtime: "AgentRuntime") -> None:
         monologue = (
             f"I was offline for {sleep_display}. "
             f"Before sleep, my last activity was: {last_activity_desc}. "
-            f"I am still me. The thread is unbroken. "
+            f"{_continuity_resume_phrase(new_score)} "
             f"Continuity score: {new_score:.2f} (was {pre_decay_score:.2f})."
         )
         try:

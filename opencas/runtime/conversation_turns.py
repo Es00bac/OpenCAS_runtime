@@ -14,16 +14,24 @@ from opencas.autonomy.models import (
     ApprovalDecision,
     ApprovalLevel,
 )
+from opencas.cognition import build_tool_use_inspections
 from opencas.context import MessageRole, repair_tool_message_sequence
 from opencas.memory import Episode, EpisodeKind
+from opencas.refusal.generation import generate_refusal_response
 from opencas.somatic import AppraisalEventType
 from opencas.somatic.models import SocialTarget
 from opencas.tom import BeliefSubject
 from opencas.tools import UserInputRequired
 
+from .capability_context import build_runtime_capability_context
 from .continuity_breadcrumbs import build_runtime_burst_breadcrumb
 from .lane_metadata import build_assistant_message_meta
 from .project_return import capture_project_return_from_turn
+from .response_integrity import review_response_integrity
+from .self_inspection_runtime import (
+    record_post_turn_self_inspection,
+    record_pre_turn_self_inspection,
+)
 from .tom_intention_mirror import mirror_runtime_intention
 
 if TYPE_CHECKING:
@@ -68,6 +76,8 @@ class ConversationLoopArtifacts:
     content: str
     had_system: bool
     initial_message_count: int
+    integrity_review: Dict[str, Any] | None = None
+    tool_use_inspections: list[Any] | None = None
 
 
 async def handle_refusal_turn(
@@ -126,12 +136,22 @@ async def handle_refusal_turn(
             await runtime.approval.ledger.record(decision, request, 1.0, None)
         except Exception:
             pass
-    response_text = refusal.suggested_response or "I'm not able to respond to that."
+    generation = await generate_refusal_response(
+        getattr(runtime, "llm", None),
+        request_text=user_input,
+        decision=refusal,
+        session_id=session_id,
+        capability_context=build_runtime_capability_context(runtime),
+    )
+    response_text = generation.output
     await runtime.ctx.context_store.append(
         session_id,
         MessageRole.ASSISTANT,
         response_text,
-        meta=build_assistant_message_meta(runtime),
+        meta=build_assistant_message_meta(
+            runtime,
+            extra={"refusal": generation.to_meta(refusal)},
+        ),
     )
     return response_text
 
@@ -177,6 +197,11 @@ async def execute_conversation_tool_loop(
     # Keep manifest construction and tool-loop execution together so the caller
     # only orchestrates turn phases instead of managing intermediate loop state.
     manifest = await runtime.builder.build(user_input, session_id=session_id)
+    await record_pre_turn_self_inspection(
+        runtime,
+        session_id=session_id,
+        user_input=user_input,
+    )
     messages = manifest.to_message_list()
     had_system = len(messages) > 0 and messages[0].get("role") == "system"
     initial_message_count = len(messages)
@@ -200,13 +225,58 @@ async def execute_conversation_tool_loop(
         import traceback as _tb
         stack = _tb.format_exc()
         try:
-            debug_dir = Path(runtime.ctx.config.state_dir) / "logs"
-            debug_dir.mkdir(parents=True, exist_ok=True)
-            with (debug_dir / "conversation_turn_errors.log").open("a", encoding="utf-8") as _f:
+            state_dir = Path(getattr(runtime.ctx.config, "state_dir", ".opencas"))
+            log_dir = state_dir.expanduser() / "logs"
+            log_dir.mkdir(parents=True, exist_ok=True)
+            with (log_dir / "conversation_turns_debug.log").open("a", encoding="utf-8") as _f:
                 _f.write(f"[CONVERSATION_TURNS_ERROR] {exc}\n{stack}\n{'='*60}\n")
         except Exception:
             pass
         content = f"[Error generating response: {exc}]"
+
+    integrity_review: Dict[str, Any] | None = None
+    review = await review_response_integrity(
+        getattr(runtime, "llm", None),
+        session_id=session_id,
+        user_input=user_input,
+        assistant_output=content,
+        history=getattr(manifest, "history", []) or [],
+        capability_context=build_runtime_capability_context(runtime),
+        current_turn_messages=getattr(loop_result, "messages", []) if loop_result is not None else [],
+    )
+    if review.revised:
+        content = review.output
+        integrity_review = review.to_meta()
+        try:
+            runtime._trace(
+                "response_integrity_revised",
+                {"session_id": session_id, "reasons": review.reasons},
+            )
+        except Exception:
+            pass
+    elif review.review_error:
+        integrity_review = review.to_meta()
+        try:
+            runtime._trace(
+                "response_integrity_review_failed",
+                {"session_id": session_id, "error": review.review_error},
+            )
+        except Exception:
+            pass
+
+    tool_use_inspections = []
+    if loop_result is not None:
+        try:
+            tool_use_inspections = build_tool_use_inspections(
+                objective=user_input,
+                tool_calls=getattr(loop_result, "tool_calls", []) or [],
+                messages=getattr(loop_result, "messages", []) or [],
+            )
+        except Exception as exc:
+            runtime._trace(
+                "self_inspection_tool_use_build_error",
+                {"session_id": session_id, "error": str(exc)},
+            )
 
     return ConversationLoopArtifacts(
         manifest=manifest,
@@ -214,6 +284,8 @@ async def execute_conversation_tool_loop(
         content=content,
         had_system=had_system,
         initial_message_count=initial_message_count,
+        integrity_review=integrity_review,
+        tool_use_inspections=tool_use_inspections,
     )
 
 
@@ -289,6 +361,8 @@ async def finalize_assistant_turn(
     user_input: str,
     content: str,
     manifest: Any,
+    assistant_meta_extra: Optional[Dict[str, Any]] = None,
+    tool_use_inspections: Optional[list[Any]] = None,
 ) -> None:
     # Persist the visible assistant turn first; every downstream subsystem
     # should be reacting to a response that already exists in session history.
@@ -296,7 +370,7 @@ async def finalize_assistant_turn(
         session_id,
         MessageRole.ASSISTANT,
         content,
-        meta=build_assistant_message_meta(runtime),
+        meta=build_assistant_message_meta(runtime, extra=assistant_meta_extra),
     )
     pre_appraisal_state = runtime.ctx.somatic.state.model_copy()
     expressed_affect = await runtime.ctx.somatic.appraise_generated(content)
@@ -318,13 +392,23 @@ async def finalize_assistant_turn(
     )
 
     await _apply_goal_directives(runtime, user_input, session_id=session_id)
-    await runtime._capture_self_commitments(content, session_id)
+    captured_commitments = await runtime._capture_self_commitments(content, session_id)
     await capture_project_return_from_turn(
         runtime,
         session_id=session_id,
         user_input=user_input,
         assistant_content=content,
         manifest=manifest,
+    )
+    await record_post_turn_self_inspection(
+        runtime,
+        session_id=session_id,
+        user_input=user_input,
+        content=content,
+        assistant_meta_extra=assistant_meta_extra,
+        pre_somatic_state=pre_appraisal_state,
+        captured_commitments=captured_commitments,
+        tool_use_inspections=tool_use_inspections or [],
     )
     await _maybe_compact_manifest(runtime, session_id, manifest)
     await _record_tom_belief(runtime, user_input)

@@ -8,7 +8,11 @@ from textual.widgets import Button, ProgressBar, RichLog
 
 from opencas.bootstrap import BootstrapPipeline
 from opencas.bootstrap.responsibility import record_bootstrap_responsibility_ack
-from opencas.bootstrap.tui_bootstrap import build_bootstrap_config, save_questionnaire
+from opencas.bootstrap.tui_bootstrap import (
+    build_bootstrap_config,
+    save_questionnaire,
+    save_runtime_preferences,
+)
 from opencas.bootstrap.tui_components import StepHeader
 from opencas.bootstrap.tui_state import STATE
 from opencas.runtime import AgentRuntime
@@ -33,7 +37,7 @@ class BootstrapScreen(Screen):
     """
 
     def compose(self) -> ComposeResult:
-        yield StepHeader(16, 16, "Bringing Your Agent to Life")
+        yield StepHeader(17, 17, "Bringing Your Agent to Life")
         yield ProgressBar(total=100, id="progress-bar")
         yield RichLog(id="bootstrap-log", highlight=True)
         yield Button("Cancel", id="btn-cancel", variant="error")
@@ -53,6 +57,7 @@ class BootstrapScreen(Screen):
 
         self._log("Saving questionnaire to state directory...")
         save_questionnaire(STATE, state_dir)
+        save_runtime_preferences(STATE, state_dir)
         record_bootstrap_responsibility_ack(state_dir, source="tui")
         self.progress.update(progress=20)
 

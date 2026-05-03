@@ -45,7 +45,7 @@ def test_phone_contact_policy_preserves_explicit_empty_actions() -> None:
 def test_phone_runtime_config_round_trips_and_dedupes_contacts(tmp_path: Path) -> None:
     config = PhoneRuntimeConfig(
         enabled=True,
-        public_base_url="https://opencas.example.com/",
+        public_base_url="https://bulma.example.com/",
         menu_config_path="operator_seed/phone/menu.json",
         twilio_from_number="5551112222",
         owner_phone_number="+1 (555) 123-4567",
@@ -71,7 +71,7 @@ def test_phone_runtime_config_round_trips_and_dedupes_contacts(tmp_path: Path) -
 
     assert saved_path == Path(tmp_path) / "phone" / "config.json"
     assert loaded.enabled is True
-    assert loaded.public_base_url == "https://opencas.example.com"
+    assert loaded.public_base_url == "https://bulma.example.com"
     assert loaded.menu_config_path == "operator_seed/phone/menu.json"
     assert loaded.twilio_from_number == "+15551112222"
     assert loaded.owner_phone_number == "+15551234567"
@@ -109,7 +109,7 @@ def test_phone_menu_config_loads_default_menu_json() -> None:
     assert owner_menu.options[1].target_menu == "public_main"
     employer = next(option for option in public_menu.options if option.key == "employer")
     assert employer.action == "workspace_assistant"
-    assert employer.prompt_profile == "worksafe_owner"
+    assert employer.prompt_profile == "worksafe_bulma"
     assert [mount.access for mount in employer.workspace_mounts] == ["read_only", "append_only"]
 
 

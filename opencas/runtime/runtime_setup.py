@@ -47,6 +47,7 @@ from opencas.somatic import SomaticModulators
 from opencas.telegram_config import TelegramRuntimeConfig
 from opencas.tom import ToMEngine
 from opencas.tools import ToolRegistry, ToolUseLoop
+from opencas.wellbeing import FascinationGraph, MaintenancePlanner, WellbeingEngine
 
 from .daydream import DaydreamGenerator
 from .phone_runtime import initialize_runtime_phone
@@ -120,6 +121,11 @@ def initialize_runtime_autonomy(runtime: Any, context: Any) -> None:
     runtime.boredom = BoredomPhysics()
     runtime.spark_router = SparkRouter()
     runtime.commitment_store = getattr(context, "commitment_store", None)
+    runtime.self_inspection_store = getattr(context, "self_inspection_store", None)
+    runtime.wellbeing_store = getattr(context, "wellbeing_store", None)
+    runtime.wellbeing_engine = WellbeingEngine()
+    runtime.maintenance_planner = MaintenancePlanner()
+    runtime.fascination_graph = FascinationGraph()
     runtime.portfolio_store = getattr(context, "portfolio_store", None)
     runtime.schedule_service = getattr(context, "schedule_service", None)
     if runtime.schedule_service is not None:

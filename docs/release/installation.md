@@ -1,6 +1,6 @@
 # OpenCAS Installation Guide
 
-This guide documents the repo as an editable source checkout that can be configured and run directly.
+This guide documents the repo as it exists today, not a hypothetical packaged future release.
 
 ## Prerequisites
 
@@ -165,10 +165,10 @@ The current repo depends on the editable sibling checkout in `requirements.txt`.
 Verify that the server is running on the current default port:
 
 ```bash
-python -m opencas --with-server
+python -m opencas --with-server --accept-bootstrap-responsibility
 ```
 
-Add `--accept-bootstrap-responsibility` if this is a non-TUI fresh bootstrap.
+Omit `--accept-bootstrap-responsibility` if this state directory already contains continuity.
 
 Then open:
 

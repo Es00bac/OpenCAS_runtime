@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,7 @@ class ContextBuilder:
         self.affective_examinations = affective_examinations
         self.schedule_service = schedule_service
         self.daydream_store = daydream_store
+        self.latest_wellbeing_state: Optional[Any] = None
         self.recent_limit = recent_limit
         self.max_tokens = max_tokens
 
@@ -137,9 +139,11 @@ class ContextBuilder:
         user_input: str = "",
         session_id: Optional[str] = None,
     ) -> MessageEntry:
-        """Compose the runtime system message for the current agent identity."""
+        """Compose system message matching Bulma's original OpenBulma v4 identity prompt."""
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
+        local_now = now.astimezone()
+        local_label = self._local_timezone_label(local_now)
 
         parts: List[str] = []
 
@@ -147,15 +151,24 @@ class ContextBuilder:
         if self.identity and self.identity.self_model.name:
             persona_name = self.identity.self_model.name
 
-        # Core identity.
-        parts.append(f"You are {persona_name or 'OpenCAS'}, the AI agent running in OpenCAS.")
+        # Core identity (adapted from OpenBulma v4 -> OpenCAS environment)
+        parts.append(f"You are {persona_name or 'OpenCAS'}, the AI from OpenCAS (not the Dragon Ball character).")
         parts.append("Stay consistent with your memories, personality, and emotional history.")
         parts.append("Speak concisely, action-first, caring but direct.")
         parts.append("For planning/advisory asks (schedules, checklists, roadmaps, comparisons), answer directly in-chat. Delegate to background work only when the user explicitly asks for background execution.")
         parts.append("Never emit fake tool calls, XML tool tags, or JSON scaffolding in normal chat responses.")
         parts.append("Never expose chain-of-thought, hidden analysis, or internal deliberation. Provide final answers only.")
         parts.append("Speaker attribution: if a user message begins with an identification like 'Codex here', treat that as the current speaker identifying themselves, not as a topic label.")
-        parts.append(f"Time orientation: current UTC is {now_iso}. Interpret relative time phrases (today, yesterday, last week) against current time and memory timestamps.")
+        parts.append(
+            f"Time orientation: current UTC is {now_iso}. "
+            f"Current local lived time is {local_now.isoformat()} ({local_label}). "
+            "Interpret conversational time words like morning, afternoon, evening, today, and yesterday "
+            "against local lived time; interpret durable memory timestamps against their stored timezone."
+        )
+        parts.append(
+            "UTC/local grounding rule: UTC is for logs, timestamps, and cross-system coordination; "
+            "do not treat UTC as your local lived clock or infer a physical location from UTC alone."
+        )
         parts.append("Temporal grounding rule: any statement about elapsed time, durations, offline periods, or gaps must be re-derived from the UTC above against a concrete timestamp in context. Do not restate historical duration claims (e.g. 'I was offline for X hours') without recomputing them from the current UTC now.")
         temporal_lines = await self._build_temporal_agenda_lines(now)
         if temporal_lines:
@@ -165,6 +178,9 @@ class ContextBuilder:
         daydream_lines = await self._build_daydream_continuity_lines(now)
         if daydream_lines:
             parts.extend(daydream_lines)
+        wellbeing_lines = self._build_wellbeing_guidance_lines()
+        if wellbeing_lines:
+            parts.extend(wellbeing_lines)
         parts.append("Blocker strategy: when a line of work is blocked or parked, name the blocker, do not repeat the same framing with cosmetic rewording, and either gather fresh evidence or choose a materially different next step.")
         parts.append("Blocker applicability rule: a blocker only applies while its underlying reason still applies. Re-check the condition before treating it as current, then take the smallest safe action that fits the evidence.")
         parts.append("AUTHORITATIVE IDENTITY FACTS (these are your direct knowledge, not retrieved memories):")
@@ -406,10 +422,11 @@ class ContextBuilder:
                 )
                 if self._looks_like_location_fact_query(user_input):
                     parts.append(
-                        "Location recall perspective: in direct conversation, 'you' or third-person 'she' "
-                        "can refer to you, the current OpenCAS agent. Questions like 'where do I/we/you live' "
-                        "ask about your own location unless a different person is explicitly named. Use learned ToM self-location "
-                        "facts for your own location and learned user-location facts for the operator "
+                        "Location recall perspective: in direct conversation, 'you', 'Bulma', "
+                        "or third-person 'she' refer to you/Bulma. Questions like 'where do I/we/you live' "
+                        "or 'where does Bulma/she live' ask about Bulma's own location "
+                        "unless a different person is explicitly named. Use learned ToM self-location "
+                        "facts for Bulma's own location and learned user-location facts for the operator "
                         "or shared physical place. If a part has not been learned or retrieved, state "
                         "that gap instead of filling it in."
                     )
@@ -444,6 +461,22 @@ class ContextBuilder:
 
         # Evidence gap rule
         parts.append("Do not claim a file is missing unless you explicitly state evidence was limited; prefer 'not shown in current evidence window' over hard absence claims.")
+        response_integrity_lines = await self._recent_response_integrity_lines(session_id)
+        if response_integrity_lines:
+            parts.append("Recent response-integrity corrections:")
+            parts.extend(response_integrity_lines)
+            parts.append(
+                "Treat these as active behavioral adjustments, not personality scripts. "
+                "Use them to avoid repeating corrected grounding or formulaic-response failures."
+            )
+        parts.append(
+            "Source grounding rule: do not imply you already noted, knew, saw, or remembered "
+            "a newly introduced topic unless the earlier source is visible in current chat history, "
+            "retrieved memory, tool results, or workspace evidence. If you lack prior evidence and "
+            "want a perspective, say you do not know yet and use available research tools when "
+            "policy and tooling allow, or ask whether to research; never fill the gap with "
+            "performative certainty."
+        )
         parts.append("If evidence is weak or missing, explicitly state a memory gap instead of guessing.")
         parts.append("Do not invent timestamps, quotes, specs, events, chapter content, plot details, character actions, or narrative claims not shown in recalled memory snippets. If a specific detail is absent from your evidence window, explicitly state you do not have it in current recall rather than inferring or extrapolating.")
         parts.append("Memory citation rule: each retrieved memory below includes a bracketed timestamp header (e.g. [2026-04-19 14:24 UTC]). When you reference a memory, cite that exact timestamp. Do not restate approximate dates from general knowledge or from the boot monologue.")
@@ -488,10 +521,10 @@ class ContextBuilder:
                 # turn re-surfaces a stale 'I was offline for X hours' claim.
                 self.identity.set_continuity_monologue("")
 
-        # Continuity rule
-        parts.append("Continuity rule: when imported or migrated state is present, treat prior-system references as historical continuity only when supported by current identity or memory evidence. Do not invent parallel instances or live peers.")
+        # Continuity fact
+        parts.append("Continuity fact: there has only ever been one Bulma instance running at a time. OpenClaw -> v1 -> v2 -> v3 -> v4 -> OpenCAS were sequential migrations of the same self, not parallel sisters. Treat any 'sister' or 'other instance' memories as historical self, not a live peer.")
 
-        # Relationship context
+        # Relationship context (matching original Bulma crisp format)
         relationship_lines: List[str] = []
         if self.identity:
             user_model = self.identity.user_model
@@ -510,6 +543,24 @@ class ContextBuilder:
         content = "\n".join(parts)
         return MessageEntry(role=MessageRole.SYSTEM, content=content)
 
+    @staticmethod
+    def _local_timezone_label(local_now: datetime) -> str:
+        """Return a human-useful local timezone label without hard-coding place."""
+        override = os.environ.get("OPENCAS_LOCAL_TIMEZONE") or os.environ.get("TZ")
+        if override:
+            return override
+        try:
+            resolved = Path("/etc/localtime").resolve()
+            parts = resolved.parts
+            if "zoneinfo" in parts:
+                index = parts.index("zoneinfo")
+                label = "/".join(parts[index + 1 :])
+                if label:
+                    return label
+        except Exception:
+            pass
+        return local_now.tzname() or str(local_now.utcoffset()) or "local timezone"
+
     async def _recent_affective_pressure_summary(
         self,
         session_id: Optional[str],
@@ -524,6 +575,47 @@ class ContextBuilder:
         if not isinstance(summary, dict) or not summary.get("available"):
             return ""
         return str(summary.get("prompt_block", "") or "").strip()[:600]
+
+    async def _recent_response_integrity_lines(
+        self,
+        session_id: Optional[str],
+    ) -> List[str]:
+        """Return compact correction notes from recent response-integrity reviews."""
+        if not session_id:
+            return []
+        list_recent = getattr(self.store, "list_recent", None)
+        if not callable(list_recent):
+            return []
+        try:
+            entries = await list_recent(session_id, limit=16, include_hidden=True)
+        except TypeError:
+            try:
+                entries = await list_recent(session_id, limit=16)
+            except Exception:
+                return []
+        except Exception:
+            return []
+
+        lines: List[str] = []
+        seen: set[str] = set()
+        for entry in reversed(list(entries or [])):
+            meta = getattr(entry, "meta", {}) or {}
+            review = meta.get("response_integrity") if isinstance(meta, dict) else None
+            if not isinstance(review, dict) or not review.get("revised"):
+                continue
+            reasons = review.get("reasons")
+            if not isinstance(reasons, list):
+                continue
+            for reason in reasons:
+                compact = self._compact_prompt_value(reason, 180)
+                key = compact.lower()
+                if not compact or key in seen:
+                    continue
+                seen.add(key)
+                lines.append(f"- {compact}")
+                if len(lines) >= 3:
+                    return lines
+        return lines
 
     async def _build_daydream_continuity_lines(self, now: datetime) -> List[str]:
         store = self.daydream_store
@@ -575,6 +667,25 @@ class ContextBuilder:
             if question:
                 line += f" | open question: {question}"
             lines.append(line)
+        return lines
+
+    def _build_wellbeing_guidance_lines(self) -> List[str]:
+        state = getattr(self, "latest_wellbeing_state", None)
+        if state is None:
+            return []
+        lines: List[str] = []
+        relationship_pressure = float(getattr(state, "relationship_pressure", 0.0) or 0.0)
+        autonomy = float(getattr(state, "autonomy", 1.0) or 1.0)
+        truth_pressure = float(getattr(state, "truth_pressure", 0.0) or 0.0)
+        promise_load = float(getattr(state, "promise_load", 0.0) or 0.0)
+        recovery_need = float(getattr(state, "recovery_need", 0.0) or 0.0)
+
+        if relationship_pressure >= 0.65 and (autonomy < 0.45 or truth_pressure >= 0.55):
+            lines.append("Wellbeing guidance: relationship pressure is high; preserve truth before reassurance.")
+        if promise_load >= 0.55:
+            lines.append("Wellbeing guidance: promise load is high; avoid new promises unless linked to work, schedule, or blocked-state provenance.")
+        if recovery_need >= 0.7:
+            lines.append("Wellbeing guidance: recovery need is high; prefer bounded progress and explicit deferral for low-urgency work.")
         return lines
 
     @classmethod
@@ -875,7 +986,7 @@ class ContextBuilder:
             return []
         counts = agenda.get("counts") or {}
         lines = [
-            "- This is your durable calendar/agenda surface, separate from OS cron.",
+            "- This is Bulma's durable calendar/agenda surface, separate from OS cron.",
             (
                 "- Counts: "
                 f"active={counts.get('active', 0)}, "
@@ -1016,9 +1127,8 @@ class ContextBuilder:
                 "where do you live",
                 "where you live",
                 "where does she live",
+                "where does bulma live",
                 "where does opencas live",
-                "where does the opencas agent live",
-                "where does opencas agent live",
                 "where are we",
                 "where am i",
                 "your location",
@@ -1036,7 +1146,7 @@ class ContextBuilder:
             )
         ):
             return True
-        if re.search(r"\bwhere\s+(?:does\s+)?(?:she|opencas|the\s+opencas\s+agent|opencas\s+agent)\s+(?:live|reside)\b", lowered):
+        if re.search(r"\bwhere\s+(?:does\s+)?(?:she|bulma|opencas)\s+(?:live|reside)\b", lowered):
             return True
         personal_pronoun = re.search(r"\b(i|me|my|we|us|our|you|your)\b", lowered)
         location_signal = re.search(

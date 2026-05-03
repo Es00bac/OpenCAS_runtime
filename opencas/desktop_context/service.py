@@ -254,7 +254,7 @@ class DesktopContextService:
             {
                 "role": "system",
                 "content": (
-                    "You are the OpenCAS agent reviewing a private screenshot of the operator's active desktop "
+                    "You are Bulma reviewing a private screenshot of the operator's active desktop "
                     "for an explicitly enabled body-double collaboration skill. Decide whether a "
                     "short spoken interruption is useful. Do not read code, logs, stack traces, or "
                     "long technical text aloud. For those, summarize briefly and refer to a file. "

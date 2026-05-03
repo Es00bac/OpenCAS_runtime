@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 from typing import List, Optional
-
 
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+|\n+")
 _TEMPORAL_TAIL_RE = re.compile(
@@ -29,6 +28,12 @@ _LEADING_CONTEXT_RE = re.compile(
 _TRAILING_RATIONALE_RE = re.compile(r"\s*,?\s+so\s+.+$", re.IGNORECASE)
 _VERB_PREFIX_RE = re.compile(
     r"^(?:fix|finish|write|review|ship|debug|continue|return\s+to|follow\s+up\s+on|resume|work\s+on|build|implement|draft|refactor|investigate|test)\b",
+    re.IGNORECASE,
+)
+_PROMISE_PREFIX_RE = re.compile(r"^\s*i\s+promise\b[.:\-\u2014,;]?\s*(?P<object>.*)$", re.IGNORECASE)
+_SOURCE_GROUNDING_PROMISE_RE = re.compile(
+    r"\b(?:make things up|making things up|invent|sourceless|source|research|"
+    r"don'?t know|do not know|straight with you|authentic|performative)\b",
     re.IGNORECASE,
 )
 _PRONOUN_OBJECTS = {"this", "it", "that", "this one", "that one", "it again", "this again"}
@@ -104,10 +109,55 @@ def extract_self_commitments(text: str) -> List[SelfCommitmentCandidate]:
     sentences = [segment.strip() for segment in _SENTENCE_SPLIT_RE.split(text) if segment.strip()]
     commitments: List[SelfCommitmentCandidate] = []
     for index, sentence in enumerate(sentences):
-        candidate = _extract_from_sentence(sentence, previous_sentence=sentences[index - 1] if index > 0 else None)
+        following = " ".join(sentences[index + 1 : index + 4]) if index + 1 < len(sentences) else None
+        candidate = _extract_explicit_promise(
+            sentence,
+            next_sentence=following,
+        )
+        if candidate is None:
+            candidate = _extract_from_sentence(sentence, previous_sentence=sentences[index - 1] if index > 0 else None)
         if candidate is not None:
             commitments.append(candidate)
     return commitments
+
+
+def _extract_explicit_promise(
+    sentence: str,
+    next_sentence: Optional[str],
+) -> Optional[SelfCommitmentCandidate]:
+    match = _PROMISE_PREFIX_RE.match(sentence)
+    if match is None:
+        return None
+    promise_text = match.group("object").strip(" .,!?:;")
+    source_sentence = sentence.strip()
+    if not promise_text and next_sentence:
+        promise_text = next_sentence.strip(" .,!?:;")
+        source_sentence = f"{source_sentence} {next_sentence.strip()}"
+    if not promise_text:
+        return None
+
+    content = _normalize_explicit_promise(promise_text)
+    if not content:
+        return None
+    return SelfCommitmentCandidate(
+        content=content,
+        trigger="promise",
+        source_sentence=source_sentence,
+        confidence=0.84,
+        normalization_source="explicit_promise",
+    )
+
+
+def _normalize_explicit_promise(value: str) -> Optional[str]:
+    cleaned = _clean_commitment_content(value)
+    if len(cleaned.split()) < 3:
+        return None
+    lowered = cleaned.lower()
+    if _SOURCE_GROUNDING_PROMISE_RE.search(lowered):
+        return _clean_commitment_content(
+            f"Honor source-grounding promise: {_lowercase_first(cleaned)}"
+        )
+    return _clean_commitment_content(f"Honor explicit promise: {_lowercase_first(cleaned)}")
 
 
 def _extract_from_sentence(
@@ -200,7 +250,7 @@ def _lowercase_bullet_label(value: str) -> str:
     if not re.match(r"^[A-Z][a-z]+(?:\s|$)", value):
         return value
     first_word = value.split(maxsplit=1)[0]
-    if first_word in {"OpenCAS", "Edge", "Owner"}:
+    if first_word in {"Bulma", "Edge", "Jarrod", "OpenCAS"}:
         return value
     return value[0].lower() + value[1:]
 
@@ -209,6 +259,12 @@ def _capitalize_first(value: str) -> str:
     if not value:
         return value
     return value[0].upper() + value[1:]
+
+
+def _lowercase_first(value: str) -> str:
+    if not value:
+        return value
+    return value[0].lower() + value[1:]
 
 
 def _has_deferral_cue(sentence: str) -> bool:

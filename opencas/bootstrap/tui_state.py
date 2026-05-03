@@ -44,6 +44,16 @@ class WizardState:
         self.hnsw_ef_construction: str = "200"
         self.mcp_auto_register: bool = False
         self.mcp_servers_json: str = ""
+        self.approval_mode: str = "auto_review"
+        self.desktop_context_enabled: bool = False
+        self.desktop_capture_interval_seconds: str = "300"
+        self.desktop_min_speech_interval_seconds: str = "60"
+        self.desktop_tts_enabled: bool = True
+        self.desktop_play_audio: bool = True
+        self.desktop_vision_enabled: bool = True
+        self.desktop_ocr_enabled: bool = True
+        self.desktop_capture_backend: str = "auto"
+        self.desktop_max_spoken_chars: str = "360"
         self.telegram_enabled: bool = False
         self.telegram_bot_token: str = ""
         self.telegram_dm_policy: str = "pairing"

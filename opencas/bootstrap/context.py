@@ -9,29 +9,29 @@ from typing import TYPE_CHECKING, Any, Optional
 from .context_close import close_bootstrap_context
 
 if TYPE_CHECKING:
-    from open_llm_auth.auth.manager import ProviderManager
 
-    from opencas.api import LLMClient
     from opencas.affective import AffectiveExaminationService
+    from opencas.api import LLMClient
     from opencas.autonomy.commitment_store import CommitmentStore
     from opencas.autonomy.executive import ExecutiveState
     from opencas.autonomy.portfolio import PortfolioStore
     from opencas.autonomy.project_orchestrator import ProjectOrchestrator
     from opencas.autonomy.work_store import WorkStore
+    from opencas.cognition import SelfInspectionStore
     from opencas.consolidation import ConsolidationCurationStore
+    from opencas.context import SessionContextStore
+    from opencas.daydream import ConflictStore, DaydreamStore
     from opencas.diagnostics import Doctor, HealthMonitor
     from opencas.embeddings import EmbeddingService
     from opencas.execution import TaskStore
     from opencas.execution.receipt_store import ExecutionReceiptStore
-    from opencas.governance import ApprovalLedger
-    from opencas.governance import ShadowRegistry
-    from opencas.governance import PluginTrustService, WebTrustService
+    from opencas.governance import ApprovalLedger, PluginTrustService, ShadowRegistry, WebTrustService
     from opencas.harness import AgenticHarness
     from opencas.identity import IdentityManager, SelfKnowledgeRegistry
     from opencas.infra import EventBus, HookBus, TypedHookRegistry
     from opencas.memory import MemoryStore
-    from opencas.platform import CapabilityRegistry
     from opencas.planning import PlanStore
+    from opencas.platform import CapabilityRegistry
     from opencas.plugins import PluginLifecycleManager, PluginStore, SkillRegistry
     from opencas.relational import RelationalEngine
     from opencas.runtime.readiness import AgentReadiness
@@ -40,11 +40,10 @@ if TYPE_CHECKING:
     from opencas.somatic import SomaticManager, SomaticStore
     from opencas.telemetry import TokenTelemetry, Tracer
     from opencas.tom import TomStore
+    from opencas.wellbeing import WellbeingStore
     from opencas.workspace.service import WorkspaceIndexService
 
     from .config import BootstrapConfig
-    from opencas.context import SessionContextStore
-    from opencas.daydream import ConflictStore, DaydreamStore
 
 
 @dataclass
@@ -95,6 +94,8 @@ class BootstrapContext:
     schedule_store: ScheduleStore
     schedule_service: ScheduleService
     affective_examinations: Optional[AffectiveExaminationService] = None
+    self_inspection_store: Optional[SelfInspectionStore] = None
+    wellbeing_store: Optional[WellbeingStore] = None
     mcp_registry: Optional[Any] = None
     background_tasks: tuple[asyncio.Task[Any], ...] = ()
 

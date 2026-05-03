@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .models import Episode
-from .store_serialization import affect_db_params, episode_db_params, row_to_episode as deserialize_episode
+from .store_serialization import affect_db_params, episode_db_params
+from .store_serialization import row_to_episode as deserialize_episode
 
 if TYPE_CHECKING:
     from .store import MemoryStore
@@ -273,6 +274,63 @@ async def list_non_compacted_episodes(
     episodes = await store.list_episodes(session_id=session_id, compacted=False, limit=limit)
     episodes.reverse()
     return episodes
+
+
+async def count_non_compacted_episodes(
+    store: "MemoryStore",
+    session_id: Optional[str] = None,
+) -> int:
+    """Return the exact number of episodes that have not been compacted."""
+    assert store._db is not None
+    if session_id:
+        cursor = await store._db.execute(
+            "SELECT COUNT(*) FROM episodes WHERE compacted = 0 AND session_id = ?",
+            (session_id,),
+        )
+    else:
+        cursor = await store._db.execute(
+            "SELECT COUNT(*) FROM episodes WHERE compacted = 0",
+        )
+    row = await cursor.fetchone()
+    return int(row[0] if row is not None else 0)
+
+
+async def compaction_backlog_stats(
+    store: "MemoryStore",
+    *,
+    tail_size: int = 10,
+) -> Dict[str, Any]:
+    """Return exact compaction backlog stats, excluding per-session retained tails."""
+    assert store._db is not None
+    retained_tail = max(0, int(tail_size))
+    cursor = await store._db.execute(
+        """
+        SELECT COALESCE(session_id, 'unknown') AS session_id, COUNT(*) AS count
+        FROM episodes
+        WHERE compacted = 0
+        GROUP BY COALESCE(session_id, 'unknown')
+        ORDER BY count DESC, session_id ASC
+        """
+    )
+    rows = await cursor.fetchall()
+    session_counts = [
+        {
+            "session_id": str(row["session_id"]),
+            "count": int(row["count"]),
+            "compactable": max(0, int(row["count"]) - retained_tail),
+        }
+        for row in rows
+    ]
+    compactable_sessions = [entry for entry in session_counts if entry["compactable"] > 0]
+    return {
+        "tail_size": retained_tail,
+        "session_count": len(session_counts),
+        "total_non_compacted": sum(entry["count"] for entry in session_counts),
+        "compactable_lag": sum(entry["compactable"] for entry in compactable_sessions),
+        "compactable_session_count": len(compactable_sessions),
+        "max_session_lag": max((entry["count"] for entry in session_counts), default=0),
+        "top_sessions": session_counts[:10],
+    }
 
 
 async def list_identity_core_episodes(
