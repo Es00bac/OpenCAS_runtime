@@ -87,7 +87,7 @@ def register_skills(skill_registry, tools) -> None:
                 "media_commentary_request": {"type": "string"},
                 "livestream_resume_catchup_enabled": {
                     "type": "boolean",
-                    "description": "After Body Double pauses a browser livestream to speak, resume it with a temporary catch-up playback rate.",
+                    "description": "After Body Double pauses a confirmed livestream to speak, resume it with a temporary catch-up playback rate.",
                 },
                 "livestream_resume_catchup_rate": {"type": "number"},
                 "livestream_resume_catchup_max_seconds": {"type": "number"},

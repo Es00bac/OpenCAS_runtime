@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 
 CommandRunner = Callable[..., subprocess.CompletedProcess[Any]]
+YouTubeFocusVerifier = Callable[[dict[str, Any] | None], bool | dict[str, Any]]
 
 
 class MprisMediaController:
@@ -25,12 +26,14 @@ class MprisMediaController:
         busctl_path: str | None = None,
         ydotool_path: str | None = None,
         ydotoold_path: str | None = None,
+        youtube_focus_verifier: YouTubeFocusVerifier | None = None,
         timeout_seconds: float = 2.0,
     ) -> None:
         self._runner = runner or subprocess.run
         self._busctl_path = busctl_path
         self._ydotool_path = ydotool_path
         self._ydotoold_path = ydotoold_path
+        self._youtube_focus_verifier = youtube_focus_verifier
         self._timeout_seconds = max(0.1, float(timeout_seconds))
 
     def pause_playing(self) -> dict[str, Any]:
@@ -79,16 +82,30 @@ class MprisMediaController:
                 errors.append({"player": player, "action": "SetRate", "error": result.get("error", "")})
         return {"rate_set_players": rate_set_players, "rate": target_rate, "errors": errors}
 
-    def set_youtube_browser_rate(self, rate: float) -> dict[str, Any]:
+    def set_youtube_browser_rate(
+        self,
+        rate: float,
+        *,
+        media_item: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         """Use YouTube browser shortcuts to set playback speed when MPRIS Rate is read-only.
 
         YouTube exposes speed control through Shift+, and Shift+. even when the
         browser's MPRIS adapter refuses to set the Player.Rate property. This is
-        intended for the foreground YouTube player that was just paused/resumed
-        for spoken commentary.
+        only safe after an explicit foreground verifier confirms the focused
+        window is the intended YouTube player.
         """
 
         target_rate = _normalize_rate(rate)
+        focus = self._verify_youtube_focus(media_item)
+        if not focus.get("ok"):
+            return {
+                "ok": False,
+                "rate": target_rate,
+                "method": "ydotool_youtube_shortcuts",
+                "error": str(focus.get("error") or "foreground_window_unverified"),
+                "foreground": focus,
+            }
         ydotool = self._ydotool()
         if not ydotool:
             return {"ok": False, "rate": target_rate, "method": "ydotool_youtube_shortcuts", "error": "ydotool_unavailable"}
@@ -169,6 +186,7 @@ class MprisMediaController:
                 "rate": target_rate,
                 "method": "ydotool_youtube_shortcuts",
                 "shortcut_events": len(events),
+                "foreground": focus,
             }
         error = str(completed.stderr or completed.stdout or "").strip()
         return {
@@ -176,7 +194,24 @@ class MprisMediaController:
             "rate": target_rate,
             "method": "ydotool_youtube_shortcuts",
             "error": error or f"ydotool_exit_{completed.returncode}",
+            "foreground": focus,
         }
+
+    def _verify_youtube_focus(self, media_item: dict[str, Any] | None) -> dict[str, Any]:
+        verifier = self._youtube_focus_verifier
+        if not callable(verifier):
+            return {"ok": False, "error": "foreground_window_unverified"}
+        try:
+            result = verifier(media_item)
+        except Exception as exc:
+            return {"ok": False, "error": f"foreground_verifier_failed:{type(exc).__name__}"}
+        if isinstance(result, dict):
+            ok = bool(result.get("ok"))
+            error = str(result.get("error") or ("foreground_window_not_youtube" if not ok else "")).strip()
+            return {"ok": ok, **({"error": error} if error else {}), "details": result}
+        if bool(result):
+            return {"ok": True}
+        return {"ok": False, "error": "foreground_window_not_youtube"}
 
     @staticmethod
     def youtube_rate_key_events(rate: float) -> list[str]:

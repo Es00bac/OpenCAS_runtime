@@ -187,7 +187,7 @@ Live transcription is disabled by default and is enabled through `desktop_contex
 
 When both sources are present, prompts treat the retrieved transcript as the timestamped map/history and the local Whisper excerpt as the current heard segment. For livestreams or videos without usable prefetched captions, the live Whisper excerpt is the current transcript source. Live transcription is skipped when the target media is paused or when multiple playing media identities make the target ambiguous.
 
-For a single clear probable livestream, Body Double can pause playback while speaking and then resume with a bounded catch-up speed request. It uses MPRIS `Rate` when supported and falls back to YouTube browser playback-speed shortcuts when Firefox exposes the stream through MPRIS but rejects rate writes.
+For a single confirmed livestream, Body Double can pause playback while speaking and then resume with a bounded catch-up speed request. It uses MPRIS `Rate` when supported. Browser shortcut fallback is guarded by foreground-window verification; if OpenCAS cannot prove the focused window is the intended YouTube player, it skips the shortcut instead of typing into another application. Ordinary YouTube videos with missing duration metadata are not treated as livestreams.
 
 ### Phone
 

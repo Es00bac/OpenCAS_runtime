@@ -2401,6 +2401,7 @@ async def test_body_double_sets_livestream_catchup_rate_after_speaking(tmp_path:
                     "url": "https://www.youtube.com/watch?v=zYNrRi2r5CM",
                     "length_us": None,
                     "position_us": 0,
+                    "is_live": True,
                 }
             ]
 
@@ -2467,6 +2468,7 @@ async def test_body_double_uses_youtube_browser_fallback_when_mpris_rate_fails(t
                     "url": "https://www.youtube.com/watch?v=zYNrRi2r5CM",
                     "length_us": None,
                     "position_us": 0,
+                    "is_live": True,
                 }
             ]
 
@@ -2523,6 +2525,77 @@ async def test_body_double_uses_youtube_browser_fallback_when_mpris_rate_fails(t
 
 
 @pytest.mark.asyncio
+async def test_body_double_skips_catchup_for_youtube_without_livestream_evidence(
+    tmp_path: Path,
+) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": True,
+            "activity_summary": "The operator is watching a normal YouTube video.",
+            "reason": "A body-double comment is useful.",
+            "spoken_text": "That was a useful point.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.9,
+        },
+    )
+    events: list[tuple[str, object]] = []
+
+    class FakeMediaController:
+        def current_media(self):
+            return [
+                {
+                    "player": "org.mpris.MediaPlayer2.firefox",
+                    "status": "Playing",
+                    "title": "Qwen 3.6 vs Gemma 4: Which Local Model Should Be My Daily Driver?",
+                    "artist": "Zero to MVP",
+                    "url": "https://www.youtube.com/watch?v=Um8Px55mINc",
+                    "length_us": None,
+                    "position_us": 0,
+                }
+            ]
+
+        def pause_playing(self):
+            events.append(("pause", None))
+            return {"paused_players": ["org.mpris.MediaPlayer2.firefox"], "errors": []}
+
+        def resume_players(self, players):
+            events.append(("resume", list(players)))
+            return {"resumed_players": list(players), "errors": []}
+
+        def set_players_rate(self, players, rate):
+            events.append(("rate", (list(players), rate)))
+            return {"rate_set_players": list(players), "rate": rate, "errors": []}
+
+        def set_youtube_browser_rate(self, rate):
+            events.append(("youtube_rate", rate))
+            return {"ok": True, "method": "ydotool_youtube_shortcuts", "rate": rate}
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "ordinary YouTube video is visible",
+        speech_synthesizer=lambda text: {"path": str(tmp_path / "voice.mp3"), "provider": "fake"},
+        audio_player=lambda path: events.append(("play", Path(path))) or {"played": True},
+        media_controller=FakeMediaController(),
+    )
+    service.configure(
+        enabled=True,
+        tts_enabled=True,
+        play_audio=True,
+        media_commentary_mode_enabled=True,
+    )
+
+    result = await service.observe_once(force=True, reason="scheduled_body_double")
+
+    assert [event[0] for event in events] == ["pause", "play", "resume"]
+    catchup = result["speech"]["playback"]["media"]["livestream_catchup"]
+    assert catchup["status"] == "skipped"
+    assert catchup["reason"] == "no_livestream_players"
+
+
+@pytest.mark.asyncio
 async def test_body_double_skips_youtube_fallback_when_livestream_players_are_ambiguous(
     tmp_path: Path,
 ) -> None:
@@ -2548,6 +2621,7 @@ async def test_body_double_skips_youtube_fallback_when_livestream_players_are_am
                     "title": "AI news live",
                     "url": "https://www.youtube.com/watch?v=zYNrRi2r5CM",
                     "length_us": None,
+                    "is_live": True,
                 },
                 {
                     "player": "org.mpris.MediaPlayer2.chromium",
@@ -2555,6 +2629,7 @@ async def test_body_double_skips_youtube_fallback_when_livestream_players_are_am
                     "title": "Second live stream",
                     "url": "https://www.youtube.com/watch?v=abc12345678",
                     "length_us": None,
+                    "is_live": True,
                 },
             ]
 
@@ -2795,6 +2870,65 @@ def test_mpris_media_controller_builds_youtube_rate_shortcut_sequence() -> None:
     assert events.count("51:1") == 8
     assert events.count("52:1") == 5
     assert events[-len(increase) :] == increase
+
+
+def test_mpris_media_controller_does_not_send_youtube_shortcuts_without_foreground_verification() -> None:
+    commands: list[list[str]] = []
+
+    def fake_runner(args, **kwargs):
+        commands.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    controller = MprisMediaController(
+        runner=fake_runner,
+        ydotool_path="/usr/bin/ydotool",
+        ydotoold_path="/usr/bin/ydotoold",
+    )
+
+    result = controller.set_youtube_browser_rate(
+        1.5,
+        media_item={
+            "title": "AI NEWS live",
+            "url": "https://www.youtube.com/watch?v=zYNrRi2r5CM",
+        },
+    )
+
+    assert result["ok"] is False
+    assert result["error"] == "foreground_window_unverified"
+    assert commands == []
+
+
+def test_mpris_media_controller_sends_youtube_shortcuts_after_foreground_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    commands: list[list[str]] = []
+    socket_path = tmp_path / "ydotool.sock"
+    socket_path.write_text("", encoding="utf-8")
+    monkeypatch.setenv("YDOTOOL_SOCKET", str(socket_path))
+
+    def fake_runner(args, **kwargs):
+        commands.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    controller = MprisMediaController(
+        runner=fake_runner,
+        ydotool_path="/usr/bin/ydotool",
+        ydotoold_path="/usr/bin/ydotoold",
+        youtube_focus_verifier=lambda media_item: True,
+    )
+
+    result = controller.set_youtube_browser_rate(
+        1.5,
+        media_item={
+            "title": "AI NEWS live",
+            "url": "https://www.youtube.com/watch?v=zYNrRi2r5CM",
+        },
+    )
+
+    assert result["ok"] is True
+    assert commands
+    assert commands[0][:3] == ["/usr/bin/ydotool", "key", "-d"]
 
 
 def test_mpris_media_controller_reports_current_youtube_metadata() -> None:

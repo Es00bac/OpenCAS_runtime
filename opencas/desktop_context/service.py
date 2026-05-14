@@ -629,6 +629,8 @@ class DesktopContextService:
                     "position_us": position_us,
                     "position_label": self._format_media_position(position_us, length_us),
                     "progress_percent": self._media_progress_percent(position_us, length_us),
+                    "is_live": item.get("is_live"),
+                    "live_status": str(item.get("live_status") or ""),
                 }
             )
         return cleaned
@@ -4314,7 +4316,11 @@ class DesktopContextService:
                 fallback = getattr(self._media_controller, "set_youtube_browser_rate", None)
                 if callable(fallback):
                     try:
-                        raw_fallback = await self._call_maybe_async(fallback, rate)
+                        raw_fallback = await self._call_youtube_browser_rate(
+                            fallback,
+                            rate,
+                            media_item=livestream_items[0],
+                        )
                         if isinstance(raw_fallback, dict):
                             youtube_result = raw_fallback
                             if raw_fallback.get("ok"):
@@ -4376,13 +4382,39 @@ class DesktopContextService:
         length_us = self._coerce_int(item.get("length_us"))
         if length_us is not None and length_us > 0:
             return False
+        if bool(item.get("is_live")):
+            return True
+        live_status = str(item.get("live_status") or "").strip().lower()
+        if live_status in {"is_live", "live", "live_stream", "livestream", "currently_live"}:
+            return True
         url = str(item.get("url") or "").strip().lower()
         title = str(item.get("title") or "").strip().lower()
         album = str(item.get("album") or "").strip().lower()
-        if self._youtube_video_id(url):
-            return True
         haystack = f" {title} {album} {url} "
-        return any(term in haystack for term in (" live ", " livestream ", " live-stream "))
+        return any(term in haystack for term in (" livestream ", " live-stream ", " live stream ", " live now "))
+
+    async def _call_youtube_browser_rate(
+        self,
+        fallback: Callable[..., Any],
+        rate: float,
+        *,
+        media_item: dict[str, Any],
+    ) -> Any:
+        if self._callable_accepts_keyword(fallback, "media_item"):
+            return await self._call_maybe_async(fallback, rate, media_item=media_item)
+        return await self._call_maybe_async(fallback, rate)
+
+    def _callable_accepts_keyword(self, fn: Callable[..., Any], keyword: str) -> bool:
+        try:
+            signature = inspect.signature(fn)
+        except (TypeError, ValueError):
+            return False
+        for parameter in signature.parameters.values():
+            if parameter.kind == inspect.Parameter.VAR_KEYWORD:
+                return True
+            if parameter.name == keyword:
+                return True
+        return False
 
     def _media_item_is_youtube(self, item: dict[str, Any]) -> bool:
         url = str(item.get("url") or "").strip()
@@ -4445,7 +4477,11 @@ class DesktopContextService:
                 else:
                     fallback = getattr(self._media_controller, "set_youtube_browser_rate", None)
                     if callable(fallback):
-                        raw = await self._call_maybe_async(fallback, 1.0)
+                        raw = await self._call_youtube_browser_rate(
+                            fallback,
+                            1.0,
+                            media_item=media_snapshot[0] if media_snapshot else {},
+                        )
                         result = raw if isinstance(raw, dict) else {"ok": bool(raw)}
                     else:
                         result = {"ok": False, "error": "youtube_browser_fallback_unavailable"}

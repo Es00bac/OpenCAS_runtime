@@ -93,7 +93,7 @@ Relevant configuration keys:
 | `live_transcription_min_interval_seconds` | Minimum interval before another live audio transcription for the same media target. Default: `12`. |
 | `live_transcription_audio_input` | Optional Pulse/PipeWire monitor source for `ffmpeg`; when empty OpenCAS tries the default sink monitor. |
 | `live_transcription_whisper_model` | Whisper CLI model name. Default: `base`. |
-| `livestream_resume_catchup_enabled` | After Body Double pauses a probable livestream to speak, resume with a catch-up playback-speed request. Default: `true`. |
+| `livestream_resume_catchup_enabled` | After Body Double pauses a confirmed livestream to speak, resume with a catch-up playback-speed request. Default: `true`. |
 | `livestream_resume_catchup_rate` | Catch-up playback rate. Default: `1.5`. |
 | `livestream_resume_catchup_max_seconds` | Maximum time before restoring normal speed after catch-up starts. Default: `90`. |
 
@@ -101,7 +101,7 @@ For media commentary, the service only uses live transcription for a currently p
 
 When both prefetched and live transcripts exist, the prefetched transcript is used as the timestamped map and the live Whisper excerpt is used as the current heard segment. This is the path used for livestream following and for checking that commentary is aligned to the current moment rather than an older or future part of a transcript.
 
-When Body Double speaks over a single clear probable livestream, it pauses the current media first and resumes only the player it paused. If the stream has no finite duration in MPRIS metadata, OpenCAS asks playback to catch up at `1.5x`; browser YouTube playback uses YouTube speed shortcuts when the browser refuses MPRIS `Rate` writes. If the media changes before the delayed normal-speed restore, OpenCAS skips the shortcut restore instead of acting on a stale video.
+When Body Double speaks over a single confirmed livestream, it pauses the current media first and resumes only the player it paused. If the stream is marked live by media metadata or an explicit livestream title/status signal, OpenCAS asks playback to catch up at `1.5x`; ordinary YouTube videos are not sped up just because MPRIS omits duration metadata. Browser YouTube speed shortcuts are only allowed after a foreground verifier confirms the focused window is the intended YouTube player. If that proof is unavailable, OpenCAS skips the shortcut instead of typing into the foreground application. If the media changes before the delayed normal-speed restore, OpenCAS skips the shortcut restore instead of acting on a stale video.
 
 ## Memory And Recall
 
