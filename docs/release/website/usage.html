@@ -119,11 +119,17 @@
                 <tr><td><code>live_transcription_capture_seconds</code></td><td>Audio window length for each live transcription pass.</td></tr>
                 <tr><td><code>live_transcription_audio_input</code></td><td>Optional Pulse/PipeWire monitor source passed to <code>ffmpeg</code>.</td></tr>
                 <tr><td><code>live_transcription_whisper_model</code></td><td>Whisper CLI model name; default is <code>base</code>.</td></tr>
+                <tr><td><code>livestream_resume_catchup_enabled</code></td><td>After Body Double pauses one clear probable livestream to speak, resume with a catch-up playback-speed request.</td></tr>
+                <tr><td><code>livestream_resume_catchup_rate</code></td><td>Catch-up playback rate; default is <code>1.5</code>.</td></tr>
+                <tr><td><code>livestream_resume_catchup_max_seconds</code></td><td>Maximum time before restoring normal speed after catch-up starts.</td></tr>
               </tbody>
             </table>
           </div>
           <p>
             The media path skips live transcription for paused media and for ambiguous cases with multiple playing media targets. When both transcript sources exist, the prefetched transcript is the timestamped map and the live Whisper excerpt is the current heard segment.
+          </p>
+          <p>
+            When Body Double speaks over one clear probable livestream, it pauses the current media first and resumes only the player it paused. If the stream has no finite duration in MPRIS metadata, OpenCAS requests <code>1.5x</code> catch-up playback; browser YouTube uses YouTube speed shortcuts when the browser refuses MPRIS <code>Rate</code> writes. If the media changes before the delayed normal-speed restore, the restore is skipped.
           </p>
         </section>
 

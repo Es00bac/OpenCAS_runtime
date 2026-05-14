@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
 import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -829,6 +831,46 @@ async def test_youtube_playback_observation_retrieves_transcript_context(tmp_pat
     assert "Playback position is unavailable" in prompt_text
     assert "Sith training begins" not in prompt_text
     assert "YouTube transcript excerpt:" in content
+
+
+@pytest.mark.asyncio
+async def test_youtube_transcript_subprocess_does_not_block_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False})
+
+    def fake_run(args, **kwargs):
+        time.sleep(0.15)
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr("opencas.desktop_context.service.subprocess.run", fake_run)
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=_capture_provider,
+        config=DesktopContextConfig(yt_dlp_path="/fake/yt-dlp"),
+    )
+
+    task = asyncio.create_task(
+        service._retrieve_youtube_transcript(
+            "https://www.youtube.com/watch?v=abcdefghijk",
+            media_context=[
+                {
+                    "player": "org.mpris.MediaPlayer2.firefox",
+                    "status": "Playing",
+                    "title": "Async transcript fetch",
+                    "url": "https://www.youtube.com/watch?v=abcdefghijk",
+                }
+            ],
+        )
+    )
+    await asyncio.sleep(0.02)
+
+    assert not task.done()
+    result = await task
+    assert result["status"] == "unavailable"
+    assert result["reason"] == "no_transcript_downloaded"
 
 
 @pytest.mark.asyncio
@@ -2333,6 +2375,352 @@ async def test_body_double_pauses_playing_media_while_speaking(tmp_path: Path) -
     ]
 
 
+@pytest.mark.asyncio
+async def test_body_double_sets_livestream_catchup_rate_after_speaking(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": True,
+            "activity_summary": "The operator is watching a live stream.",
+            "reason": "A body-double comment is useful.",
+            "spoken_text": "That lawsuit angle is the current live-stream thread.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.9,
+        },
+    )
+    events: list[tuple[str, object]] = []
+
+    class FakeMediaController:
+        def current_media(self):
+            return [
+                {
+                    "player": "org.mpris.MediaPlayer2.firefox",
+                    "status": "Playing",
+                    "title": "AI NEWS | OpenAI Lawsuit, Google Hacks, Grok Build Beta",
+                    "artist": "Wes Roth",
+                    "url": "https://www.youtube.com/watch?v=zYNrRi2r5CM",
+                    "length_us": None,
+                    "position_us": 0,
+                }
+            ]
+
+        def pause_playing(self):
+            events.append(("pause", None))
+            return {"paused_players": ["org.mpris.MediaPlayer2.firefox"], "errors": []}
+
+        def resume_players(self, players):
+            events.append(("resume", list(players)))
+            return {"resumed_players": list(players), "errors": []}
+
+        def set_players_rate(self, players, rate):
+            events.append(("rate", (list(players), rate)))
+            return {"rate_set_players": list(players), "rate": rate, "errors": []}
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "Wes Roth live stream is visible",
+        speech_synthesizer=lambda text: {"path": str(tmp_path / "voice.mp3"), "provider": "fake"},
+        audio_player=lambda path: events.append(("play", Path(path))) or {"played": True},
+        media_controller=FakeMediaController(),
+    )
+    service.configure(
+        enabled=True,
+        tts_enabled=True,
+        play_audio=True,
+        media_commentary_mode_enabled=True,
+        livestream_resume_catchup_max_seconds=0,
+    )
+
+    result = await service.observe_once(force=True, reason="scheduled_body_double")
+
+    assert [event[0] for event in events] == ["pause", "play", "resume", "rate"]
+    assert events[-1] == ("rate", (["org.mpris.MediaPlayer2.firefox"], 1.5))
+    assert result["speech"]["playback"]["media"]["livestream_catchup"]["status"] == "applied"
+    assert result["speech"]["playback"]["media"]["livestream_catchup"]["rate"] == 1.5
+
+
+@pytest.mark.asyncio
+async def test_body_double_uses_youtube_browser_fallback_when_mpris_rate_fails(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": True,
+            "activity_summary": "The operator is watching a YouTube live stream in Firefox.",
+            "reason": "A body-double comment is useful.",
+            "spoken_text": "The current live segment is worth a quick comment.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.9,
+        },
+    )
+    events: list[tuple[str, object]] = []
+
+    class FakeMediaController:
+        def current_media(self):
+            return [
+                {
+                    "player": "org.mpris.MediaPlayer2.firefox",
+                    "status": "Playing",
+                    "title": "AI NEWS | OpenAI Lawsuit, Google Hacks, Grok Build Beta",
+                    "artist": "Wes Roth",
+                    "url": "https://www.youtube.com/watch?v=zYNrRi2r5CM",
+                    "length_us": None,
+                    "position_us": 0,
+                }
+            ]
+
+        def pause_playing(self):
+            events.append(("pause", None))
+            return {"paused_players": ["org.mpris.MediaPlayer2.firefox"], "errors": []}
+
+        def resume_players(self, players):
+            events.append(("resume", list(players)))
+            return {"resumed_players": list(players), "errors": []}
+
+        def set_players_rate(self, players, rate):
+            events.append(("rate", (list(players), rate)))
+            return {
+                "rate_set_players": [],
+                "rate": rate,
+                "errors": [
+                    {
+                        "player": "org.mpris.MediaPlayer2.firefox",
+                        "action": "SetRate",
+                        "error": "Rate setting is not supported",
+                    }
+                ],
+            }
+
+        def set_youtube_browser_rate(self, rate):
+            events.append(("youtube_rate", rate))
+            return {"ok": True, "method": "ydotool_youtube_shortcuts", "rate": rate}
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "Firefox YouTube live stream is visible",
+        speech_synthesizer=lambda text: {"path": str(tmp_path / "voice.mp3"), "provider": "fake"},
+        audio_player=lambda path: events.append(("play", Path(path))) or {"played": True},
+        media_controller=FakeMediaController(),
+    )
+    service.configure(
+        enabled=True,
+        tts_enabled=True,
+        play_audio=True,
+        media_commentary_mode_enabled=True,
+        livestream_resume_catchup_max_seconds=0,
+    )
+
+    result = await service.observe_once(force=True, reason="scheduled_body_double")
+
+    assert [event[0] for event in events] == ["pause", "play", "resume", "rate", "youtube_rate"]
+    catchup = result["speech"]["playback"]["media"]["livestream_catchup"]
+    assert catchup["status"] == "applied"
+    assert catchup["method"] == "youtube_browser_fallback"
+    assert catchup["youtube_browser"]["method"] == "ydotool_youtube_shortcuts"
+
+
+@pytest.mark.asyncio
+async def test_body_double_skips_youtube_fallback_when_livestream_players_are_ambiguous(
+    tmp_path: Path,
+) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": True,
+            "activity_summary": "The operator has multiple live streams active.",
+            "reason": "A body-double comment is useful.",
+            "spoken_text": "There are multiple active streams, so I cannot safely pick one.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.9,
+        },
+    )
+    events: list[tuple[str, object]] = []
+
+    class FakeMediaController:
+        def current_media(self):
+            return [
+                {
+                    "player": "org.mpris.MediaPlayer2.firefox",
+                    "status": "Playing",
+                    "title": "AI news live",
+                    "url": "https://www.youtube.com/watch?v=zYNrRi2r5CM",
+                    "length_us": None,
+                },
+                {
+                    "player": "org.mpris.MediaPlayer2.chromium",
+                    "status": "Playing",
+                    "title": "Second live stream",
+                    "url": "https://www.youtube.com/watch?v=abc12345678",
+                    "length_us": None,
+                },
+            ]
+
+        def pause_playing(self):
+            events.append(("pause", None))
+            return {
+                "paused_players": [
+                    "org.mpris.MediaPlayer2.firefox",
+                    "org.mpris.MediaPlayer2.chromium",
+                ],
+                "errors": [],
+            }
+
+        def resume_players(self, players):
+            events.append(("resume", list(players)))
+            return {"resumed_players": list(players), "errors": []}
+
+        def set_players_rate(self, players, rate):
+            events.append(("rate", (list(players), rate)))
+            return {"rate_set_players": [], "rate": rate, "errors": []}
+
+        def set_youtube_browser_rate(self, rate):
+            events.append(("youtube_rate", rate))
+            return {"ok": True, "method": "ydotool_youtube_shortcuts", "rate": rate}
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "two YouTube live streams are visible",
+        speech_synthesizer=lambda text: {"path": str(tmp_path / "voice.mp3"), "provider": "fake"},
+        audio_player=lambda path: events.append(("play", Path(path))) or {"played": True},
+        media_controller=FakeMediaController(),
+    )
+    service.configure(
+        enabled=True,
+        tts_enabled=True,
+        play_audio=True,
+        media_commentary_mode_enabled=True,
+    )
+
+    result = await service.observe_once(force=True, reason="scheduled_body_double")
+
+    assert "youtube_rate" not in [event[0] for event in events]
+    catchup = result["speech"]["playback"]["media"]["livestream_catchup"]
+    assert catchup["status"] == "failed"
+    assert catchup["reason"] == "ambiguous_multiple_livestream_players"
+    assert catchup["youtube_browser"]["error"] == "ambiguous_multiple_livestream_players"
+
+
+@pytest.mark.asyncio
+async def test_body_double_does_not_set_catchup_rate_for_regular_video(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": True,
+            "activity_summary": "The operator is watching a normal video.",
+            "reason": "A body-double comment is useful.",
+            "spoken_text": "That was a concise moment.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.9,
+        },
+    )
+    events: list[tuple[str, object]] = []
+
+    class FakeMediaController:
+        def current_media(self):
+            return [
+                {
+                    "player": "org.mpris.MediaPlayer2.firefox",
+                    "status": "Playing",
+                    "title": "Regular uploaded video",
+                    "artist": "Example Channel",
+                    "url": "https://www.youtube.com/watch?v=regular12345",
+                    "length_us": 600_000_000,
+                    "position_us": 120_000_000,
+                }
+            ]
+
+        def pause_playing(self):
+            events.append(("pause", None))
+            return {"paused_players": ["org.mpris.MediaPlayer2.firefox"], "errors": []}
+
+        def resume_players(self, players):
+            events.append(("resume", list(players)))
+            return {"resumed_players": list(players), "errors": []}
+
+        def set_players_rate(self, players, rate):
+            events.append(("rate", (list(players), rate)))
+            return {"rate_set_players": list(players), "rate": rate, "errors": []}
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "regular uploaded video is visible",
+        speech_synthesizer=lambda text: {"path": str(tmp_path / "voice.mp3"), "provider": "fake"},
+        audio_player=lambda path: events.append(("play", Path(path))) or {"played": True},
+        media_controller=FakeMediaController(),
+    )
+    service.configure(
+        enabled=True,
+        tts_enabled=True,
+        play_audio=True,
+        media_commentary_mode_enabled=True,
+    )
+
+    result = await service.observe_once(force=True, reason="scheduled_body_double")
+
+    assert [event[0] for event in events] == ["pause", "play", "resume"]
+    assert result["speech"]["playback"]["media"]["livestream_catchup"]["status"] == "skipped"
+    assert result["speech"]["playback"]["media"]["livestream_catchup"]["reason"] == "no_livestream_players"
+
+
+@pytest.mark.asyncio
+async def test_youtube_livestream_restore_skips_when_media_changed(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False})
+    events: list[tuple[str, object]] = []
+
+    class FakeMediaController:
+        def current_media(self):
+            return [
+                {
+                    "player": "org.mpris.MediaPlayer2.firefox",
+                    "status": "Playing",
+                    "title": "Different regular video",
+                    "url": "https://www.youtube.com/watch?v=different11",
+                    "length_us": 600_000_000,
+                }
+            ]
+
+        def set_youtube_browser_rate(self, rate):
+            events.append(("youtube_rate", rate))
+            return {"ok": True, "method": "ydotool_youtube_shortcuts", "rate": rate}
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=_capture_provider,
+        media_controller=FakeMediaController(),
+    )
+
+    await service._restore_livestream_rate_after_delay(
+        players=["org.mpris.MediaPlayer2.firefox"],
+        method="youtube_browser_fallback",
+        delay_seconds=0,
+        media_snapshot=[
+            {
+                "player": "org.mpris.MediaPlayer2.firefox",
+                "title": "Original live stream",
+                "url": "https://www.youtube.com/watch?v=zYNrRi2r5CM",
+                "length_us": None,
+            }
+        ],
+    )
+
+    assert events == []
+    restore_events = service._list_events(limit=1)
+    assert restore_events[-1]["type"] == "livestream_catchup_rate_restored"
+    assert restore_events[-1]["result"] == {
+        "ok": False,
+        "skipped": True,
+        "reason": "media_changed_or_missing",
+    }
+
+
 def test_mpris_media_controller_pauses_and_resumes_only_playing_players() -> None:
     commands: list[list[str]] = []
 
@@ -2364,6 +2752,49 @@ def test_mpris_media_controller_pauses_and_resumes_only_playing_players() -> Non
     assert any(command[-1] == "Pause" for command in commands)
     assert any(command[-1] == "Play" for command in commands)
     assert not any("org.mpris.MediaPlayer2.vlc" in command and command[-1] == "Play" for command in commands)
+
+
+def test_mpris_media_controller_sets_player_rate() -> None:
+    commands: list[list[str]] = []
+
+    def fake_runner(args, **kwargs):
+        commands.append(list(args))
+        if "set-property" in args:
+            return subprocess.CompletedProcess(args, 0, "", "")
+        raise AssertionError(f"unexpected command: {args}")
+
+    controller = MprisMediaController(runner=fake_runner, busctl_path="busctl")
+
+    result = controller.set_players_rate(["org.mpris.MediaPlayer2.firefox"], 1.5)
+
+    assert result["rate_set_players"] == ["org.mpris.MediaPlayer2.firefox"]
+    assert result["rate"] == 1.5
+    assert commands == [
+        [
+            "busctl",
+            "--user",
+            "set-property",
+            "org.mpris.MediaPlayer2.firefox",
+            "/org/mpris/MediaPlayer2",
+            "org.mpris.MediaPlayer2.Player",
+            "Rate",
+            "d",
+            "1.5",
+        ]
+    ]
+
+
+def test_mpris_media_controller_builds_youtube_rate_shortcut_sequence() -> None:
+    controller = MprisMediaController(busctl_path="busctl")
+
+    events = controller.youtube_rate_key_events(1.5)
+
+    decrease = ["42:1", "51:1", "51:0", "42:0"]
+    increase = ["42:1", "52:1", "52:0", "42:0"]
+    assert events[: len(decrease)] == decrease
+    assert events.count("51:1") == 8
+    assert events.count("52:1") == 5
+    assert events[-len(increase) :] == increase
 
 
 def test_mpris_media_controller_reports_current_youtube_metadata() -> None:

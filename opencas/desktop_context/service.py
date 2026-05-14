@@ -76,6 +76,9 @@ class DesktopContextConfig(BaseModel):
     media_commentary_request: Optional[str] = None
     media_commentary_request_source: Optional[str] = None
     media_commentary_request_text: Optional[str] = None
+    livestream_resume_catchup_enabled: bool = True
+    livestream_resume_catchup_rate: float = Field(default=1.5, ge=1.0, le=2.0)
+    livestream_resume_catchup_max_seconds: float = Field(default=90.0, ge=0.0, le=600.0)
     max_spoken_chars: int = Field(default=360, ge=80, le=1000)
     max_ocr_chars: int = Field(default=4000, ge=0, le=24000)
     max_image_bytes: int = Field(default=5_000_000, ge=1)
@@ -146,6 +149,7 @@ class DesktopContextService:
         self._project_relevance_cache: Optional[list[dict[str, str]]] = None
         self._last_live_transcript_at_by_media: dict[str, datetime] = {}
         self._last_live_transcript_payload_by_media: dict[str, dict[str, Any]] = {}
+        self._livestream_rate_restore_tasks: set[asyncio.Task[Any]] = set()
         self.config = config or self._load_config()
 
     def status(self) -> dict[str, Any]:
@@ -1080,7 +1084,7 @@ class DesktopContextService:
                 url,
             ]
             try:
-                completed = await self._call_maybe_async(
+                completed = await asyncio.to_thread(
                     subprocess.run,
                     command,
                     capture_output=True,
@@ -4250,6 +4254,246 @@ class DesktopContextService:
     def _media_item_is_playing(self, item: dict[str, Any]) -> bool:
         return str(item.get("status") or "").strip().lower() == "playing"
 
+    async def _maybe_apply_livestream_resume_catchup(
+        self,
+        *,
+        paused_players: list[str],
+        media_context: list[dict[str, Any]],
+        pause_duration_seconds: float,
+    ) -> dict[str, Any]:
+        if not self.config.livestream_resume_catchup_enabled:
+            return {"status": "skipped", "reason": "disabled"}
+        players = [str(player or "").strip() for player in paused_players if str(player or "").strip()]
+        if not players:
+            return {"status": "skipped", "reason": "no_paused_players"}
+        livestream_items = [
+            item
+            for item in media_context or []
+            if isinstance(item, dict)
+            and str(item.get("player") or "").strip() in players
+            and self._media_item_is_probable_livestream(item)
+        ]
+        if not livestream_items:
+            return {"status": "skipped", "reason": "no_livestream_players"}
+        livestream_players = list(
+            dict.fromkeys(
+                str(item.get("player") or "").strip()
+                for item in livestream_items
+                if str(item.get("player") or "").strip()
+            )
+        )
+        rate = float(self.config.livestream_resume_catchup_rate)
+        if rate <= 1.0:
+            return {"status": "skipped", "reason": "rate_not_above_normal", "rate": rate}
+
+        rate_result: dict[str, Any] = {"rate_set_players": [], "errors": []}
+        set_rate = getattr(self._media_controller, "set_players_rate", None)
+        if callable(set_rate):
+            try:
+                raw = await self._call_maybe_async(set_rate, livestream_players, rate)
+                if isinstance(raw, dict):
+                    rate_result.update(raw)
+            except Exception as exc:
+                rate_result.setdefault("errors", []).append(
+                    {"action": "set_rate", "error": f"{type(exc).__name__}: {exc}"}
+                )
+
+        rate_set_players = list(rate_result.get("rate_set_players") or [])
+        youtube_result: Optional[dict[str, Any]] = None
+        failed_reason = "rate_set_failed"
+        method = "mpris_rate"
+        if not rate_set_players and any(self._media_item_is_youtube(item) for item in livestream_items):
+            if len(livestream_players) > 1:
+                youtube_result = {
+                    "ok": False,
+                    "method": "youtube_browser_fallback",
+                    "error": "ambiguous_multiple_livestream_players",
+                }
+                failed_reason = "ambiguous_multiple_livestream_players"
+            else:
+                fallback = getattr(self._media_controller, "set_youtube_browser_rate", None)
+                if callable(fallback):
+                    try:
+                        raw_fallback = await self._call_maybe_async(fallback, rate)
+                        if isinstance(raw_fallback, dict):
+                            youtube_result = raw_fallback
+                            if raw_fallback.get("ok"):
+                                method = "youtube_browser_fallback"
+                                rate_set_players = list(livestream_players)
+                    except Exception as exc:
+                        youtube_result = {
+                            "ok": False,
+                            "method": "youtube_browser_fallback",
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                else:
+                    youtube_result = {
+                        "ok": False,
+                        "method": "youtube_browser_fallback",
+                        "error": "youtube_browser_fallback_unavailable",
+                    }
+                    failed_reason = "youtube_browser_fallback_unavailable"
+
+        status = "applied" if rate_set_players else "failed"
+        payload: dict[str, Any] = {
+            "status": status,
+            "method": method,
+            "rate": rate,
+            "players": livestream_players,
+            "rate_set_players": rate_set_players,
+            "media": [
+                {
+                    "player": item.get("player"),
+                    "title": item.get("title"),
+                    "url": item.get("url"),
+                    "length_us": item.get("length_us"),
+                    "position_us": item.get("position_us"),
+                }
+                for item in livestream_items
+            ],
+            "mpris": rate_result,
+        }
+        if youtube_result is not None:
+            payload["youtube_browser"] = youtube_result
+        if status == "applied":
+            restore_after = self._livestream_catchup_restore_after_seconds(
+                pause_duration_seconds=pause_duration_seconds,
+                rate=rate,
+            )
+            if restore_after is not None:
+                payload["restore_after_seconds"] = restore_after
+                self._schedule_livestream_rate_restore(
+                    players=livestream_players,
+                    method=method,
+                    delay_seconds=restore_after,
+                    media_snapshot=payload["media"],
+                )
+        else:
+            payload["reason"] = failed_reason
+        return payload
+
+    def _media_item_is_probable_livestream(self, item: dict[str, Any]) -> bool:
+        length_us = self._coerce_int(item.get("length_us"))
+        if length_us is not None and length_us > 0:
+            return False
+        url = str(item.get("url") or "").strip().lower()
+        title = str(item.get("title") or "").strip().lower()
+        album = str(item.get("album") or "").strip().lower()
+        if self._youtube_video_id(url):
+            return True
+        haystack = f" {title} {album} {url} "
+        return any(term in haystack for term in (" live ", " livestream ", " live-stream "))
+
+    def _media_item_is_youtube(self, item: dict[str, Any]) -> bool:
+        url = str(item.get("url") or "").strip()
+        title = str(item.get("title") or "").strip()
+        return bool(self._youtube_video_id(url) or self._first_youtube_url(title))
+
+    def _livestream_catchup_restore_after_seconds(
+        self,
+        *,
+        pause_duration_seconds: float,
+        rate: float,
+    ) -> Optional[float]:
+        max_seconds = float(self.config.livestream_resume_catchup_max_seconds)
+        if max_seconds <= 0:
+            return None
+        if rate <= 1.0:
+            return None
+        required = max(1.0, float(pause_duration_seconds or 0.0) / (rate - 1.0))
+        return round(min(max_seconds, required), 2)
+
+    def _schedule_livestream_rate_restore(
+        self,
+        *,
+        players: list[str],
+        method: str,
+        delay_seconds: float,
+        media_snapshot: list[dict[str, Any]],
+    ) -> None:
+        if delay_seconds <= 0:
+            return
+        task = asyncio.create_task(
+            self._restore_livestream_rate_after_delay(
+                players=list(players),
+                method=method,
+                delay_seconds=delay_seconds,
+                media_snapshot=list(media_snapshot),
+            )
+        )
+        self._livestream_rate_restore_tasks.add(task)
+        task.add_done_callback(self._livestream_rate_restore_tasks.discard)
+
+    async def _restore_livestream_rate_after_delay(
+        self,
+        *,
+        players: list[str],
+        method: str,
+        delay_seconds: float,
+        media_snapshot: list[dict[str, Any]],
+    ) -> None:
+        await asyncio.sleep(delay_seconds)
+        result: dict[str, Any] = {}
+        try:
+            if method == "youtube_browser_fallback":
+                current_media = await self._current_media_context()
+                if not self._livestream_catchup_media_still_current(
+                    current_media=current_media,
+                    media_snapshot=media_snapshot,
+                ):
+                    result = {"ok": False, "skipped": True, "reason": "media_changed_or_missing"}
+                else:
+                    fallback = getattr(self._media_controller, "set_youtube_browser_rate", None)
+                    if callable(fallback):
+                        raw = await self._call_maybe_async(fallback, 1.0)
+                        result = raw if isinstance(raw, dict) else {"ok": bool(raw)}
+                    else:
+                        result = {"ok": False, "error": "youtube_browser_fallback_unavailable"}
+            else:
+                set_rate = getattr(self._media_controller, "set_players_rate", None)
+                if callable(set_rate):
+                    raw = await self._call_maybe_async(set_rate, players, 1.0)
+                    result = raw if isinstance(raw, dict) else {"ok": bool(raw)}
+                else:
+                    result = {"ok": False, "error": "mpris_rate_unavailable"}
+        except Exception as exc:
+            result = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        self._event(
+            "livestream_catchup_rate_restored",
+            {
+                "method": method,
+                "players": players,
+                "rate": 1.0,
+                "delay_seconds": delay_seconds,
+                "result": result,
+            },
+        )
+
+    def _livestream_catchup_media_still_current(
+        self,
+        *,
+        current_media: list[dict[str, Any]],
+        media_snapshot: list[dict[str, Any]],
+    ) -> bool:
+        expected: list[tuple[str, str]] = []
+        for item in media_snapshot or []:
+            if not isinstance(item, dict):
+                continue
+            player = str(item.get("player") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if player and url:
+                expected.append((player, url))
+        if not expected:
+            return False
+        for item in current_media or []:
+            if not isinstance(item, dict):
+                continue
+            player = str(item.get("player") or "").strip()
+            url = str(item.get("url") or "").strip()
+            if (player, url) in expected and self._media_item_is_probable_livestream(item):
+                return True
+        return False
+
     def _looks_like_task_coaching(self, text: str) -> bool:
         lowered = str(text or "").lower()
         patterns = [
@@ -4744,9 +4988,13 @@ class DesktopContextService:
         audio_path = self._voice_path(voice_meta)
         if self.config.play_audio and audio_path is not None:
             media: dict[str, Any] = {"paused_players": [], "errors": []}
+            pre_pause_media_context: list[dict[str, Any]] = []
+            pause_started_at: Optional[float] = None
             try:
                 pause = getattr(self._media_controller, "pause_playing", None)
                 if callable(pause):
+                    pre_pause_media_context = await self._current_media_context()
+                    pause_started_at = asyncio.get_running_loop().time()
                     paused = await self._call_maybe_async(pause)
                     if isinstance(paused, dict):
                         media.update(paused)
@@ -4766,6 +5014,17 @@ class DesktopContextService:
                         media.setdefault("errors", []).append(
                             {"action": "resume", "error": f"{type(exc).__name__}: {exc}"}
                         )
+                pause_duration_seconds = 0.0
+                if pause_started_at is not None:
+                    pause_duration_seconds = max(
+                        0.0,
+                        asyncio.get_running_loop().time() - pause_started_at,
+                    )
+                media["livestream_catchup"] = await self._maybe_apply_livestream_resume_catchup(
+                    paused_players=paused_players,
+                    media_context=pre_pause_media_context,
+                    pause_duration_seconds=pause_duration_seconds,
+                )
                 if playback is not None:
                     playback["media"] = media
 

@@ -39,6 +39,9 @@
       "observed_context_relevance_interrupt_threshold": {"type": "number"},
       "project_context_relevance_enabled": {"type": "boolean"},
       "proactive_video_commentary_enabled": {"type": "boolean"},
+      "livestream_resume_catchup_enabled": {"type": "boolean"},
+      "livestream_resume_catchup_rate": {"type": "number"},
+      "livestream_resume_catchup_max_seconds": {"type": "number"},
       "max_image_bytes": {"type": "integer"},
       "vision_max_dimension": {"type": "integer"},
       "vision_jpeg_quality": {"type": "integer"}
@@ -68,6 +71,9 @@
     "observed_context_relevance_interrupt_threshold": 0.82,
     "project_context_relevance_enabled": true,
     "proactive_video_commentary_enabled": true,
+    "livestream_resume_catchup_enabled": true,
+    "livestream_resume_catchup_rate": 1.5,
+    "livestream_resume_catchup_max_seconds": 90,
     "max_image_bytes": 5000000,
     "vision_max_dimension": 1600,
     "vision_jpeg_quality": 82
