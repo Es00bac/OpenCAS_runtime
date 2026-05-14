@@ -7,7 +7,7 @@ This page defines the vocabulary used throughout OpenCAS documentation, code, an
 ## Core Concepts
 
 **Agent**
-The running OpenCAS process. It holds a persistent identity, memory, and autonomous background activity. Unlike a stateless chatbot, the agent continues operating between conversations: daydreaming, consolidating memory, and executing queued work.
+The running OpenCAS process. It holds persistent identity, memory, and background activity. Between conversations it can run scheduled work, consolidate memory, and execute queued tasks when configured.
 
 **Bootstrap / BootstrapContext**
 The startup sequence that initializes every subsystem in order and assembles a `BootstrapContext` object containing all wired managers. Nothing runs until bootstrap completes. The `ready` readiness state is emitted at the end of bootstrap.
@@ -54,7 +54,7 @@ A background task that computes embeddings for any memory records that were stor
 ## Identity
 
 **Self-Model**
-The agent's structured representation of itself: name, persona, values, traits, goals, narrative, and current somatic and relational state. Persisted across restarts and updated by identity recording, ToM belief sync, and nightly consolidation.
+The agent's structured representation of itself: name, configured persona, values, traits, goals, narrative, and current somatic and relational state. Persisted across restarts and updated by identity recording, ToM belief sync, and nightly consolidation.
 
 **User Model**
 The agent's representation of the operator or user: name, bio, known preferences, and recent interaction history. Updated on each conversational turn.
@@ -70,7 +70,7 @@ A versioned JSONL file of structured self-beliefs keyed by `domain` and `key` (f
 ## Somatic State
 
 **Somatic State**
-A set of physiological-analogue dimensions that modulate how the agent behaves: `arousal`, `fatigue`, `tension`, and `valence`. These are not cosmetic. They directly influence LLM temperature, prompt style, memory salience, and whether the agent recommends pausing background work.
+A set of physiological-analogue dimensions that modulate runtime behavior: `arousal`, `fatigue`, `tension`, and `valence`. These values influence LLM temperature, prompt style, memory salience, and whether the runtime recommends pausing background work.
 
 **Somatic Modulators**
 Derived from the live somatic state: `to_temperature()` adjusts LLM sampling heat, `to_prompt_style_note()` injects a directive into the system prompt, and `to_memory_retrieval_boost()` emotionally tunes memory ranking.
@@ -80,7 +80,7 @@ Derived from the live somatic state: `to_temperature()` adjusts LLM sampling hea
 ## Relational State (Musubi)
 
 **Musubi**
-The composite relational score derived from four dimensions: `trust`, `resonance`, `presence`, and `attunement`. Named after the Japanese concept of generative connection. A higher musubi score loosens self-approval thresholds, boosts creative promotion, and increases memory salience for relational content.
+The composite relational score derived from four dimensions: `trust`, `resonance`, `presence`, and `attunement`. A higher musubi score can adjust self-approval thresholds, creative promotion, and memory salience for relational content.
 
 **Relational Engine**
 The subsystem (`RelationalEngine`) that tracks the four musubi dimensions and exposes modifiers for memory retrieval, creative ladder promotion, and self-approval risk. Updated as the agent and operator interact over time.
@@ -124,7 +124,7 @@ A named execution queue with configurable concurrency. Current lanes: `chat` (co
 A durable audit record created at the end of every terminal BAA task. Stored in `receipts.db` and surfaced through the dashboard Operations tab. Answers "what did the agent actually do?"
 
 **Retry Governor**
-The control layer that decides whether a failed task should retry, salvage, or stop. It preserves blocked-vs-resumable intent instead of blindly replaying low-divergence failures.
+The control layer that decides whether a failed task should retry, salvage, or stop. It preserves blocked and resumable intent instead of replaying failures without context.
 
 **Salvage Packet**
 The durable retry metadata attached to a failed task. It captures the last meaningful attempt state so the governor can resume without losing provenance.
@@ -163,7 +163,7 @@ The subsystem (`ToMEngine`) that records beliefs and intentions on every convers
 The chat lane's microphone and speech lane. It transcribes audio into chat text and can synthesize spoken replies. Voice output metadata is stored alongside the message history.
 
 **Phone Bridge**
-The Twilio-backed voice surface for live inbound and outbound calls. It supports owner-vs-caller screening, workspace separation, and recent-call inspection.
+The Twilio-backed voice surface for live inbound and outbound calls. It supports owner and caller screening, workspace separation, and recent-call inspection.
 
 **Telegram**
 The existing chat channel for paired and policy-controlled Telegram access. It supports bot pairing, allowlists, typing indicators, and edited replies.
@@ -208,7 +208,7 @@ A curated trust update feed that can be synced into the current trust policy set
 ## Observability
 
 **Telemetry Store**
-An append-only JSONL event log. Every meaningful runtime event (bootstrap stages, tool calls, memory operations, LLM calls) is logged with a session ID and optional span ID. Queryable through `/api/monitor/events` and the Logs dashboard tab.
+An append-only JSONL event log. Runtime events such as bootstrap stages, tool calls, memory operations, and LLM calls are logged with a session ID and optional span ID. Queryable through `/api/monitor/events` and the Logs dashboard tab.
 
 **Token Telemetry**
 Per-call LLM usage recording: prompt tokens, completion tokens, latency, and estimated cost. Rolled up by session and by day. Surfaced in the Usage dashboard tab.

@@ -2,7 +2,7 @@
 
 All notable release-doc changes for the current OpenCAS repo are recorded here.
 
-The goal of this changelog is accuracy, not marketing inflation.
+The goal of this changelog is to describe observable release changes accurately.
 
 ## [0.1.1] - 2026-04-19
 
@@ -24,7 +24,7 @@ The goal of this changelog is accuracy, not marketing inflation.
 
 - State and control surfaces are local.
 - Chat, voice, and embedding lanes normally use configured providers through `open_llm_auth`.
-- The current repo is best described as a local-state autonomous agent with provider-flexible model execution and first-class operator control planes.
+- The current repo is a local-state autonomous agent runtime with provider-routed model execution and dashboard/API operator surfaces.
 
 ## Unreleased
 

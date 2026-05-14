@@ -2,7 +2,7 @@
 
 ## Overview
 
-OpenCAS is structured as explicit subsystems rather than one monolithic agent file. The major runtime concerns are separated into bootstrap, memory, context/retrieval, autonomy, scheduling, telemetry, API, dashboard, platform trust, phone, and channel integrations.
+OpenCAS is structured as explicit subsystems. The major runtime concerns are separated into bootstrap, memory, context/retrieval, autonomy, scheduling, telemetry, API, dashboard, platform trust, phone, and channel integrations.
 
 ## Primary Subsystems
 
@@ -47,13 +47,13 @@ OpenCAS is structured as explicit subsystems rather than one monolithic agent fi
 1. The schedule service checks for due items on its fixed cadence.
 2. Task schedules can submit new BAA work.
 3. Reminder schedules can emit durable run records without execution.
-4. Missed runs are advanced conservatively instead of being blindly replayed.
+4. Missed runs are advanced conservatively instead of being replayed without context.
 
 ### Consolidation Loop
 
 1. Periodic memory maintenance runs.
 2. Edges and long-horizon continuity state can be reweighted or rebuilt.
-3. Retried work keeps salvage and blocked-state provenance instead of being reshuffled into unrelated work.
+3. Retried work keeps salvage and blocked-state provenance.
 
 ### Telemetry Loop
 
@@ -131,7 +131,7 @@ The dashboard surfaces those through the current tab set:
 
 ## Architectural Truths
 
-- The repo currently has a strong operator surface and broad internal observability.
+- The repo currently has dashboard-based operator surfaces and internal observability.
 - The repo is not yet documented here as a polished package-manager install.
 - The release docs should not describe the system as cloud-free unless the configured model lanes are truly local.
-- Phone, voice, schedule, platform, and telemetry are first-class runtime surfaces, not side experiments.
+- Phone, voice, schedule, platform, and telemetry are runtime surfaces in the current code.

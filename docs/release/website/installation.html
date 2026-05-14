@@ -17,7 +17,7 @@
     <div class="site-shell">
       <a class="brand" href="index.html">
         <span class="brand-mark mono">O</span>
-        <span>OpenCAS Release</span>
+        <span>OpenCAS Documentation</span>
       </a>
       <nav class="nav-links">
         <a href="index.html">Home</a>
@@ -33,7 +33,7 @@
   <main class="site-shell">
     <section class="page-hero">
       <span class="eyebrow">Installation</span>
-      <h1>Install the repo as it exists now.</h1>
+      <h1>Install the current public repository.</h1>
       <p class="section-lead">
         This guide matches the current codebase. It clones the public OpenLLMAuth repo into the sibling <code>../open_llm_auth/</code> path required by <code>requirements.txt</code>.
       </p>
@@ -79,10 +79,10 @@ pip install -r requirements.txt</code></pre>
           <h3>Recommended configuration path</h3>
           <pre><code>python -m opencas --tui</code></pre>
           <p class="lede">
-            The TUI bootstrap is the cleanest way to configure provider material, choose actual discovered chat and embedding models, and set up Telegram.
+            The TUI bootstrap configures provider material, discovered chat and embedding models, and Telegram settings.
           </p>
           <div class="callout warn">
-            <strong>First-boot responsibility.</strong> OpenCAS creates persistent continuity, not a disposable chat session. If you later delete the state directory, you delete that agent's continuity. The TUI asks you to acknowledge this before creation.
+            <strong>First-boot responsibility.</strong> OpenCAS creates persistent state for the agent. If you later delete the state directory, you delete that continuity. The TUI asks you to acknowledge this before creation.
           </div>
           <div class="table-wrap">
             <table>
@@ -128,7 +128,7 @@ pip install -r requirements.txt</code></pre>
           <p>The current default address is <code>http://127.0.0.1:8080/dashboard</code>.</p>
           <p>The acknowledgement flag is required only for non-TUI fresh bootstraps. Later launches against an existing state directory do not require it.</p>
           <div class="callout warn">
-            <strong>Truthful deployment note.</strong> OpenCAS keeps its state locally, but normal chat, voice, and embedding calls go through the configured provider lane. It is not accurate to describe the default setup as cloud-free.
+            <strong>Deployment note.</strong> OpenCAS keeps its state locally, but normal chat, voice, and embedding calls go through the configured provider lane. It is not accurate to describe the default setup as cloud-free.
           </div>
           <p class="muted">Useful overrides: <code>--state-dir</code>, <code>--default-llm-model</code>, <code>--embedding-model-id</code>, <code>--provider-config-path</code>, <code>--provider-env-path</code>, <code>--telegram-enabled</code>.</p>
         </section>

@@ -9,14 +9,14 @@
     toggle.id = "ocas-video-toggle";
     toggle.innerHTML = `
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5v14l11-7z"/></svg>
-      <span>Open the signal reel</span>
+      <span>Open architecture video</span>
     `;
 
     const panel = document.createElement("div");
     panel.id = "ocas-video-panel";
     panel.innerHTML = `
       <div id="ocas-video-header">
-        <div id="ocas-video-title">OpenCAS: Signal Reel</div>
+        <div id="ocas-video-title">OpenCAS: Architecture Video</div>
         <div id="ocas-video-controls">
           <button id="ocas-video-expand" title="Expand">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h6v2H7v4H5V5zm8 0h6v6h-2V7h-4V5zM5 13h2v4h4v2H5v-6zm12 0h2v6h-6v-2h4v-4z"/></svg>

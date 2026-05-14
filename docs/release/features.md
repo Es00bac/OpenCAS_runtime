@@ -1,6 +1,6 @@
 # OpenCAS Features
 
-This document describes the features present in the current repo state.
+This document describes the features present in the current public snapshot.
 
 ## Memory And Retrieval
 
@@ -27,7 +27,7 @@ Somatic and relational adjustments can further modulate ranking.
 
 ### Artifact-Backed Autobiographical Memory
 
-Authored artifacts under the managed state can be bridged into memory so recall can ground on prior authored work instead of only raw file reads.
+Authored artifacts under the managed state can be bridged into memory so retrieval can use prior authored work in addition to raw file reads.
 
 ## Embeddings
 
@@ -49,13 +49,13 @@ Current somatic state tracks:
 - certainty
 - derived somatic tag / primary emotion
 
-OpenCAS also exposes relational continuity through musubi and identity surfaces.
+OpenCAS also exposes relational state through musubi and identity surfaces.
 
 ## Autonomy And Execution
 
 ### Self-Approval
 
-OpenCAS uses a tiered approval path for ordinary versus risky actions, with evidence, historical behavior, somatic state, and boundary handling feeding the decision.
+OpenCAS uses a tiered approval path for lower-risk and higher-risk actions, with evidence, historical behavior, somatic state, and boundary handling feeding the decision.
 
 ### Creative Ladder
 
@@ -80,11 +80,11 @@ Idle-time daydreaming can generate:
 
 ### Background Execution
 
-The bounded assistant and retry pipeline keep long-running work from drifting:
+The bounded assistant and retry pipeline record long-running work state:
 
 - queued background tasks are lane-limited
 - receipts record what actually happened
-- retry and salvage state preserve blocked-vs-resumable intent instead of blindly replaying failures
+- retry and salvage state preserve blocked and resumable intent instead of replaying failures without context
 - git and provenance checkpoints help operators inspect what changed
 
 ### Scheduling
@@ -140,7 +140,7 @@ Current usage monitoring includes:
 
 ### Platform And Trust
 
-OpenCAS now exposes a platform surface for extensions and capability inspection:
+OpenCAS exposes a platform surface for extensions and capability inspection:
 
 - canonical capability inventory
 - extension install, update, disable, enable, and uninstall flows
@@ -210,12 +210,12 @@ The current server exposes these main API domains:
 - phone
 - schedule
 - telemetry
-- Telegram
+- telegram
 
 See [API Reference](api/README.md) for details.
 
 ## Release Truths
 
-- OpenCAS is local-state and operator-owned.
+- OpenCAS is local-state and operator-managed.
 - Chat, voice, and embedding traffic normally uses configured providers through `open_llm_auth`.
 - The system is not accurately described as cloud-free by default.

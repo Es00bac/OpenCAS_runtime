@@ -1,15 +1,15 @@
 # OpenCAS Usage Guide
 
-## Recommended Operator Path
+## Primary Operator Path
 
-The current repo is best operated through the dashboard and API server:
+The current repo is normally operated through the dashboard and API server:
 
 ```bash
 source .venv/bin/activate
 python -m opencas --with-server --accept-bootstrap-responsibility
 ```
 
-The acknowledgement flag is required only for non-TUI fresh bootstraps. It makes the first-boot boundary explicit: OpenCAS creates persistent continuity, not a disposable chat session, and deleting the state directory deletes that agent's continuity. Later launches against an existing state directory do not require the flag.
+The acknowledgement flag is required only for non-TUI fresh bootstraps. It makes the first-boot boundary explicit: OpenCAS creates persistent state for the agent, and deleting the state directory deletes that continuity. Later launches against an existing state directory do not require the flag.
 
 Default address:
 
@@ -127,7 +127,7 @@ Phone configuration is exposed through the System surface and the `/api/phone/*`
 
 ## Telegram
 
-Telegram is a first-class channel in the current repo. Use the System tab or the TUI bootstrap to configure:
+Telegram is a configured channel in the current repo. Use the System tab or the TUI bootstrap to configure:
 
 - bot token
 - pairing/allowlist/open DM policy
@@ -164,7 +164,7 @@ The Logs tab is the event stream when you need to answer “what happened?” qu
 6. Use Schedule when debugging recurring work or missed runs.
 7. Use Platform when debugging extension installation or trust policy issues.
 8. Use Logs when you need the raw event sequence.
-9. Use Usage when debugging spend or rate-limit surprises.
+9. Use Usage when debugging spend, model routing, or rate-limit surprises.
 
 ## Stopping OpenCAS
 

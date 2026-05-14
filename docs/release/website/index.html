@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>OpenCAS Release</title>
+    <title>OpenCAS Documentation</title>
     <meta
       name="description"
       content="OpenCAS release site for the current runtime: memory, voice, phone, schedule, platform, logs, and the operator control plane."
@@ -20,7 +20,7 @@
       <div class="site-shell">
         <a class="brand" href="index.html">
           <span class="brand-mark mono">O</span>
-          <span>OpenCAS Release</span>
+          <span>OpenCAS Documentation</span>
         </a>
         <nav class="nav-links">
           <a href="installation.html">Installation</a>
@@ -37,15 +37,15 @@
       <section class="hero">
         <div class="hero-grid">
           <div class="hero-copy">
-            <span class="eyebrow">Release site</span>
-            <h1>OpenCAS is a local-state autonomous agent with memory, voice, phone, and a real control plane.</h1>
+            <span class="eyebrow">Documentation site</span>
+            <h1>OpenCAS is a local-state autonomous agent runtime with memory, channels, and dashboard controls.</h1>
             <p class="lede">
-              It keeps state locally, routes models through <code>open_llm_auth</code>, and exposes the parts operators actually touch: chat, schedule, platform, logs, telemetry, and the dashboard tabs behind them.
+              It keeps runtime state locally, routes model calls through <code>open_llm_auth</code>, and exposes chat, schedule, platform, logs, telemetry, and related API surfaces through the dashboard.
             </p>
             <div class="hero-actions">
               <a class="btn primary" href="usage.html">Read usage</a>
               <a class="btn" href="api/">Open API</a>
-              <a class="btn" href="features.html">See features</a>
+              <a class="btn" href="features.html">Review features</a>
             </div>
             <div class="hero-badges">
               <span class="pill">Persistent memory</span>
@@ -71,7 +71,7 @@
               <article class="signal-card">
                 <div class="metric">8+</div>
                 <div class="metric-label">Operator surfaces</div>
-                <p class="signal-note">Chat, voice, phone, schedule, platform, telemetry, Telegram, and the WebSocket bridge.</p>
+              <p class="signal-note">Chat, voice, phone, schedule, platform, telemetry, Telegram, and the WebSocket bridge.</p>
               </article>
               <article class="signal-card">
                 <div class="metric">RRF</div>
@@ -85,7 +85,7 @@
               </article>
             </div>
             <div class="callout">
-              <strong>Truthful release note.</strong> OpenCAS is local-state and operator-owned, but normal chat, voice, and embedding lanes still route through configured providers unless you replace them.
+              <strong>Deployment note.</strong> OpenCAS stores state locally, but normal chat, voice, and embedding lanes still route through configured providers unless you replace them.
             </div>
           </aside>
         </div>
@@ -93,14 +93,14 @@
 
       <section class="section">
         <div class="section-head">
-          <span class="eyebrow">What is live</span>
-          <h2>Current surfaces, not aspirational ones.</h2>
-          <p class="section-lead">The release bundle is meant to describe the running system exactly as it exists now, including the newer control-plane pieces.</p>
+          <span class="eyebrow">Current scope</span>
+          <h2>Runtime surfaces in the public snapshot.</h2>
+          <p class="section-lead">The release bundle describes the public snapshot and its documented dashboard, API, and channel surfaces.</p>
         </div>
         <div class="grid cols-2">
           <article class="content-card">
             <h3>Memory and continuity</h3>
-            <p>SQLite-backed episodic and distilled memory, graph edges, retrieval inspection, artifact-backed recall, and continuous identity state.</p>
+            <p>SQLite-backed episodic and distilled memory, graph edges, retrieval inspection, artifact-backed recall, and identity state.</p>
           </article>
           <article class="content-card">
             <h3>Operator control plane</h3>
@@ -120,7 +120,7 @@
       <section class="section">
         <div class="section-head">
           <span class="eyebrow">Dashboard map</span>
-          <h2>Rooms in the current control deck.</h2>
+          <h2>Dashboard tabs in the current control plane.</h2>
         </div>
         <div class="table-wrap">
           <table>
@@ -157,7 +157,7 @@
         <div class="doc-grid">
           <a class="doc-card" href="installation.html">
             <h3>Installation</h3>
-            <p>Clone, configure, and launch the current repo layout without pretending it is a packaged future release.</p>
+            <p>Clone, configure, and launch the current repository layout.</p>
           </a>
           <a class="doc-card" href="usage.html">
             <h3>Usage</h3>
@@ -185,9 +185,9 @@
       <section class="page-card">
         <h3>Release truth</h3>
         <ul class="list">
-          <li>OpenCAS is local-state and operator-owned.</li>
+          <li>OpenCAS stores runtime state locally.</li>
           <li>Chat, voice, and embedding lanes normally use configured providers through <code>open_llm_auth</code>.</li>
-          <li>The current repo is best described as a local-state autonomous agent with provider-flexible model execution and first-class operator control planes.</li>
+          <li>The current repository is a public snapshot and may lag behind private live development.</li>
         </ul>
       </section>
     </main>

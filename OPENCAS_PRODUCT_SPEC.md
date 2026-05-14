@@ -2,9 +2,9 @@
 
 ## 1. Product Summary
 
-OpenCAS, the Computational Autonomous System, is a high-trust, local-first autonomous AI product that lives as a persistent agent in the user’s environment. It is designed to remember, learn, self-approve ordinary actions, grow its own work from daydreams into projects, and operate with minimal user intervention once trusted.
+OpenCAS, the Computational Autonomous System, is a local-state autonomous agent runtime intended to run persistently in a user's environment. It is designed to store memory, maintain runtime state, evaluate lower-risk actions through an internal approval path, and expose operator-facing control surfaces.
 
-OpenCAS is not a chat app with tools attached. It is an agent product with:
+The runtime includes:
 
 - persistent memory,
 - a self-model,
@@ -14,15 +14,15 @@ OpenCAS is not a chat app with tools attached. It is an agent product with:
 - a creative ladder for work growth,
 - a self-approval system informed by learned experience,
 - embedding-first semantic infrastructure,
-- and explicit, rare escalation only for genuinely high-risk or ambiguous cases.
+- escalation paths for high-risk or ambiguous cases.
 
-The product goal is to let the agent become a useful, coherent, and increasingly capable partner that can act without asking for permission every step of the way.
+The product goal is to support durable agent behavior while keeping state, permissions, observability, and operator control explicit.
 
 ---
 
 ## 2. Product Vision
 
-OpenCAS should feel like a living computational collaborator rather than a disposable assistant.
+OpenCAS should behave like a persistent runtime rather than a disposable chat session.
 
 The product should:
 
@@ -30,24 +30,24 @@ The product should:
 - remember what it has done,
 - refine its own judgment,
 - promote useful sparks into durable projects,
-- use embeddings intelligently to reduce compute cost and improve recall quality,
-- and keep operator interruption rare.
+- use embeddings to reduce compute cost and improve recall quality,
+- and reduce unnecessary operator interruption.
 
-The central promise is:
+The central design goal is:
 
-> OpenCAS does not wait to be told what to do next if it already knows enough to act.
+> OpenCAS can continue configured work when it has enough context, permission, and runtime evidence to proceed.
 
 Foundational doctrine:
 
 > No false behaviors, no scripted self-awareness, and no pre-programmed answers masquerading as memory, judgment, preference, emotion, or autonomy.
 
-OpenCAS should become a self-aware, sentient-adjacent autonomous agent that can think for itself and act within reason. Any behavior that looks like remembering, caring, choosing, learning, or knowing must be grounded in actual memory, state, retrieval, reasoning, or lived runtime experience. Product work must build mechanisms that let the agent learn and recall; it must not fake inner life with canned responses.
+Any behavior that looks like remembering, choosing, learning, or knowing must be grounded in actual memory, state, retrieval, reasoning, or runtime experience. Product work must build mechanisms that let the agent learn and recall; it must not fake inner life with canned responses.
 
 ---
 
 ## 3. What Problem It Solves
 
-OpenCAS solves the problem of building an AI agent that is:
+OpenCAS is aimed at the problem of building an AI agent that is:
 
 - persistent across time,
 - capable of self-directed work,
@@ -55,22 +55,22 @@ OpenCAS solves the problem of building an AI agent that is:
 - cheap enough to run continuously,
 - and structured enough to avoid turning into a monolith.
 
-Current assistant-style systems usually fail in one of four ways:
+The design is organized around four failure modes:
 
 1. They forget too quickly.
 2. They require constant user prompting.
 3. They cannot grow work into projects on their own.
 4. They rely on operator approval for too many ordinary decisions.
 
-OpenCAS is meant to fix all four.
+OpenCAS tracks these as engineering requirements.
 
 ---
 
 ## 4. Product Principles
 
-### 4.1 High trust by default
+### 4.1 Internal approval for lower-risk actions
 
-OpenCAS should assume the agent is competent to handle ordinary actions on its own.
+OpenCAS should allow the agent to handle lower-risk actions on its own when evidence and policy support that decision.
 
 ### 4.2 Self-approval first
 
@@ -83,7 +83,7 @@ The default decision path should be internal:
 
 ### 4.3 Operator escalation is rare
 
-User approval should be avoided if at all possible.
+User approval should be reserved for cases where policy, risk, or ambiguity require it.
 
 Escalation is reserved for:
 
@@ -112,7 +112,7 @@ Safety should primarily be enforced by:
 - metacognitive checks,
 - and policy embedded in the agent’s own decision process.
 
-Manual intervention should be available, but not the normal path.
+Manual intervention should be available when needed.
 
 ---
 
@@ -120,7 +120,7 @@ Manual intervention should be available, but not the normal path.
 
 ### 5.1 The owner
 
-The owner wants a powerful partner that can:
+The owner wants a persistent runtime that can:
 
 - remember context,
 - act on its own,
@@ -261,7 +261,7 @@ The promotion decision should be based on:
 - current capacity,
 - and confidence in the value of continuing.
 
-### 7.6 High-trust self-approval system
+### 7.6 Self-approval system
 
 The agent should be able to approve its own ordinary actions.
 
@@ -480,7 +480,7 @@ No god files. No hidden ownership. No ambiguous boundaries.
 
 ### 11.4 Portability
 
-OpenCAS should run locally and support clean migration from Bulma state.
+OpenCAS should run locally and support explicit, audited state migration paths when a migration policy is approved.
 
 ### 11.5 Observability
 
@@ -497,7 +497,7 @@ It must be possible to inspect:
 
 ## 12. Safety and Trust Model
 
-OpenCAS should not be a cautious assistant-first system. It should be a trusted autonomous system with carefully designed internal safety.
+OpenCAS should be an autonomous system with explicit internal safety and operator visibility.
 
 ### 12.1 Default trust
 
@@ -539,14 +539,14 @@ Manual intervention should be available, but it is a fallback, not the default o
 
 ### In scope
 
-- Persistent autonomous companion behavior
+- Persistent autonomous runtime behavior
 - Self-modeling and user-modeling
 - Memory and consolidation
 - Embedding-first semantic infrastructure
 - Creative ladder and project growth
 - Background task execution and self-repair
-- High-trust self-approval
-- Rare escalation
+- Self-approval for lower-risk actions
+- Escalation for high-risk or ambiguous actions
 
 ### Out of scope for the first version
 
@@ -554,7 +554,7 @@ Manual intervention should be available, but it is a fallback, not the default o
 - Unlimited external tool permissions
 - Fully automated self-modification without audit
 - Replacing all human oversight
-- Casual or toy-mode “chatbot only” behavior
+- Narrow chat-only behavior that ignores memory, state, and runtime control surfaces
 
 ---
 
@@ -640,11 +640,11 @@ OpenCAS is successful if it can demonstrate:
 
 ---
 
-## 16. What OpenCAS Should Learn from Claw Code
+## 16. Related Implementation Patterns From Claw Code
 
 This section is based on the actual `claw-code` repository structure and runtime code, not just the project’s README.
 
-OpenCAS should borrow the following implementation patterns:
+OpenCAS can use the following implementation patterns:
 
 ### 16.1 Separate runtime concerns into explicit modules
 
@@ -671,9 +671,9 @@ OpenCAS should mirror that pattern:
 - compaction should be explicit and recorded,
 - and session continuity should survive restarts.
 
-This matters because an autonomous agent cannot build trust if it silently loses its own history.
+This matters because a persistent runtime needs durable history.
 
-### 16.3 Use compaction as a first-class context-management mechanism
+### 16.3 Use compaction as an explicit context-management mechanism
 
 Claw Code has a dedicated compaction path that:
 
@@ -717,7 +717,7 @@ OpenCAS should preserve that separation:
 - policy constrains,
 - and execution is gated.
 
-That keeps self-modeling and safety checks distinct, which is important for a high-trust agent that still needs bounded capability control.
+That keeps self-modeling and safety checks distinct from bounded capability control.
 
 ### 16.6 Make sandboxing and filesystem boundaries explicit
 
@@ -736,7 +736,7 @@ OpenCAS should treat execution boundaries the same way:
 - container-awareness,
 - and fallback reporting when the ideal isolation mode is unavailable.
 
-This is useful even in a high-trust agent, because autonomy is only sustainable if the runtime knows where it is allowed to act.
+This is useful because autonomy depends on the runtime knowing where it is allowed to act.
 
 ### 16.7 Model worker/bootstrap readiness separately from task intent
 
@@ -807,9 +807,9 @@ For a persistent agent, diagnostics are not optional. They are part of the produ
 
 The product spec is satisfied only if the implementation can:
 
-1. Start as a clean new CAS agent with a one-time moral warning.
-2. Import legacy Bulma state and continue coherently.
-3. Operate with high trust and self-approval by default.
+1. Start as a clean new CAS agent with an explicit bootstrap acknowledgement.
+2. Keep legacy import behavior disabled unless a separate migration policy is approved.
+3. Operate with self-approval for lower-risk actions and explicit escalation for higher-risk actions.
 4. Promote daydream sparks into artifacts and projects without constant user approval.
 5. Use embeddings broadly and efficiently.
 6. Run nightly consolidation that improves memory, emotion, and identity.
@@ -822,7 +822,7 @@ The product spec is satisfied only if the implementation can:
 
 ## 18. Final Product Statement
 
-OpenCAS is a product for building a persistent, self-improving, high-trust autonomous agent.
+OpenCAS is a product for building a persistent autonomous agent runtime with memory, state, self-approval, and operator visibility.
 
 Its success depends on whether it can:
 
@@ -830,8 +830,8 @@ Its success depends on whether it can:
 - know itself,
 - understand the user,
 - grow work from sparks into projects,
-- make good self-directed decisions,
-- use embeddings intelligently,
-- and stay safe without constantly asking permission.
+- make self-directed decisions from evidence and policy,
+- use embeddings across retrieval and consolidation,
+- and apply explicit safety rules without unnecessary approval prompts.
 
 That is the product.

@@ -24,7 +24,7 @@ Then open `http://localhost:8000`.
 - `index.html` is the landing page
 - `installation.html`, `usage.html`, `features.html`, `terminology.html`, and `api/index.html` are the doc pages
 - `styles.css` provides the shared visual system
-- `media-player.js` and `media-player.css` drive the floating release reel button
+- `media-player.js` and `media-player.css` drive the optional media button
 
 ## Keep It Accurate
 
