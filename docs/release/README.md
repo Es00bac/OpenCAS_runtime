@@ -1,33 +1,34 @@
-# OpenCAS Release Documentation
+# OpenCAS Release Docs
 
-This documentation describes the public OpenCAS runtime snapshot in this repository. It focuses on what is present in the code and dashboard surfaces, not on comparisons with other projects.
+OpenCAS is a persistent autonomous agent with local state, durable memory, a web control plane, and provider-routed model access through `open_llm_auth`.
 
-OpenCAS is a Python runtime for a persistent autonomous agent. It stores local state, builds memory over time, exposes a web dashboard, and routes model calls through `open_llm_auth`.
+This release bundle reflects the repo as it exists now. It is not an aspirational roadmap. If a command, endpoint, dashboard surface, or website section is listed here, it should exist in the running system.
 
-## Current Scope
+## What This Release Includes
 
-OpenCAS currently includes:
+- Persistent episodic and distilled memory backed by SQLite
+- Provider-backed chat, voice, and embedding lanes via `open_llm_auth`
+- Memory inspection, retrieval inspection, and connected atlas views
+- Chat, operations, usage, daydream, identity, executive, schedule, platform, logs, and system dashboard surfaces
+- Twilio-backed phone bridge support with owner and caller workspace separation
+- Telegram pairing and chat integration
+- Desktop-context Body Double observations with screenshot/OCR evidence, MPRIS media state, YouTube transcript retrieval, and optional local Whisper transcription of currently playing audio
+- Background daydreaming, creative ladder promotion, retry-aware recovery, and task orchestration
+- Operator-facing audit, receipt, qualification, telemetry, and plugin-trust APIs
 
-- SQLite-backed episodic memory, distilled memory, context history, tasks, work, plans, daydream state, schedule runs, telemetry, and platform state
-- provider-routed chat, voice, and embedding lanes through `open_llm_auth`
-- memory search, retrieval inspection, graph/atlas views, and embedding projection surfaces
-- dashboard tabs for Overview, Health, Chat, Operations, Schedule, Usage, Daydream, Memory, Identity, Executive, Platform, System, and Logs
-- background daydreaming, creative ladder work promotion, bounded assistant execution, retry/salvage receipts, and schedule-triggered work
-- Telegram configuration and chat integration
-- Twilio-backed phone bridge support when configured
-- extension inventory, bundle inspection, lifecycle controls, and plugin trust policy surfaces
+## Ground Truth About Deployment
 
-## Deployment Model
-
-- State is stored locally under the configured state directory.
+- OpenCAS keeps its state locally under the configured state directory.
 - The default CLI state directory is `./.opencas`.
-- Provider credentials and model routing are managed through `open_llm_auth`.
-- Chat, voice, and embedding calls normally use configured external providers unless you replace those lanes with local provider implementations.
+- Chat, voice, and embedding traffic normally goes to whichever provider/model you configure through `open_llm_auth`.
+- The default embedding model is now `google/embeddinggemma-300m`.
+- Embedding vectors are stored in the canonical 3072-dim space. `google/embeddinggemma-300m` runs locally and is upcast from its 768-native output to 3072 with explicit embedding metadata.
+- A deterministic local hash fallback path is retained for environments where embedding generation is blocked.
 - The dashboard server defaults to `127.0.0.1:8080`.
-- The default embedding model in this snapshot is `google/embeddinggemma-300m`.
-- Embedding generation has a deterministic local fallback for unavailable provider-backed embeddings.
 
-## Install
+That means the project is local-state and operator-owned, but not “fully local” in the sense of requiring no external model providers.
+
+## Recommended First Run
 
 ```bash
 git clone https://github.com/Es00bac/OpenCAS_runtime.git OpenCAS
@@ -36,31 +37,23 @@ git clone https://github.com/Es00bac/OpenLLMAuth.git ../open_llm_auth
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-```
-
-## Configure
-
-The TUI bootstrap is the recommended setup path for this snapshot:
-
-```bash
 python -m opencas --tui
 ```
 
-It can configure provider material, model selection, and Telegram settings.
+The TUI bootstrap configures provider material, model selection, and Telegram settings for the current repo state.
 
-Fresh non-TUI bootstraps require an explicit acknowledgement because a new state directory creates persistent agent continuity:
+First boot is responsibility-gated. OpenCAS creates persistent continuity, not a disposable chat session. If you later delete the state directory, you delete that agent's continuity. The TUI asks you to acknowledge this before creation.
+
+After configuration:
+
+```bash
+python -m opencas --with-server
+```
+
+For a non-TUI fresh bootstrap, acknowledge that boundary explicitly:
 
 ```bash
 python -m opencas --with-server --accept-bootstrap-responsibility
-```
-
-After the state directory already exists, the acknowledgement flag is not required.
-
-## Run
-
-```bash
-source .venv/bin/activate
-python -m opencas --with-server
 ```
 
 Then open:
@@ -69,43 +62,56 @@ Then open:
 http://127.0.0.1:8080/dashboard
 ```
 
+## Dashboard Surface
+
+The current dashboard includes these top-level tabs:
+
+- Overview
+- Health
+- Chat
+- Operations
+- Schedule
+- Usage
+- Daydream
+- Memory
+- Identity
+- Executive
+- Platform
+- System
+- Logs
+
 ## Documentation Index
 
 | Document | Purpose |
 | --- | --- |
-| [Installation Guide](installation.md) | Setup steps for the current repository layout |
-| [Usage Guide](usage.md) | Running OpenCAS and using its dashboard/API surfaces |
-| [Features](features.md) | Current subsystem and capability summary |
-| [Terminology](terminology.md) | Vocabulary used by the docs, dashboard, and code |
-| [API Reference](api/README.md) | HTTP and WebSocket surfaces exposed by the server |
+| [Installation Guide](installation.md) | Accurate setup instructions for the current repo layout |
+| [Usage Guide](usage.md) | How to run OpenCAS and use its operator surfaces |
+| [Features](features.md) | Product capabilities and subsystem summary |
+| [Key Terminology](terminology.md) | Definitions for the OpenCAS vocabulary used in docs, code, and the dashboard |
+| [API Reference](api/README.md) | HTTP and WebSocket surfaces exposed by the running server |
 | [Architecture](architecture/README.md) | Runtime structure, loops, persistence, and subsystem boundaries |
-| [Changelog](CHANGELOG.md) | Release notes for this public snapshot |
-| [Website Source](website/index.html) | Static documentation site included with the release |
+| [Changelog](CHANGELOG.md) | Release notes for this documentation bundle |
+| [Release Website](website/index.html) | Standalone release landing page |
 
-The separate GitHub Pages site is maintained at:
+## Current Release Boundaries
 
-```text
-https://es00bac.github.io/OpenCAS_Documentation/
-```
-
-## Media
-
-The release includes an optional architecture video, *OpenCAS: Durable Work Stream*. It is a generated media artifact that walks through several subsystem names and runtime concepts.
+This repo is not yet packaged as a PyPI install. The current `requirements.txt` expects the editable gateway dependency at:
 
 ```text
-https://github.com/Es00bac/OpenCAS_runtime/releases/tag/media-2026-04-14
+../open_llm_auth/
 ```
 
-## Current Boundaries
+The recommended first-run command clones that dependency from:
 
-- This repository is not packaged as a PyPI release.
-- `requirements.txt` expects the editable `open_llm_auth` dependency at `../open_llm_auth/`.
-- The public snapshot should not contain `.opencas`, provider `.env` files, private operator notes, or live state databases.
-- The docs describe the current public snapshot and may lag behind private live development.
+```text
+https://github.com/Es00bac/OpenLLMAuth.git
+```
 
-## Verification
+If you move the repo to another machine or directory layout, update that dependency path or install `open_llm_auth` separately before running OpenCAS.
 
-Useful checks for this snapshot:
+## Verification Checklist
+
+Before calling a release artifact accurate, verify these commands on the current code:
 
 ```bash
 source .venv/bin/activate
@@ -114,6 +120,6 @@ python -m opencas --with-server --accept-bootstrap-responsibility
 pytest tests/test_dashboard_api.py -q
 ```
 
-## License
+## Licensing Note
 
-OpenCAS is released under AGPL-3.0-or-later. See `LICENSE`.
+This checkout does not currently include a root `LICENSE` file. Confirm licensing material before publishing this release bundle externally.

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import shutil
 import subprocess
+import os
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -19,7 +21,7 @@ class ScreenshotBackend:
     def command(self, output_path: Path) -> list[str]:
         target = str(output_path)
         if self.name == "spectacle":
-            return [self.executable, "-b", "-n", "-o", target]
+            return [self.executable, "-f", "-b", "-n", "-o", target]
         if self.name == "grim":
             return [self.executable, target]
         if self.name == "gnome-screenshot":
@@ -51,6 +53,8 @@ def _candidate_backend_names(preferred: str = "auto") -> Iterable[str]:
     cleaned = (preferred or "auto").strip()
     if cleaned and cleaned != "auto":
         return (cleaned,)
+    if str(os.environ.get("XDG_SESSION_TYPE") or "").lower() == "wayland":
+        return tuple(name for name in _BACKEND_ORDER if name != "import")
     return _BACKEND_ORDER
 
 
@@ -107,7 +111,7 @@ def capture_desktop_image(
         except Exception as exc:
             errors.append(f"{candidate.name}: {type(exc).__name__}: {exc}")
             continue
-        if result.returncode == 0 and output_path.exists() and output_path.stat().st_size > 0:
+        if result.returncode == 0 and _wait_for_nonempty_file(output_path):
             return DesktopCapture(success=True, path=output_path, backend=candidate.name)
         stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
         errors.append(f"{candidate.name}: exit {result.returncode}: {stderr.strip()}")
@@ -118,6 +122,21 @@ def capture_desktop_image(
         backend=backend,
         error="; ".join(error for error in errors if error) or "no screenshot backend available",
     )
+
+
+def _wait_for_nonempty_file(path: Path, *, timeout_seconds: float = 2.0) -> bool:
+    """Return true once a backend has produced a non-empty image file."""
+
+    deadline = time.monotonic() + max(0.0, timeout_seconds)
+    while True:
+        try:
+            if path.exists() and path.stat().st_size > 0:
+                return True
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
 
 
 def run_tesseract_ocr(

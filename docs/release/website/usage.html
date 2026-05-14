@@ -17,7 +17,7 @@
     <div class="site-shell">
       <a class="brand" href="index.html">
         <span class="brand-mark mono">O</span>
-        <span>OpenCAS Documentation</span>
+        <span>OpenCAS Release</span>
       </a>
       <nav class="nav-links">
         <a href="index.html">Home</a>
@@ -44,6 +44,7 @@
         <a href="#launch">Launch modes</a>
         <a href="#dashboard">Dashboard tabs</a>
         <a href="#chat">Chat lane</a>
+        <a href="#body-double">Body Double</a>
         <a href="#memory">Memory and daydream</a>
         <a href="#channels">Channels</a>
         <a href="#operations">Operations and control planes</a>
@@ -54,7 +55,7 @@
           <h3>Launch modes</h3>
           <pre><code>python -m opencas --with-server --accept-bootstrap-responsibility</code></pre>
           <p>This is the primary operator mode. It serves the dashboard and the HTTP/WebSocket APIs on <code>127.0.0.1:8080</code> by default.</p>
-          <p>The acknowledgement flag is required only for non-TUI fresh bootstraps. It makes the first-boot boundary explicit: OpenCAS creates persistent state for the agent, and deleting the state directory deletes that continuity.</p>
+          <p>The acknowledgement flag is required only for non-TUI fresh bootstraps. It makes the first-boot boundary explicit: OpenCAS creates persistent continuity, not a disposable chat session, and deleting the state directory deletes that agent's continuity.</p>
           <pre><code>python -m opencas --tui</code></pre>
           <p>Use the TUI when you need to set up or change provider material, model selection, Telegram settings, or copied credential material.</p>
         </section>
@@ -99,10 +100,37 @@
           </ul>
         </section>
 
+        <section class="page-card" id="body-double">
+          <h3>Body Double media context</h3>
+          <p>
+            The desktop-context Body Double tools can capture a screenshot/OCR observation, inspect MPRIS media state, retrieve YouTube transcript evidence, and optionally run local Whisper on short windows of currently playing audio.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Setting</th>
+                  <th>Purpose</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr><td><code>youtube_transcripts_enabled</code></td><td>Use prefetched YouTube transcripts when a playable YouTube URL is detected.</td></tr>
+                <tr><td><code>live_transcription_enabled</code></td><td>Use local Whisper on currently playing system audio.</td></tr>
+                <tr><td><code>live_transcription_capture_seconds</code></td><td>Audio window length for each live transcription pass.</td></tr>
+                <tr><td><code>live_transcription_audio_input</code></td><td>Optional Pulse/PipeWire monitor source passed to <code>ffmpeg</code>.</td></tr>
+                <tr><td><code>live_transcription_whisper_model</code></td><td>Whisper CLI model name; default is <code>base</code>.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p>
+            The media path skips live transcription for paused media and for ambiguous cases with multiple playing media targets. When both transcript sources exist, the prefetched transcript is the timestamped map and the live Whisper excerpt is the current heard segment.
+          </p>
+        </section>
+
         <section class="page-card" id="memory">
           <h3>Memory and daydream behavior</h3>
           <p>
-            OpenCAS uses provider-backed embeddings by default for semantic memory retrieval. Artifact-backed autobiographical memory is also part of the current system, which means authored plans and stories can be ingested into retrieval instead of only being found as raw files.
+            OpenCAS uses provider-backed embeddings by default for semantic memory retrieval. Artifact-backed autobiographical memory is also part of the current system, which means authored plans and stories can be ingested into recall instead of only being found as raw files.
           </p>
           <div class="grid cols-2">
             <article class="content-card">
@@ -145,7 +173,7 @@
             <li>Use the System tab to confirm the effective provider/model configuration before assuming a lane is active.</li>
           </ul>
           <div class="callout">
-            <strong>Operator check.</strong> When something looks wrong in chat, verify the active lane in the Chat panel and the effective runtime model in the System panel.
+            <strong>Troubleshooting note.</strong> When something looks wrong in chat, verify the active lane in the Chat panel and the effective runtime model in the System panel before assuming the dashboard is wrong.
           </div>
         </section>
       </div>

@@ -17,7 +17,7 @@
     <div class="site-shell">
       <a class="brand" href="index.html">
         <span class="brand-mark mono">O</span>
-        <span>OpenCAS Documentation</span>
+        <span>OpenCAS Release</span>
       </a>
       <nav class="nav-links">
         <a href="index.html">Home</a>
@@ -34,7 +34,7 @@
     <section class="page-hero">
       <span class="eyebrow">Features</span>
       <h1>Subsystems that are present in the current code.</h1>
-      <p class="section-lead">This page describes the capabilities present in the current public snapshot, including voice, phone, schedule, platform, and telemetry surfaces.</p>
+      <p class="section-lead">This page avoids aspirational claims and external comparisons. It describes the capabilities that exist now, including the newer voice, phone, schedule, platform, and telemetry surfaces.</p>
     </section>
 
     <div class="content-stack">
@@ -60,7 +60,7 @@
         </article>
         <article class="content-card">
           <h3>Relational state</h3>
-          <p>Musubi tracking and user/self-model state surfaces used by retrieval, approval, and identity logic.</p>
+          <p>Musubi tracking and user/self-model continuity surfaces that influence interpretation and tone.</p>
         </article>
         <article class="content-card">
           <h3>Executive state</h3>
@@ -86,11 +86,11 @@
       <section class="grid cols-3">
         <article class="content-card">
           <h3>Execution and salvage</h3>
-          <p>Lane-limited BAA work, receipts, retry governance, and salvage-aware recovery that preserves blocked and resumable state.</p>
+          <p>Lane-limited BAA work, receipts, retry governance, and salvage-aware recovery that preserves blocked-vs-resumable state.</p>
         </article>
         <article class="content-card">
           <h3>Scheduling</h3>
-          <p>Durable task and reminder schedules, calendar views, and run history.</p>
+          <p>Durable task and reminder schedules, calendar views, and run history without pretending every event is a chat turn.</p>
         </article>
         <article class="content-card">
           <h3>Platform and trust</h3>
@@ -104,12 +104,27 @@
           <p>Session history, lane metadata, microphone transcription, and spoken reply synthesis in the dashboard chat surface.</p>
         </article>
         <article class="content-card">
+          <h3>Desktop context</h3>
+          <p>Body Double observations combine screenshot/OCR evidence, MPRIS media state, retrieved YouTube transcripts, and optional local Whisper transcription of currently playing audio.</p>
+        </article>
+        <article class="content-card">
           <h3>Phone bridge</h3>
           <p>Twilio-backed owner and caller handling with workspace separation, screening, and recent-call inspection.</p>
         </article>
+      </section>
+
+      <section class="grid cols-3">
         <article class="content-card">
           <h3>Telegram</h3>
           <p>Persisted Telegram configuration, pairing and DM policy control, typing indicators, and edited replies.</p>
+        </article>
+        <article class="content-card">
+          <h3>Media timing</h3>
+          <p>Media observations track play, pause, stop, resume, seek, and new-media transitions before deciding whether commentary is current enough to speak.</p>
+        </article>
+        <article class="content-card">
+          <h3>Transcript fusion</h3>
+          <p>Prefetched transcripts provide the timestamped map; live Whisper excerpts provide the current heard segment for livestreams and active playback.</p>
         </article>
       </section>
 
@@ -138,9 +153,9 @@
       </section>
 
       <section class="page-card">
-        <h3>Release media</h3>
+        <h3>Included media assets</h3>
         <p>
-          The release includes a generated architecture video. It references subsystem names such as cold boot, memory fabric, bounded execution, and durable work streams.
+          The release bundle includes images and a video asset that describe parts of the system. They are optional documentation artifacts and are not required to install, configure, or run OpenCAS.
         </p>
         <div class="media-grid">
           <figure class="media-thumb">

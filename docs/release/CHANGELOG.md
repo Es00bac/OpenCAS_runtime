@@ -2,7 +2,7 @@
 
 All notable release-doc changes for the current OpenCAS repo are recorded here.
 
-The goal of this changelog is to describe observable release changes accurately.
+The goal of this changelog is accuracy.
 
 ## [0.1.1] - 2026-04-19
 
@@ -24,8 +24,9 @@ The goal of this changelog is to describe observable release changes accurately.
 
 - State and control surfaces are local.
 - Chat, voice, and embedding lanes normally use configured providers through `open_llm_auth`.
-- The current repo is a local-state autonomous agent runtime with provider-routed model execution and dashboard/API operator surfaces.
+- The current repo is described as a local-state autonomous agent with provider-flexible model execution and operator control surfaces.
 
 ## Unreleased
 
-- Future release-note entries go here as the release bundle evolves.
+- Body Double documentation now covers media-state tracking, prefetched YouTube transcripts, optional local Whisper live transcription, livestream following, and paused/ambiguous-media behavior.
+- Public-facing README and website copy was adjusted toward factual project documentation and away from release-video promotional framing.

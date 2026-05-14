@@ -29,7 +29,11 @@ def register_skills(skill_registry, tools) -> None:
     )
     tools.register(
         "desktop_context_configure",
-        "Enable, disable, or tune the desktop context body-double skill. Disabled by default for privacy.",
+        (
+            "Enable, disable, or tune the desktop context body-double skill. Body Double mode means "
+            "desktop_context enabled=true. If the operator asks to turn on Body Double, call this "
+            "tool with enabled=true before setting or relying on a task."
+        ),
         adapter,
         ActionRiskTier.WORKSPACE_WRITE,
         {
@@ -45,9 +49,70 @@ def register_skills(skill_registry, tools) -> None:
                 "capture_backend": {"type": "string"},
                 "vision_model": {"type": "string"},
                 "session_id": {"type": "string"},
+                "declared_task": {
+                    "type": "string",
+                    "description": "Explicit operator task for body-double coaching. Empty clears the task.",
+                },
+                "declared_task_source": {"type": "string"},
+                "speech_relevance_threshold": {
+                    "type": "number",
+                    "description": "Minimum relevance score for non-task spoken observations when no task is declared.",
+                },
+                "youtube_transcripts_enabled": {
+                    "type": "boolean",
+                    "description": "When playing YouTube media is detected, retrieve transcript evidence with yt-dlp when possible.",
+                },
+                "youtube_transcript_max_chars": {"type": "integer"},
+                "yt_dlp_path": {"type": "string"},
+                "live_transcription_enabled": {
+                    "type": "boolean",
+                    "description": "Capture short chunks of currently playing system audio and transcribe them with local Whisper for live media following.",
+                },
+                "live_transcription_capture_seconds": {"type": "number"},
+                "live_transcription_min_interval_seconds": {"type": "number"},
+                "live_transcription_max_chars": {"type": "integer"},
+                "live_transcription_whisper_model": {"type": "string"},
+                "live_transcription_audio_input": {
+                    "type": "string",
+                    "description": "Optional Pulse/PipeWire monitor source for ffmpeg, such as alsa_output.device.monitor.",
+                },
+                "live_transcription_ffmpeg_path": {"type": "string"},
+                "live_transcription_whisper_path": {"type": "string"},
+                "live_transcription_timeout_seconds": {"type": "integer"},
+                "media_commentary_mode_enabled": {
+                    "type": "boolean",
+                    "description": "Enable ongoing media/YouTube co-watching commentary while Body Double is active.",
+                },
+                "media_commentary_source": {"type": "string"},
+                "media_commentary_request": {"type": "string"},
                 "max_image_bytes": {"type": "integer"},
                 "vision_max_dimension": {"type": "integer"},
                 "vision_jpeg_quality": {"type": "integer"},
+            },
+            "required": [],
+        },
+    )
+    tools.register(
+        "desktop_context_set_task",
+        (
+            "Set or clear the explicit operator task used for body-double coaching. This does not "
+            "enable desktop observation by itself; call desktop_context_configure with enabled=true "
+            "when the operator asks to turn on Body Double. Without a declared task, the body double "
+            "observes silently unless the screen shows a concrete relevant issue."
+        ),
+        adapter,
+        ActionRiskTier.WORKSPACE_WRITE,
+        {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "Task the operator wants body-double support for. Empty string clears the task.",
+                },
+                "source": {
+                    "type": "string",
+                    "description": "Where the task declaration came from. Defaults to operator.",
+                },
             },
             "required": [],
         },

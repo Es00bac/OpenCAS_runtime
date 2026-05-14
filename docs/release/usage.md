@@ -1,15 +1,15 @@
 # OpenCAS Usage Guide
 
-## Primary Operator Path
+## Recommended Operator Path
 
-The current repo is normally operated through the dashboard and API server:
+The current repo is best operated through the dashboard and API server:
 
 ```bash
 source .venv/bin/activate
 python -m opencas --with-server --accept-bootstrap-responsibility
 ```
 
-The acknowledgement flag is required only for non-TUI fresh bootstraps. It makes the first-boot boundary explicit: OpenCAS creates persistent state for the agent, and deleting the state directory deletes that continuity. Later launches against an existing state directory do not require the flag.
+The acknowledgement flag is required only for non-TUI fresh bootstraps. It makes the first-boot boundary explicit: OpenCAS creates persistent continuity, not a disposable chat session, and deleting the state directory deletes that agent's continuity. Later launches against an existing state directory do not require the flag.
 
 Default address:
 
@@ -76,6 +76,27 @@ High-value current flags:
 - Older assistant messages that predate lane metadata should be treated as legacy historical entries.
 - The chat context panel also surfaces somatic state, current work, executive intent, and recent background-task counts.
 - Voice controls let the operator record a prompt, transcribe it, and synthesize spoken replies when configured.
+
+## Desktop Context / Body Double
+
+The Body Double plugin is exposed through the `desktop_context_*` tools. It can take a screenshot/OCR observation, inspect current MPRIS media state, retrieve a YouTube transcript when available, and optionally transcribe the currently playing audio with local Whisper.
+
+Relevant configuration keys:
+
+| Key | Meaning |
+| --- | --- |
+| `enabled` | Enables desktop-context observations. |
+| `media_commentary_mode_enabled` | Allows ongoing media commentary observations after a video-commentary request. |
+| `youtube_transcripts_enabled` | Retrieves prefetched YouTube transcript evidence when a YouTube URL is detected. |
+| `live_transcription_enabled` | Captures short currently playing audio windows and transcribes them with local Whisper. |
+| `live_transcription_capture_seconds` | Length of each audio window. Default: `6`. |
+| `live_transcription_min_interval_seconds` | Minimum interval before another live audio transcription for the same media target. Default: `12`. |
+| `live_transcription_audio_input` | Optional Pulse/PipeWire monitor source for `ffmpeg`; when empty OpenCAS tries the default sink monitor. |
+| `live_transcription_whisper_model` | Whisper CLI model name. Default: `base`. |
+
+For media commentary, the service only uses live transcription for a currently playing media target. It skips live transcription when the video is paused, stopped, or when multiple media items are playing and the target is ambiguous.
+
+When both prefetched and live transcripts exist, the prefetched transcript is used as the timestamped map and the live Whisper excerpt is used as the current heard segment. This is the path used for livestream following and for checking that commentary is aligned to the current moment rather than an older or future part of a transcript.
 
 ## Memory And Recall
 
@@ -164,7 +185,7 @@ The Logs tab is the event stream when you need to answer “what happened?” qu
 6. Use Schedule when debugging recurring work or missed runs.
 7. Use Platform when debugging extension installation or trust policy issues.
 8. Use Logs when you need the raw event sequence.
-9. Use Usage when debugging spend, model routing, or rate-limit surprises.
+9. Use Usage when debugging spend or rate-limit surprises.
 
 ## Stopping OpenCAS
 

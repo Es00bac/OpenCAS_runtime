@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-if TYPE_CHECKING:
-    from opencas.memory import Episode, Memory
+MAX_CONTINUATION_HANDLES_PER_MESSAGE = 8
+MAX_RETRIEVAL_CUES_PER_CONTINUATION_HANDLE = 6
 
 
 class MessageRole(str, Enum):
@@ -33,6 +33,31 @@ class MessageEntry(BaseModel):
     meta: Dict[str, Any] = Field(default_factory=dict)
 
 
+class ContinuationHandle(BaseModel):
+    """Exact continuation handle preserved across compaction boundaries."""
+
+    tool_name: Optional[str] = None
+    kind: Optional[str] = None
+    session_id: Optional[str] = None
+    path: Optional[str] = None
+    checksum: Optional[str] = None
+    task_id: Optional[str] = None
+    schedule_id: Optional[str] = None
+    receipt_id: Optional[str] = None
+    plan_id: Optional[str] = None
+    source_episode_id: Optional[str] = None
+    episode_id: Optional[str] = None
+    retrieval_cues: List[str] = Field(default_factory=list)
+
+
+class ContinuationPacket(BaseModel):
+    """Structured continuation data that must be rendered back into prompts."""
+
+    version: int = 1
+    source_episode_count: Optional[int] = None
+    handles: List[ContinuationHandle] = Field(default_factory=list)
+
+
 class RetrievalResult(BaseModel):
     """A single retrieved memory or episode snippet for context injection."""
 
@@ -52,6 +77,9 @@ class ContextManifest(BaseModel):
     history: List[MessageEntry] = Field(default_factory=list)
     retrieved: List[MessageEntry] = Field(default_factory=list)
     token_estimate: Optional[int] = None
+    token_budget: Optional[int] = None
+    context_window: Optional[int] = None
+    context_budget: Dict[str, Any] = Field(default_factory=dict)
 
     def to_message_list(self) -> List[Dict[str, Any]]:
         """Convert manifest to OpenAI-style message list."""
@@ -71,7 +99,7 @@ class ContextManifest(BaseModel):
             if entry.meta.get("hidden"):
                 continue
             if entry.role == MessageRole.SYSTEM:
-                history_system_content.append(entry.content)
+                history_system_content.append(self.render_entry_content_for_prompt(entry))
 
         if history_system_content:
             system_content.append("\n\n".join(history_system_content))
@@ -86,7 +114,7 @@ class ContextManifest(BaseModel):
                 continue
             msg: Dict[str, Any] = {
                 "role": entry.role.value,
-                "content": self._render_entry_content(entry),
+                "content": self.render_entry_content_for_prompt(entry),
             }
             if entry.role == MessageRole.TOOL:
                 msg["tool_call_id"] = entry.meta.get("tool_call_id", "")
@@ -97,9 +125,19 @@ class ContextManifest(BaseModel):
         return repair_tool_message_sequence(messages)
 
     @staticmethod
-    def _render_entry_content(entry: MessageEntry) -> str:
-        if entry.role != MessageRole.USER:
-            return entry.content
+    def render_entry_content_for_prompt(entry: MessageEntry) -> str:
+        content = entry.content
+        if entry.role == MessageRole.USER:
+            content = ContextManifest._render_user_content(entry)
+        continuation_block = ContextManifest._render_continuation_packet(
+            entry.meta.get("continuation_packet")
+        )
+        if continuation_block and "Continuation handles:" not in content:
+            content = f"{content}\n{continuation_block}" if content else continuation_block
+        return content
+
+    @staticmethod
+    def _render_user_content(entry: MessageEntry) -> str:
         attachments = entry.meta.get("attachments") or []
         if not attachments:
             return entry.content
@@ -131,6 +169,146 @@ class ContextManifest(BaseModel):
             location = attachment.get("url") or attachment.get("path") or filename
             parts.append(f"[Attached file: {filename} ({media_type}) available at {location}]")
         return "\n\n".join(part for part in parts if part)
+
+    @staticmethod
+    def _render_continuation_packet(packet_data: Any) -> str:
+        packet = ContextManifest._parse_continuation_packet(packet_data)
+        if packet is None or not packet.handles:
+            return ""
+        lines = ["Continuation handles:"]
+        ranked_handles = ContextManifest._rank_continuation_handles(packet.handles)
+        rendered_handles = ranked_handles[:MAX_CONTINUATION_HANDLES_PER_MESSAGE]
+        for handle in rendered_handles:
+            parts: List[str] = []
+            for key in (
+                "path",
+                "checksum",
+                "source_episode_id",
+                "episode_id",
+                "tool_name",
+                "kind",
+                "session_id",
+                "task_id",
+                "schedule_id",
+                "receipt_id",
+                "plan_id",
+            ):
+                value = getattr(handle, key)
+                if value:
+                    parts.append(f"{key}={value}")
+            if handle.retrieval_cues:
+                parts.append(
+                    "retrieval_cues="
+                    + ", ".join(
+                        ContextManifest._rank_continuation_retrieval_cues(
+                            handle.retrieval_cues
+                        )[:MAX_RETRIEVAL_CUES_PER_CONTINUATION_HANDLE]
+                    )
+                )
+            if parts:
+                lines.append(f"- {'; '.join(parts)}")
+        if len(packet.handles) > len(rendered_handles):
+            lines.append(
+                f"- ... {len(packet.handles) - len(rendered_handles)} more handle(s) in continuation_packet metadata"
+            )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _rank_continuation_handles(
+        handles: List[ContinuationHandle],
+    ) -> List[ContinuationHandle]:
+        indexed = list(enumerate(handles))
+        indexed.sort(
+            key=lambda item: (
+                -ContextManifest._continuation_handle_priority(item[1]),
+                item[0],
+            )
+        )
+        return [handle for _index, handle in indexed]
+
+    @staticmethod
+    def _continuation_handle_priority(handle: ContinuationHandle) -> int:
+        score = 0
+        if handle.path:
+            score += 8
+        if handle.checksum:
+            score += 6
+        if handle.source_episode_id or handle.episode_id:
+            score += 5
+        cues = handle.retrieval_cues or []
+        if any(str(cue).startswith("path:") for cue in cues):
+            score += 4
+        if any(str(cue).startswith("checksum:") for cue in cues):
+            score += 3
+        if any(str(cue).startswith("episode:") for cue in cues):
+            score += 3
+        return score
+
+    @staticmethod
+    def _rank_continuation_retrieval_cues(cues: List[str]) -> List[str]:
+        priority_prefixes = ("path:", "checksum:", "episode:")
+
+        def cue_priority(item: tuple[int, str]) -> tuple[int, int]:
+            index, cue = item
+            for priority, prefix in enumerate(priority_prefixes):
+                if cue.startswith(prefix):
+                    return (priority, index)
+            return (len(priority_prefixes), index)
+
+        return [cue for _index, cue in sorted(enumerate(cues), key=cue_priority)]
+
+    @staticmethod
+    def _parse_continuation_packet(packet_data: Any) -> Optional[ContinuationPacket]:
+        if isinstance(packet_data, ContinuationPacket):
+            return packet_data
+        if not isinstance(packet_data, dict):
+            return None
+
+        handles: List[ContinuationHandle] = []
+        for raw_handle in list(packet_data.get("handles") or []):
+            if not isinstance(raw_handle, dict):
+                continue
+            source_episode_id = raw_handle.get("source_episode_id") or raw_handle.get("episode_id")
+            retrieval_cues = raw_handle.get("retrieval_cues") or []
+            if not isinstance(retrieval_cues, list):
+                retrieval_cues = [str(retrieval_cues)]
+            handles.append(
+                ContinuationHandle(
+                    tool_name=_string_or_none(raw_handle.get("tool_name")),
+                    kind=_string_or_none(raw_handle.get("kind")),
+                    session_id=_string_or_none(raw_handle.get("session_id")),
+                    path=_string_or_none(raw_handle.get("path")),
+                    checksum=_string_or_none(raw_handle.get("checksum")),
+                    task_id=_string_or_none(raw_handle.get("task_id")),
+                    schedule_id=_string_or_none(raw_handle.get("schedule_id")),
+                    receipt_id=_string_or_none(raw_handle.get("receipt_id")),
+                    plan_id=_string_or_none(raw_handle.get("plan_id")),
+                    source_episode_id=_string_or_none(source_episode_id),
+                    episode_id=_string_or_none(raw_handle.get("episode_id")),
+                    retrieval_cues=[
+                        cue for cue in (_string_or_none(cue) for cue in retrieval_cues) if cue
+                    ],
+                )
+            )
+        if not handles:
+            return None
+        source_episode_count = packet_data.get("source_episode_count")
+        try:
+            source_episode_count = int(source_episode_count) if source_episode_count is not None else None
+        except (TypeError, ValueError):
+            source_episode_count = None
+        return ContinuationPacket(
+            version=int(packet_data.get("version") or 1),
+            source_episode_count=source_episode_count,
+            handles=handles,
+        )
+
+
+def _string_or_none(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value)
+    return text if text else None
 
 
 def repair_tool_message_sequence(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

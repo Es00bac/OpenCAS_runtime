@@ -62,10 +62,12 @@ class DriftObservation(BaseModel):
     reason: str
     severity: str = "notice"
     route: str = "observe"
+    addressed_by_outcome_id: str = ""
+    addressed_at: datetime | None = None
     grounding: list[CognitionGrounding] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)
 
-    @field_validator("reason", "severity", "route")
+    @field_validator("reason", "severity", "route", "addressed_by_outcome_id")
     @classmethod
     def _normalize_text(cls, value: str) -> str:
         return " ".join(str(value or "").split())
@@ -119,6 +121,74 @@ class ToolUseInspection(BaseModel):
         return [str(item) for item in value if str(item or "").strip()]
 
 
+class ToolCallTransit(BaseModel):
+    """Mechanical transit evidence for one tool call inside a chain."""
+
+    chain_id: str
+    call_id: str
+    tool_name: str
+    entry_intent: str
+    trust_context: str = "unknown"
+    success: bool = False
+    duration_ms: int = Field(default=0, ge=0)
+    result_shape: dict[str, Any] = Field(default_factory=dict)
+    certainty_delta: float = Field(default=0.0, ge=-1.0, le=1.0)
+    somatic_delta: dict[str, float] = Field(default_factory=dict)
+    task_mutation: bool = False
+    grounding: list[CognitionGrounding] = Field(default_factory=list)
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("chain_id", "call_id", "tool_name", "entry_intent", "trust_context")
+    @classmethod
+    def _normalize_text(cls, value: str) -> str:
+        return " ".join(str(value or "").split())
+
+    @field_validator("result_shape", "somatic_delta", "meta", mode="before")
+    @classmethod
+    def _normalize_mapping(cls, value: Any) -> dict[str, Any]:
+        return dict(value or {}) if isinstance(value, dict) else {}
+
+
+class ToolChainTransitSummary(BaseModel):
+    """Derived contour for a tool chain, anchored to concrete call IDs."""
+
+    chain_id: str
+    objective: str = ""
+    entry_intent: str = ""
+    trust_context: str = "unknown"
+    call_ids: list[str] = Field(default_factory=list)
+    call_count: int = Field(default=0, ge=0)
+    success_count: int = Field(default=0, ge=0)
+    failure_count: int = Field(default=0, ge=0)
+    total_duration_ms: int = Field(default=0, ge=0)
+    result_shape_counts: dict[str, int] = Field(default_factory=dict)
+    certainty_delta: float = Field(default=0.0, ge=-1.0, le=1.0)
+    somatic_delta: dict[str, float] = Field(default_factory=dict)
+    load_type: str = "none"
+    intent_drift_score: float = Field(default=0.0, ge=0.0, le=1.0)
+    meaning_scope: str = "private_operational_evidence"
+    undercoupled_somatic: bool = False
+    grounding: list[CognitionGrounding] = Field(default_factory=list)
+    meta: dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("chain_id", "objective", "entry_intent", "trust_context", "load_type", "meaning_scope")
+    @classmethod
+    def _normalize_text(cls, value: str) -> str:
+        return " ".join(str(value or "").split())
+
+    @field_validator("call_ids", mode="before")
+    @classmethod
+    def _normalize_call_ids(cls, value: Any) -> list[str]:
+        if not isinstance(value, list):
+            return []
+        return [str(item) for item in value if str(item or "").strip()]
+
+    @field_validator("result_shape_counts", "somatic_delta", "meta", mode="before")
+    @classmethod
+    def _normalize_mapping(cls, value: Any) -> dict[str, Any]:
+        return dict(value or {}) if isinstance(value, dict) else {}
+
+
 class CommitmentGap(BaseModel):
     """A compact record of a promised/done/not-yet-linked gap."""
 
@@ -147,6 +217,8 @@ class SelfInspectionRecord(BaseModel):
     drift_observations: list[DriftObservation] = Field(default_factory=list)
     valence_sources: list[ValenceSourceTag] = Field(default_factory=list)
     tool_use_inspections: list[ToolUseInspection] = Field(default_factory=list)
+    tool_call_transits: list[ToolCallTransit] = Field(default_factory=list)
+    tool_chain_summary: ToolChainTransitSummary | None = None
     commitment_gaps: list[CommitmentGap] = Field(default_factory=list)
     grounding: list[CognitionGrounding] = Field(default_factory=list)
     meta: dict[str, Any] = Field(default_factory=dict)
@@ -297,6 +369,8 @@ def build_post_turn_self_inspection_record(
     captured_commitments: list[Any] | None = None,
     integrity_review: dict[str, Any] | None = None,
     tool_use_inspections: list[ToolUseInspection] | None = None,
+    tool_call_transits: list[ToolCallTransit] | None = None,
+    tool_chain_summary: ToolChainTransitSummary | None = None,
     pre_somatic_state: Any | None = None,
     post_somatic_state: Any | None = None,
     recent_records: list[SelfInspectionRecord] | None = None,
@@ -329,6 +403,8 @@ def build_post_turn_self_inspection_record(
         drift_observations=drift,
         valence_sources=valence_sources,
         tool_use_inspections=list(tool_use_inspections or []),
+        tool_call_transits=list(tool_call_transits or []),
+        tool_chain_summary=tool_chain_summary,
         commitment_gaps=gaps,
         grounding=[
             CognitionGrounding(
@@ -455,6 +531,65 @@ def build_tool_use_inspections(
             )
         )
     return inspections
+
+
+def build_tool_chain_transit_summary(
+    *,
+    objective: str,
+    chain_id: str,
+    call_transits: list[ToolCallTransit] | None = None,
+) -> ToolChainTransitSummary:
+    """Derive a chain contour from concrete tool-call transit records."""
+
+    calls = [call for call in list(call_transits or []) if call.chain_id == chain_id]
+    call_ids = [call.call_id for call in calls]
+    success_count = sum(1 for call in calls if call.success)
+    failure_count = len(calls) - success_count
+    certainty_delta = round(max(-1.0, min(1.0, sum(call.certainty_delta for call in calls))), 3)
+    result_shape_counts = _count_result_shape_tags(calls)
+    somatic_delta = _sum_transit_somatic_delta(calls)
+    entry_intents = [call.entry_intent for call in calls if call.entry_intent]
+    entry_intent = entry_intents[0] if entry_intents else _excerpt(objective, 240)
+    trust_context = _most_common([call.trust_context for call in calls if call.trust_context]) or "unknown"
+    intent_drift_score = _intent_drift_score(entry_intents)
+    undercoupled_somatic = _is_undercoupled_somatic(
+        call_count=len(calls),
+        certainty_delta=certainty_delta,
+        somatic_delta=somatic_delta,
+    )
+    return ToolChainTransitSummary(
+        chain_id=chain_id,
+        objective=_excerpt(objective, 240),
+        entry_intent=entry_intent,
+        trust_context=trust_context,
+        call_ids=call_ids,
+        call_count=len(calls),
+        success_count=success_count,
+        failure_count=failure_count,
+        total_duration_ms=sum(call.duration_ms for call in calls),
+        result_shape_counts=result_shape_counts,
+        certainty_delta=certainty_delta,
+        somatic_delta=somatic_delta,
+        load_type=_infer_transit_load_type(
+            result_shape_counts=result_shape_counts,
+            certainty_delta=certainty_delta,
+            failure_count=failure_count,
+        ),
+        intent_drift_score=intent_drift_score,
+        meaning_scope=_infer_meaning_scope(trust_context),
+        undercoupled_somatic=undercoupled_somatic,
+        grounding=[
+            CognitionGrounding(
+                kind=GroundingKind.DERIVED,
+                source=GroundingSource.RUNTIME,
+                claim="Tool chain transit summary derived from concrete tool-call transit records.",
+                subject="tool_chain_transit",
+                evidence_ids=call_ids,
+                confidence=0.84 if call_ids else 0.35,
+            )
+        ],
+        meta={"source": "tool_call_transits"},
+    )
 
 
 def _borrowed_operator_interface_observation(
@@ -629,6 +764,80 @@ def _somatic_delta(pre_state: Any | None, post_state: Any | None) -> dict[str, f
         if abs(change) >= 0.01:
             delta[key] = change
     return delta
+
+
+def _count_result_shape_tags(calls: list[ToolCallTransit]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for call in calls:
+        tags = call.result_shape.get("tags") if isinstance(call.result_shape, dict) else None
+        if not isinstance(tags, list):
+            continue
+        for tag in tags:
+            normalized = "_".join(str(tag or "").strip().lower().split())
+            if not normalized:
+                continue
+            counts[normalized] = counts.get(normalized, 0) + 1
+    return counts
+
+
+def _sum_transit_somatic_delta(calls: list[ToolCallTransit]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for call in calls:
+        for key, value in call.somatic_delta.items():
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            totals[key] = round(totals.get(key, 0.0) + parsed, 3)
+    return {key: value for key, value in totals.items() if abs(value) >= 0.01}
+
+
+def _most_common(items: list[str]) -> str:
+    if not items:
+        return ""
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item] = counts.get(item, 0) + 1
+    return max(counts.items(), key=lambda pair: pair[1])[0]
+
+
+def _intent_drift_score(entry_intents: list[str]) -> float:
+    unique = {" ".join(item.lower().split()) for item in entry_intents if item}
+    if len(unique) <= 1:
+        return 0.0
+    return round(min(1.0, (len(unique) - 1) / max(1, len(entry_intents))), 3)
+
+
+def _is_undercoupled_somatic(
+    *,
+    call_count: int,
+    certainty_delta: float,
+    somatic_delta: dict[str, float],
+) -> bool:
+    if call_count < 2 or abs(certainty_delta) < 0.03:
+        return False
+    tension = abs(float(somatic_delta.get("tension", 0.0) or 0.0))
+    fatigue = abs(float(somatic_delta.get("fatigue", 0.0) or 0.0))
+    return tension < 0.01 and fatigue < 0.01
+
+
+def _infer_transit_load_type(
+    *,
+    result_shape_counts: dict[str, int],
+    certainty_delta: float,
+    failure_count: int,
+) -> str:
+    if failure_count or result_shape_counts.get("blocked") or result_shape_counts.get("retry"):
+        return "operational"
+    if certainty_delta < -0.02 or result_shape_counts.get("ambiguous"):
+        return "cognitive"
+    return "cognitive" if result_shape_counts else "none"
+
+
+def _infer_meaning_scope(trust_context: str) -> str:
+    if trust_context == "operator_requested":
+        return "potential_shared_meaning"
+    return "private_operational_evidence"
 
 
 def _excerpt(text: str, limit: int) -> str:

@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import random
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from opencas.execution.lanes import CommandLane, LaneConfig, LaneManager
 from opencas.runtime.consolidation_state import (
     consolidation_delay_until_due,
+    consolidation_runtime_state_payload,
+    load_consolidation_runtime_state,
     persist_consolidation_runtime_state,
 )
+from opencas.runtime.consolidation_worker import load_consolidation_worker_status
 from opencas.runtime.readiness import AgentReadiness, ReadinessState
 from opencas.telemetry import EventKind, Tracer
 
@@ -29,6 +35,7 @@ class AgentScheduler:
         daydream_interval: int = 720,
         schedule_interval: int = 60,
         wellbeing_interval: float = 1800,
+        identity_heartbeat_interval: float = 60,
         readiness: Optional[AgentReadiness] = None,
         tracer: Optional[Tracer] = None,
         lane_manager: Optional[LaneManager] = None,
@@ -38,9 +45,17 @@ class AgentScheduler:
         consolidation_budget: Optional[Dict[str, Any]] = None,
         consolidation_retry_attempts: int = 3,
         consolidation_retry_base_seconds: Optional[float] = None,
+        consolidation_failure_retry_seconds: float = 900.0,
+        consolidation_failure_max_retry_seconds: float = 21600.0,
         initiative_contact_jitter_seconds: int = 180,
         telemetry_retention_days: int = 30,
         telemetry_prune_interval_seconds: int = 86400,
+        workspace_sync_interval_seconds: int = 600,
+        compaction_backlog_interval_seconds: float = 900,
+        nightly_dream_check_interval_seconds: int = 300,
+        nightly_dream_local_hour: int = 3,
+        nightly_dream_timezone: str = "America/Denver",
+        nightly_dream_mode: str = "medium",
     ) -> None:
         self.runtime = runtime
         self.cycle_interval = cycle_interval
@@ -49,6 +64,7 @@ class AgentScheduler:
         self.daydream_interval = daydream_interval
         self.schedule_interval = schedule_interval
         self.wellbeing_interval = max(0.0, float(wellbeing_interval))
+        self.identity_heartbeat_interval = max(0.001, float(identity_heartbeat_interval))
         self.readiness = readiness
         self.tracer = tracer
         self._running = False
@@ -62,11 +78,28 @@ class AgentScheduler:
         self.initiative_contact_jitter_seconds = max(0, int(initiative_contact_jitter_seconds))
         self.telemetry_retention_days = max(1, int(telemetry_retention_days))
         self.telemetry_prune_interval_seconds = max(60, int(telemetry_prune_interval_seconds))
+        self.workspace_sync_interval_seconds = max(60, int(workspace_sync_interval_seconds))
+        self.compaction_backlog_interval_seconds = max(
+            0.001,
+            float(compaction_backlog_interval_seconds),
+        )
+        self.nightly_dream_check_interval_seconds = max(
+            60,
+            int(nightly_dream_check_interval_seconds),
+        )
+        self.nightly_dream_local_hour = max(0, min(23, int(nightly_dream_local_hour)))
+        self.nightly_dream_timezone = str(nightly_dream_timezone or "America/Denver")
+        self.nightly_dream_mode = str(nightly_dream_mode or "medium")
         self.consolidation_retry_attempts = max(1, int(consolidation_retry_attempts))
         self.consolidation_retry_base_seconds = consolidation_retry_base_seconds
+        self.consolidation_failure_retry_seconds = max(0.0, float(consolidation_failure_retry_seconds))
+        self.consolidation_failure_max_retry_seconds = max(
+            self.consolidation_failure_retry_seconds,
+            float(consolidation_failure_max_retry_seconds),
+        )
         self.consolidation_budget = consolidation_budget or {
             "max_seconds": 120,
-            "worker_timeout_seconds": 300,
+            "worker_timeout_seconds": 1800,
             "max_llm_calls": 12,
             "max_cluster_summaries": 6,
             "max_candidates": 100,
@@ -102,6 +135,30 @@ class AgentScheduler:
             await self.runtime.baa.start()
         except Exception as exc:
             self._trace("baa_start_error", {"error": str(exc)})
+
+        backfill_signals = getattr(self.runtime, "backfill_daydream_signal_thread_beads", None)
+        if callable(backfill_signals):
+            try:
+                result = await backfill_signals(limit=50)
+                self._trace("daydream_signal_thread_backfill", result)
+            except Exception as exc:
+                self._trace("daydream_signal_thread_backfill_error", {"error": str(exc)})
+
+        record_shadow_beads = getattr(self.runtime, "record_shadow_registry_thread_beads", None)
+        if callable(record_shadow_beads):
+            try:
+                result = await record_shadow_beads(limit=10)
+                self._trace("shadow_registry_thread_beads", result)
+            except Exception as exc:
+                self._trace("shadow_registry_thread_beads_error", {"error": str(exc)})
+
+        record_capability_drift = getattr(self.runtime, "record_capability_drift_episode", None)
+        if callable(record_capability_drift):
+            try:
+                result = await record_capability_drift()
+                self._trace("capability_drift_episode_recorded", result)
+            except Exception as exc:
+                self._trace("capability_drift_episode_error", {"error": str(exc)})
 
         # Start health monitor if available
         health_monitor = getattr(self.runtime.ctx, "health_monitor", None)
@@ -186,6 +243,33 @@ class AgentScheduler:
             ready = self.readiness.state == ReadinessState.READY
         return ready and not self._focus_mode
 
+    def _readiness_degraded_by_consolidation(self) -> bool:
+        if self.readiness is None or self.readiness.state != ReadinessState.DEGRADED:
+            return False
+        reason = str(getattr(self.readiness, "reason", "") or "").lower()
+        return reason.startswith("consolidation failed:") or reason.startswith(
+            "run_consolidation failed:"
+        )
+
+    def _should_run_consolidation(self) -> bool:
+        """Allow consolidation to recover its own degraded readiness state."""
+        if self._focus_mode and getattr(self, "_focus_mode_since", None):
+            elapsed = (datetime.now(timezone.utc) - self._focus_mode_since).total_seconds()
+            if elapsed > self.focus_mode_timeout_seconds:
+                self._trace("focus_mode_auto_exited", {"elapsed_seconds": elapsed})
+                self.exit_focus_mode()
+        if self._focus_mode:
+            return False
+        if self.readiness is None:
+            return True
+        if self.readiness.state == ReadinessState.READY:
+            return True
+        return self._readiness_degraded_by_consolidation()
+
+    def _mark_consolidation_recovered(self) -> None:
+        if self.readiness is not None and self._readiness_degraded_by_consolidation():
+            self.readiness.ready("consolidation_recovered")
+
     async def _cycle_loop(self) -> None:
         while self._running:
             # Pacing adjustment based on somatic fatigue/overload
@@ -246,14 +330,35 @@ class AgentScheduler:
         except Exception:
             return False
 
-    def _baa_busy(self) -> bool:
+    def _baa_busy(self, *, include_backlog: bool = True) -> bool:
         baa = getattr(self.runtime, "baa", None)
         if baa is None:
             return False
         queue_size = int(getattr(baa, "queue_size", 0) or 0)
         held_size = int(getattr(baa, "held_size", 0) or 0)
         active_count = int(getattr(baa, "active_count", 0) or 0)
-        return (queue_size + held_size + active_count) > 0
+        if include_backlog:
+            return (queue_size + held_size + active_count) > 0
+        return active_count > 0
+
+    def _consolidation_worker_active(self) -> bool:
+        config = getattr(getattr(self.runtime, "ctx", None), "config", None)
+        state_dir = getattr(config, "state_dir", None)
+        if state_dir is None:
+            return False
+        status = load_consolidation_worker_status(state_dir)
+        if str(status.get("status") or "").lower() != "running":
+            return False
+        pid = status.get("pid")
+        if pid is None:
+            return True
+        try:
+            os.kill(int(pid), 0)
+        except ProcessLookupError:
+            return False
+        except (PermissionError, OSError, TypeError, ValueError):
+            return True
+        return True
 
     def _recent_user_activity_active(self) -> bool:
         if self.conversation_quiet_seconds <= 0:
@@ -279,10 +384,14 @@ class AgentScheduler:
         require_idle: bool = False,
         require_quiet_baa: bool = False,
         require_conversation_quiet: bool = False,
+        allow_executive_pause: bool = False,
+        baa_blocks_on_backlog: bool = True,
     ) -> Optional[str]:
-        if self._executive_pause_active():
+        if self._executive_pause_active() and not allow_executive_pause:
             return "executive_recommended_pause"
-        if require_quiet_baa and self._baa_busy():
+        if self._consolidation_worker_active():
+            return "runtime_activity_consolidating"
+        if require_quiet_baa and self._baa_busy(include_backlog=baa_blocks_on_backlog):
             return "baa_busy"
         if require_conversation_quiet and self._recent_user_activity_active():
             return "recent_user_activity"
@@ -347,6 +456,52 @@ class AgentScheduler:
             await asyncio.sleep(base_delay * (2 ** (attempts - 1)))
         return result
 
+    def _persist_failed_consolidation_state(
+        self,
+        runtime_state_dir: Path,
+        result: Dict[str, Any],
+    ) -> None:
+        """Remember failed consolidation attempts so the scheduler learns from them."""
+        now = self._time_source().astimezone(timezone.utc)
+        prior = load_consolidation_runtime_state(runtime_state_dir)
+        prior_result_id = str(prior.get("last_result_id", "") or "").strip().lower()
+        prior_reason = str(prior.get("budget_reason", "") or "").strip().lower()
+        reason = str(result.get("budget_reason") or "").strip().lower()
+        failed_prefixes = (
+            "worker-timeout-",
+            "worker-start-failed-",
+            "worker-failed-",
+            "worker-no-result-",
+        )
+        if prior_result_id.startswith(failed_prefixes) and prior_reason == reason:
+            try:
+                consecutive_failures = int(prior.get("consecutive_failures") or 0) + 1
+            except (TypeError, ValueError):
+                consecutive_failures = 1
+        else:
+            consecutive_failures = 1
+        retry_seconds = self.consolidation_failure_retry_seconds * (
+            2 ** max(0, consecutive_failures - 1)
+        )
+        retry_seconds = min(self.consolidation_failure_max_retry_seconds, retry_seconds)
+        next_retry_after = now + timedelta(seconds=retry_seconds)
+        worker = result.get("worker")
+        worker = worker if isinstance(worker, dict) else {}
+        payload = {
+            "last_attempt_at": now.isoformat(),
+            "last_result_id": result.get("result_id"),
+            "budget_exhausted": result.get("budget_exhausted"),
+            "budget_reason": result.get("budget_reason"),
+            "consecutive_failures": consecutive_failures,
+            "next_retry_after": next_retry_after.isoformat(),
+            "worker_status": worker.get("status"),
+            "worker_error_type": worker.get("error_type"),
+        }
+        last_run_at = prior.get("last_run_at")
+        if last_run_at:
+            payload["last_run_at"] = last_run_at
+        persist_consolidation_runtime_state(runtime_state_dir, payload)
+
     async def _consolidation_loop(self) -> None:
         retry_delay = max(5.0, min(float(self.schedule_interval), 300.0))
         state_dir = getattr(getattr(self.runtime, "ctx", None), "config", None)
@@ -365,7 +520,7 @@ class AgentScheduler:
                 await asyncio.sleep(delay)
             if not self._running:
                 break
-            if not self._should_run_cycle():
+            if not self._should_run_consolidation():
                 await asyncio.sleep(retry_delay)
                 continue
             block_reason = self._background_llm_block_reason(
@@ -381,15 +536,12 @@ class AgentScheduler:
                 result = await self._run_consolidation_with_retries(retry_delay)
                 result_failed = self._consolidation_result_requires_retry(result)
                 if runtime_state_dir is not None and not result_failed:
-                    timestamp = None
-                    if isinstance(result, dict):
-                        timestamp = result.get("timestamp")
                     persist_consolidation_runtime_state(
                         runtime_state_dir,
-                        {
-                            "last_run_at": str(timestamp or self._time_source().isoformat()),
-                            "last_result_id": result.get("result_id") if isinstance(result, dict) else None,
-                        },
+                        consolidation_runtime_state_payload(
+                            result if isinstance(result, dict) else {},
+                            fallback_timestamp=self._time_source().isoformat(),
+                        ),
                     )
                 if isinstance(result, dict) and result.get("budget_exhausted"):
                     self._trace(
@@ -401,6 +553,8 @@ class AgentScheduler:
                         },
                     )
                 if result_failed:
+                    if runtime_state_dir is not None:
+                        self._persist_failed_consolidation_state(runtime_state_dir, result)
                     self._trace("consolidation_failed", result)
                     if self.readiness:
                         reason = result.get("budget_reason") if isinstance(result, dict) else "unknown"
@@ -408,6 +562,7 @@ class AgentScheduler:
                     if self._running:
                         await asyncio.sleep(retry_delay)
                     continue
+                self._mark_consolidation_recovered()
                 self._trace("consolidation_complete", result)
             except Exception as exc:
                 self._trace("consolidation_error", {"error": str(exc)})
@@ -431,9 +586,21 @@ class AgentScheduler:
             try:
                 queue_size = self.runtime.baa.queue_size
                 held_size = self.runtime.baa.held_size
+                released = 0
+                release_held = getattr(self.runtime.baa, "try_release_held", None)
+                if held_size and callable(release_held):
+                    release_result = release_held()
+                    if inspect.isawaitable(release_result):
+                        release_result = await release_result
+                    released = int(release_result or 0)
                 self._trace(
                     "baa_heartbeat",
-                    {"queue_size": queue_size, "held_size": held_size, "lane_queue_depth": queue_size},
+                    {
+                        "queue_size": queue_size,
+                        "held_size": held_size,
+                        "released_held": released,
+                        "lane_queue_depth": queue_size,
+                    },
                 )
             except Exception:
                 pass
@@ -445,21 +612,134 @@ class AgentScheduler:
                 break
             if not self._should_run_cycle():
                 continue
+            executive_paused = self._executive_pause_active()
             block_reason = self._background_llm_block_reason(
                 require_idle=True,
                 require_quiet_baa=True,
                 require_conversation_quiet=True,
+                allow_executive_pause=True,
+                baa_blocks_on_backlog=False,
             )
             if block_reason is not None:
                 self._trace("daydream_skipped", {"reason": block_reason})
                 continue
             try:
-                result = await self.runtime.run_daydream()
+                result = await self.runtime.run_daydream(
+                    force=True,
+                    reflective_only=executive_paused,
+                )
                 self._trace("daydream_complete", result)
             except Exception as exc:
                 self._trace("daydream_error", {"error": str(exc)})
                 if self.readiness:
                     self.readiness.degraded(f"run_daydream failed: {exc}")
+
+    def _nightly_dream_zone(self) -> timezone | ZoneInfo:
+        try:
+            return ZoneInfo(self.nightly_dream_timezone)
+        except ZoneInfoNotFoundError:
+            return timezone.utc
+
+    def _nightly_dream_target_date(self) -> date:
+        zone = self._nightly_dream_zone()
+        local_now = self._time_source().astimezone(zone)
+        target = local_now.date()
+        if local_now.hour < self.nightly_dream_local_hour:
+            target = target - timedelta(days=1)
+        return target
+
+    async def _covered_nightly_dream_dates(self) -> set[str]:
+        store = getattr(self.runtime, "dream_store", None)
+        if store is None or not hasattr(store, "list_recent"):
+            return set()
+        try:
+            recent = await store.list_recent(limit=400)
+        except Exception:
+            return set()
+        zone = self._nightly_dream_zone()
+        covered: set[str] = set()
+        for record in recent:
+            meta = getattr(record, "meta", {}) or {}
+            dream_for_date = str(meta.get("dream_for_date") or "").strip()
+            if dream_for_date:
+                covered.add(dream_for_date[:10])
+                continue
+            created_at = getattr(record, "created_at", None)
+            if isinstance(created_at, datetime):
+                covered.add(created_at.astimezone(zone).date().isoformat())
+        return covered
+
+    def _due_nightly_dream_dates(self, covered: set[str]) -> list[str]:
+        target = self._nightly_dream_target_date()
+        parsed = []
+        for value in covered:
+            try:
+                parsed.append(datetime.fromisoformat(value).date())
+            except ValueError:
+                continue
+        if not parsed:
+            return [target.isoformat()]
+        latest = max(parsed)
+        if latest >= target:
+            return []
+        due = []
+        current = latest + timedelta(days=1)
+        while current <= target:
+            due.append(current.isoformat())
+            current = current + timedelta(days=1)
+        return due
+
+    async def _run_due_nightly_dreams(self) -> dict[str, Any]:
+        runner = getattr(self.runtime, "run_nightly_dream", None)
+        if not callable(runner):
+            return {"available": False, "reason": "nightly_dreaming_unavailable", "ran": 0}
+        covered = await self._covered_nightly_dream_dates()
+        due_dates = self._due_nightly_dream_dates(covered)
+        results: list[dict[str, Any]] = []
+        for dream_date in due_dates:
+            source = dict(getattr(self.runtime, "_last_consolidation_result", None) or {})
+            base = dict(source)
+            source_result_id = str(source.get("result_id") or "").strip()
+            base.update(
+                {
+                    "result_id": f"required-nightly-dream:{dream_date}",
+                    "source_consolidation_result_id": source_result_id,
+                    "timestamp": self._time_source().astimezone(timezone.utc).isoformat(),
+                    "dream_for_date": dream_date,
+                    "required_nightly_dream": True,
+                    "scheduler_trigger": "required_nightly_dream",
+                    "reason": "nightly dreaming is required continuity and consolidation synthesis",
+                }
+            )
+            try:
+                result = runner(mode=self.nightly_dream_mode, consolidation_result=base)
+                if inspect.isawaitable(result):
+                    result = await result
+                payload = dict(result or {})
+                payload["dream_for_date"] = dream_date
+                results.append(payload)
+                self._trace("required_nightly_dream_complete", payload)
+            except Exception as exc:
+                self._trace(
+                    "required_nightly_dream_error",
+                    {"dream_for_date": dream_date, "error": str(exc)},
+                )
+        return {
+            "available": True,
+            "ran": len(results),
+            "due_dates": due_dates,
+            "results": results,
+        }
+
+    async def _nightly_dream_loop(self) -> None:
+        while self._running:
+            try:
+                result = await self._run_due_nightly_dreams()
+                if result.get("ran"):
+                    self._trace("required_nightly_dream_sweep", result)
+            except Exception as exc:
+                self._trace("required_nightly_dream_sweep_error", {"error": str(exc)})
+            await asyncio.sleep(self.nightly_dream_check_interval_seconds)
 
     async def _schedule_loop(self) -> None:
         while self._running:
@@ -510,6 +790,8 @@ class AgentScheduler:
             block_reason = self._background_llm_block_reason(
                 require_quiet_baa=True,
                 require_conversation_quiet=True,
+                allow_executive_pause=True,
+                baa_blocks_on_backlog=False,
             )
             if block_reason is not None:
                 self._trace("desktop_context_skipped", {"reason": block_reason})
@@ -526,6 +808,41 @@ class AgentScheduler:
             except Exception as exc:
                 self._trace("desktop_context_error", {"error": str(exc)})
 
+    async def _desktop_media_state_loop(self) -> None:
+        while self._running:
+            service = getattr(self.runtime, "desktop_context", None)
+            config = getattr(service, "config", None)
+            interval = float(getattr(config, "media_state_poll_seconds", 2) or 2)
+            await asyncio.sleep(max(1.0, min(interval, 30.0)))
+            if not self._running:
+                break
+            service = getattr(self.runtime, "desktop_context", None)
+            poll = getattr(service, "poll_media_state_once", None)
+            if not callable(poll):
+                continue
+            try:
+                result = poll()
+                if inspect.isawaitable(result):
+                    result = await result
+                if isinstance(result, dict) and result.get("status") == "changed":
+                    self._trace("desktop_media_state_changed", result)
+                    if result.get("commentary_observation_requested"):
+                        observe_once = getattr(service, "observe_once", None)
+                        if callable(observe_once):
+                            observation = observe_once(
+                                force=True,
+                                reason=str(
+                                    result.get("commentary_observation_reason")
+                                    or "media_commentary_mode:media_state_changed"
+                                ),
+                            )
+                            if inspect.isawaitable(observation):
+                                observation = await observation
+                            if isinstance(observation, dict):
+                                self._trace("desktop_media_commentary_observed", observation)
+            except Exception as exc:
+                self._trace("desktop_media_state_error", {"error": str(exc)})
+
     async def _wellbeing_maintenance_loop(self) -> None:
         while self._running:
             interval = self.wellbeing_interval or float(self.schedule_interval)
@@ -538,6 +855,8 @@ class AgentScheduler:
                 require_idle=True,
                 require_quiet_baa=True,
                 require_conversation_quiet=True,
+                allow_executive_pause=True,
+                baa_blocks_on_backlog=False,
             )
             if block_reason is not None:
                 self._trace("wellbeing_maintenance_skipped", {"reason": block_reason})
@@ -555,6 +874,104 @@ class AgentScheduler:
                 self._trace("wellbeing_maintenance_error", {"error": str(exc)})
                 if self.readiness:
                     self.readiness.degraded(f"wellbeing maintenance failed: {exc}")
+
+    async def _identity_heartbeat_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(self.identity_heartbeat_interval)
+            if not self._running:
+                break
+            identity = getattr(getattr(self.runtime, "ctx", None), "identity", None)
+            heartbeat = getattr(identity, "record_persistence_heartbeat", None)
+            if not callable(heartbeat):
+                continue
+            try:
+                heartbeat()
+                self._trace("identity_persistence_heartbeat", {})
+            except Exception as exc:
+                self._trace("identity_persistence_heartbeat_error", {"error": str(exc)})
+
+    async def _cognitive_maintenance_loop(self) -> None:
+        while self._running:
+            interval = self.wellbeing_interval or float(self.schedule_interval)
+            await asyncio.sleep(interval)
+            if not self._running:
+                break
+            if not self._should_run_cycle():
+                continue
+            block_reason = self._background_llm_block_reason(
+                require_quiet_baa=True,
+                require_conversation_quiet=True,
+                allow_executive_pause=True,
+                baa_blocks_on_backlog=False,
+            )
+            if block_reason is not None:
+                self._trace("cognitive_maintenance_skipped", {"reason": block_reason})
+                continue
+            runner = getattr(self.runtime, "run_cognitive_maintenance", None)
+            if not callable(runner):
+                continue
+            try:
+                result = runner()
+                if inspect.isawaitable(result):
+                    result = await result
+                payload = result if isinstance(result, dict) else {"result": str(result)}
+                self._trace("cognitive_maintenance_complete", payload)
+                shadow_runner = getattr(self.runtime, "run_shadow_registry_consumer", None)
+                if callable(shadow_runner):
+                    shadow_result = shadow_runner(max_dismissals=20)
+                    if inspect.isawaitable(shadow_result):
+                        shadow_result = await shadow_result
+                    shadow_payload = (
+                        shadow_result
+                        if isinstance(shadow_result, dict)
+                        else {"result": str(shadow_result)}
+                    )
+                    self._trace("shadow_registry_consumer_complete", shadow_payload)
+            except Exception as exc:
+                self._trace("cognitive_maintenance_error", {"error": str(exc)})
+                if self.readiness:
+                    self.readiness.degraded(f"cognitive maintenance failed: {exc}")
+
+    async def _compaction_backlog_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(self.compaction_backlog_interval_seconds)
+            if not self._running:
+                break
+            if not self._should_run_cycle():
+                continue
+            block_reason = self._background_llm_block_reason(
+                require_idle=True,
+                require_quiet_baa=True,
+                require_conversation_quiet=True,
+                allow_executive_pause=True,
+                baa_blocks_on_backlog=False,
+            )
+            if block_reason is not None:
+                self._trace("compaction_backlog_skipped", {"reason": block_reason})
+                continue
+            runner = getattr(self.runtime, "run_compaction_backlog_maintenance", None)
+            if not callable(runner):
+                continue
+            try:
+                result = runner(
+                    max_sessions=int(self.consolidation_budget.get("max_compaction_sessions", 8)),
+                    min_session_lag=int(
+                        self.consolidation_budget.get("min_compaction_session_lag", 20)
+                    ),
+                    tail_size=int(self.consolidation_budget.get("compaction_tail_size", 10)),
+                    max_candidates=int(
+                        self.consolidation_budget.get("max_compaction_candidates", 1000)
+                    ),
+                )
+                if inspect.isawaitable(result):
+                    result = await result
+                payload = result if isinstance(result, dict) else {"result": str(result)}
+                if payload.get("available"):
+                    self._trace("compaction_backlog_complete", payload)
+            except Exception as exc:
+                self._trace("compaction_backlog_error", {"error": str(exc)})
+                if self.readiness:
+                    self.readiness.degraded(f"compaction backlog maintenance failed: {exc}")
 
     async def _telemetry_prune_loop(self) -> None:
         last_prune = 0.0
@@ -603,14 +1020,73 @@ class AgentScheduler:
         except Exception as exc:
             self._trace("telemetry_prune_failed", {"error": str(exc)})
 
+    async def _workspace_sync_loop(self) -> None:
+        """Periodically sweep reflective workspace dirs into searchable memory.
+
+        Safety net for when a writer forgets to call the bridge inline. Without it,
+        any artifact written outside ``SelfWorkspaceService`` (legacy daydream-lab
+        paths, manual drops, future writers) stays invisible to retrieval.
+        """
+        last_sync = 0.0
+        while self._running:
+            await asyncio.sleep(self.schedule_interval)
+            if not self._running:
+                break
+            now_ts = self._time_source().timestamp()
+            if now_ts - last_sync < float(self.workspace_sync_interval_seconds):
+                continue
+            await self._run_workspace_sync()
+            last_sync = now_ts
+
+    async def _run_workspace_sync(self) -> None:
+        if not self._running:
+            return
+        ctx = getattr(self.runtime, "ctx", None)
+        bridge = getattr(ctx, "artifact_bridge", None)
+        if bridge is None or ctx is None:
+            return
+        config = getattr(ctx, "config", None)
+        workspace_root = config.agent_workspace_root() if config is not None else None
+        if workspace_root is None:
+            return
+        targets = [
+            workspace_root / "self",
+            workspace_root / "reflections",
+            workspace_root / "daydream-lab",
+        ]
+        totals: Dict[str, int] = {
+            "artifacts": 0,
+            "episodes_created": 0,
+            "episodes_updated": 0,
+            "episodes_deleted": 0,
+            "memories_upserted": 0,
+        }
+        for target in targets:
+            if not target.exists():
+                continue
+            try:
+                result = await bridge.sync_directory(target)
+            except Exception as exc:
+                self._trace("workspace_sync_failed", {"path": str(target), "error": str(exc)})
+                continue
+            for key in totals:
+                totals[key] += int(result.get(key, 0) or 0)
+        self._trace("workspace_sync_complete", totals)
+
     async def _cron_loop(self) -> None:
         await asyncio.gather(
             self._daydream_loop(),
             self._schedule_loop(),
             self._initiative_contact_loop(),
             self._desktop_context_loop(),
+            self._desktop_media_state_loop(),
             self._wellbeing_maintenance_loop(),
+            self._identity_heartbeat_loop(),
+            self._cognitive_maintenance_loop(),
+            self._compaction_backlog_loop(),
+            self._nightly_dream_loop(),
             self._telemetry_prune_loop(),
+            self._workspace_sync_loop(),
         )
 
     def _trace(self, event: str, payload: Dict[str, Any]) -> None:

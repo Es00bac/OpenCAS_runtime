@@ -1,6 +1,6 @@
 # OpenCAS Features
 
-This document describes the features present in the current public snapshot.
+This document describes the features present in the current repo state.
 
 ## Memory And Retrieval
 
@@ -27,7 +27,7 @@ Somatic and relational adjustments can further modulate ranking.
 
 ### Artifact-Backed Autobiographical Memory
 
-Authored artifacts under the managed state can be bridged into memory so retrieval can use prior authored work in addition to raw file reads.
+Authored artifacts under the managed state can be bridged into memory so recall can ground on prior authored work instead of only raw file reads.
 
 ## Embeddings
 
@@ -49,13 +49,13 @@ Current somatic state tracks:
 - certainty
 - derived somatic tag / primary emotion
 
-OpenCAS also exposes relational state through musubi and identity surfaces.
+OpenCAS also exposes relational continuity through musubi and identity surfaces.
 
 ## Autonomy And Execution
 
 ### Self-Approval
 
-OpenCAS uses a tiered approval path for lower-risk and higher-risk actions, with evidence, historical behavior, somatic state, and boundary handling feeding the decision.
+OpenCAS uses a tiered approval path for ordinary versus risky actions, with evidence, historical behavior, somatic state, and boundary handling feeding the decision.
 
 ### Creative Ladder
 
@@ -80,11 +80,11 @@ Idle-time daydreaming can generate:
 
 ### Background Execution
 
-The bounded assistant and retry pipeline record long-running work state:
+The bounded assistant and retry pipeline keep long-running work from drifting:
 
 - queued background tasks are lane-limited
 - receipts record what actually happened
-- retry and salvage state preserve blocked and resumable intent instead of replaying failures without context
+- retry and salvage state preserve blocked-vs-resumable intent instead of blindly replaying failures
 - git and provenance checkpoints help operators inspect what changed
 
 ### Scheduling
@@ -140,7 +140,7 @@ Current usage monitoring includes:
 
 ### Platform And Trust
 
-OpenCAS exposes a platform surface for extensions and capability inspection:
+OpenCAS now exposes a platform surface for extensions and capability inspection:
 
 - canonical capability inventory
 - extension install, update, disable, enable, and uninstall flows
@@ -172,6 +172,20 @@ The Chat surface includes:
 ### Voice
 
 The chat surface can transcribe microphone input and synthesize spoken replies. Voice output metadata is preserved alongside the chat history so the operator can see which messages were spoken.
+
+### Desktop Context / Body Double
+
+The desktop-context plugin can capture an active-desktop observation and store it as runtime context. Current inputs include:
+
+- screenshot metadata and optional OCR text
+- MPRIS media state, including play/pause/seek/start/stop changes
+- retrieved YouTube transcripts when a playable YouTube URL is detected
+- timestamp-aligned transcript excerpts when caption timestamps and playback position are both usable
+- optional local Whisper transcription of short system-audio windows for currently playing media
+
+Live transcription is disabled by default and is enabled through `desktop_context_configure` or automatically when media commentary mode is activated from a video-commentary request. The live path records a short Pulse/PipeWire monitor-source window through `ffmpeg`, runs the local `whisper` CLI, and stores the transcript excerpt in the same observation payload as the prefetched transcript.
+
+When both sources are present, prompts treat the retrieved transcript as the timestamped map/history and the local Whisper excerpt as the current heard segment. For livestreams or videos without usable prefetched captions, the live Whisper excerpt is the current transcript source. Live transcription is skipped when the target media is paused or when multiple playing media identities make the target ambiguous.
 
 ### Phone
 
@@ -210,12 +224,12 @@ The current server exposes these main API domains:
 - phone
 - schedule
 - telemetry
-- telegram
+- Telegram
 
 See [API Reference](api/README.md) for details.
 
 ## Release Truths
 
-- OpenCAS is local-state and operator-managed.
+- OpenCAS is local-state and operator-owned.
 - Chat, voice, and embedding traffic normally uses configured providers through `open_llm_auth`.
 - The system is not accurately described as cloud-free by default.

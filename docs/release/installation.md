@@ -1,6 +1,6 @@
 # OpenCAS Installation Guide
 
-This guide documents the current public repository layout.
+This guide documents the repo as it exists today, not a hypothetical packaged future release.
 
 ## Prerequisites
 
@@ -53,20 +53,20 @@ Current important flags:
 - `--tui`
 - `--accept-bootstrap-responsibility`
 
-## Setup Path
+## Recommended Setup Path
 
-The TUI bootstrap is the usual setup path in the current repo:
+The documented setup path in the current repo is the TUI bootstrap:
 
 ```bash
 source .venv/bin/activate
 python -m opencas --tui
 ```
 
-First boot is responsibility-gated. OpenCAS creates persistent state for the agent. If you later delete the state directory, you delete that continuity. The TUI asks you to acknowledge this before creation.
+First boot is responsibility-gated. OpenCAS creates persistent continuity, not a disposable chat session. If you later delete the state directory, you delete that agent's continuity. The TUI asks you to acknowledge this before creation.
 
 Use it to:
 
-- choose copied-local or linked provider material
+- choose copied-local versus linked provider material
 - select available chat and embedding models from discovered configured models
 - copy specific auth profiles and environment keys into app-local provider material
 - configure Telegram basics

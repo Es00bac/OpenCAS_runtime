@@ -8,11 +8,13 @@ from .capture import (
     run_tesseract_ocr,
 )
 from .service import DesktopContextConfig, DesktopContextService
+from .media import MprisMediaController
 
 __all__ = [
     "DesktopCapture",
     "DesktopContextConfig",
     "DesktopContextService",
+    "MprisMediaController",
     "ScreenshotBackend",
     "capture_desktop_image",
     "choose_screenshot_backend",
