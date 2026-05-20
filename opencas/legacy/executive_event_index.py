@@ -151,12 +151,22 @@ def archive_and_index_executive_events(
 def load_executive_event_summary(state_dir: Path) -> Dict[str, Any]:
     index_path = Path(state_dir) / "migration" / "bulma" / "executive_events.db"
     if not index_path.exists():
-        return {"count": 0, "available": False}
+        return {
+            "count": 0,
+            "available": False,
+            "archive_kind": "historical_openbulma_executive_events",
+            "runtime_authority": "historical_archive_only",
+        }
     conn = sqlite3.connect(str(index_path))
     try:
         rows = conn.execute("SELECT key, value FROM bulma_executive_event_meta").fetchall()
         meta = {key: json.loads(value) for key, value in rows}
-        return {"available": True, **meta}
+        return {
+            "available": True,
+            "archive_kind": "historical_openbulma_executive_events",
+            "runtime_authority": "historical_archive_only",
+            **meta,
+        }
     finally:
         conn.close()
 
@@ -192,7 +202,14 @@ def search_executive_events(
     conn = sqlite3.connect(str(index_path))
     conn.row_factory = sqlite3.Row
     try:
-        return [dict(row) for row in conn.execute(sql, params).fetchall()]
+        return [
+            {
+                "archive_kind": "historical_openbulma_executive_events",
+                "runtime_authority": "historical_archive_only",
+                **dict(row),
+            }
+            for row in conn.execute(sql, params).fetchall()
+        ]
     finally:
         conn.close()
 

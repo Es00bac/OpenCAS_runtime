@@ -69,6 +69,7 @@ class AgentScheduler:
         self.tracer = tracer
         self._running = False
         self._tasks: list[asyncio.Task[None]] = []
+        self._recovery_task: asyncio.Task[None] | None = None
         # Focus mode: suspend daydream and cycle loops during deep tool-use work.
         self._focus_mode: bool = False
         self._focus_mode_since: Optional[datetime] = None
@@ -175,6 +176,8 @@ class AgentScheduler:
             for state in self._lane_manager._lanes.values()
             for worker in state.workers
         ]
+        if getattr(self.runtime, "recovery_coordinator", None) is not None:
+            self._recovery_task = asyncio.create_task(self._recovery_loop())
 
     async def stop(self) -> None:
         """Cancel background loops and drain BAA."""
@@ -185,6 +188,10 @@ class AgentScheduler:
 
         for task in self._tasks:
             task.cancel()
+        if self._recovery_task is not None:
+            self._recovery_task.cancel()
+            await asyncio.gather(self._recovery_task, return_exceptions=True)
+            self._recovery_task = None
         await self._lane_manager.stop()
         self._tasks.clear()
 
@@ -251,6 +258,12 @@ class AgentScheduler:
             "run_consolidation failed:"
         )
 
+    def _readiness_degraded_by_schedule(self) -> bool:
+        if self.readiness is None or self.readiness.state != ReadinessState.DEGRADED:
+            return False
+        reason = str(getattr(self.readiness, "reason", "") or "").lower()
+        return reason.startswith("schedule processing failed:")
+
     def _should_run_consolidation(self) -> bool:
         """Allow consolidation to recover its own degraded readiness state."""
         if self._focus_mode and getattr(self, "_focus_mode_since", None):
@@ -269,6 +282,62 @@ class AgentScheduler:
     def _mark_consolidation_recovered(self) -> None:
         if self.readiness is not None and self._readiness_degraded_by_consolidation():
             self.readiness.ready("consolidation_recovered")
+
+    def _mark_schedule_recovered(self) -> None:
+        if self.readiness is not None and self._readiness_degraded_by_schedule():
+            self.readiness.ready("schedule_processing_recovered")
+
+    def _focus_mode_block_reason(self) -> Optional[str]:
+        if self._focus_mode and getattr(self, "_focus_mode_since", None):
+            elapsed = (self._time_source() - self._focus_mode_since).total_seconds()
+            if elapsed > self.focus_mode_timeout_seconds:
+                self._trace("focus_mode_auto_exited", {"elapsed_seconds": elapsed})
+                self.exit_focus_mode()
+        if self._focus_mode:
+            return "focus_mode"
+        return None
+
+    def _schedule_processing_block_reason(self) -> Optional[str]:
+        focus_reason = self._focus_mode_block_reason()
+        if focus_reason is not None:
+            return focus_reason
+        if self._desktop_context_media_commentary_foreground_active():
+            return "foreground_media_commentary"
+        if self.readiness is None:
+            return None
+        if self.readiness.state in {ReadinessState.READY, ReadinessState.DEGRADED}:
+            return None
+        return f"readiness_{self.readiness.state.value}"
+
+    @staticmethod
+    def _schedule_result_has_activity(result: Any) -> bool:
+        if not isinstance(result, dict):
+            return False
+        return any(
+            int(result.get(key) or 0) > 0
+            for key in ("processed", "submitted", "recorded", "skipped", "failed")
+        )
+
+    def schedule_processing_status(self, due_now: Optional[int] = None) -> Dict[str, Any]:
+        """Return operator-facing state for whether due schedule work can run."""
+
+        block_reason = self._schedule_processing_block_reason()
+        readiness_payload: Dict[str, Any] | None = None
+        if self.readiness is not None:
+            readiness_payload = self.readiness.snapshot()
+        payload: Dict[str, Any] = {
+            "scheduler_running": bool(self._running),
+            "can_process": bool(self._running) and block_reason is None,
+            "blocked_reason": None if self._running else "scheduler_not_running",
+            "focus_mode": bool(self._focus_mode),
+            "readiness": readiness_payload,
+        }
+        if self._running and block_reason is not None:
+            payload["blocked_reason"] = block_reason
+        if due_now is not None:
+            payload["due_now"] = int(due_now)
+            payload["will_process_due_now"] = bool(payload["can_process"] and int(due_now) > 0)
+        return payload
 
     async def _cycle_loop(self) -> None:
         while self._running:
@@ -401,8 +470,94 @@ class AgentScheduler:
                 return f"runtime_activity_{activity}"
         return None
 
+    def _desktop_context_media_commentary_foreground_active(self) -> bool:
+        service = getattr(self.runtime, "desktop_context", None)
+        config = getattr(service, "config", None)
+        if config is None:
+            return False
+        if not bool(
+            getattr(config, "enabled", False)
+            and getattr(config, "media_commentary_mode_enabled", False)
+            and getattr(config, "proactive_video_commentary_enabled", True)
+        ):
+            return False
+
+        media_state = self._desktop_context_media_state(service)
+        if not self._desktop_context_media_state_is_recent(media_state, config):
+            return False
+        items = media_state.get("items") if isinstance(media_state.get("items"), dict) else {}
+        for item in items.values():
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("status") or "").strip().lower() == "playing":
+                return True
+        return False
+
+    def _desktop_context_media_state(self, service: Any) -> Dict[str, Any]:
+        loader = getattr(service, "_load_media_state", None)
+        if callable(loader):
+            try:
+                payload = loader()
+                if isinstance(payload, dict):
+                    return payload
+            except Exception:
+                return {}
+        payload = getattr(service, "media_state", None)
+        return payload if isinstance(payload, dict) else {}
+
+    def _desktop_context_media_state_is_recent(self, media_state: Dict[str, Any], config: Any) -> bool:
+        observed_at = media_state.get("observed_at")
+        if not observed_at:
+            return False
+        if isinstance(observed_at, str):
+            try:
+                observed_at = datetime.fromisoformat(observed_at)
+            except ValueError:
+                return False
+        if not isinstance(observed_at, datetime):
+            return False
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        interval = float(getattr(config, "media_state_poll_seconds", 2) or 2)
+        freshness_seconds = max(120.0, min(600.0, interval * 10.0))
+        return (self._time_source() - observed_at).total_seconds() <= freshness_seconds
+
+    async def _due_schedule_work_pending(self) -> bool:
+        service = getattr(self.runtime, "schedule_service", None)
+        store = getattr(getattr(self.runtime, "ctx", None), "schedule_store", None) or getattr(
+            service,
+            "store",
+            None,
+        )
+        list_due = getattr(store, "list_due", None)
+        if not callable(list_due):
+            return False
+        try:
+            due = list_due(self._time_source(), limit=1)
+            if inspect.isawaitable(due):
+                due = await due
+        except Exception as exc:
+            self._trace("schedule_pending_check_error", {"error": str(exc)})
+            return False
+        return bool(due)
+
+    async def _body_double_observation_block_reason(self) -> Optional[str]:
+        if not self._should_run_cycle():
+            return "scheduler_not_runnable"
+        media_commentary_foreground = self._desktop_context_media_commentary_foreground_active()
+        if not media_commentary_foreground and await self._due_schedule_work_pending():
+            return "scheduled_work_pending"
+        return self._background_llm_block_reason(
+            require_quiet_baa=not media_commentary_foreground,
+            require_conversation_quiet=not media_commentary_foreground,
+            allow_executive_pause=True,
+            baa_blocks_on_backlog=not media_commentary_foreground,
+        )
+
     def _consolidation_result_requires_retry(self, result: Any) -> bool:
         if not isinstance(result, dict):
+            return False
+        if self._consolidation_result_was_foreground_deferred(result):
             return False
         failure_reasons = {
             "worker_timeout",
@@ -427,6 +582,15 @@ class AgentScheduler:
             }:
                 return True
         return False
+
+    @staticmethod
+    def _consolidation_result_was_foreground_deferred(result: Any) -> bool:
+        if not isinstance(result, dict):
+            return False
+        return str(result.get("budget_reason") or "").lower() in {
+            "foreground_user_turn",
+            "foreground_interrupted",
+        }
 
     async def _run_consolidation_with_retries(self, retry_delay: float) -> Dict[str, Any]:
         attempts = 0
@@ -534,6 +698,11 @@ class AgentScheduler:
                 continue
             try:
                 result = await self._run_consolidation_with_retries(retry_delay)
+                if self._consolidation_result_was_foreground_deferred(result):
+                    self._trace("consolidation_deferred", result)
+                    if self._running:
+                        await asyncio.sleep(retry_delay)
+                    continue
                 result_failed = self._consolidation_result_requires_retry(result)
                 if runtime_state_dir is not None and not result_failed:
                     persist_consolidation_runtime_state(
@@ -746,15 +915,20 @@ class AgentScheduler:
             await asyncio.sleep(self.schedule_interval)
             if not self._running:
                 break
-            if not self._should_run_cycle():
-                continue
             service = getattr(self.runtime, "schedule_service", None)
             if service is None:
                 continue
+            block_reason = self._schedule_processing_block_reason()
+            if block_reason is not None:
+                if await self._due_schedule_work_pending():
+                    self._trace("schedule_skipped", {"reason": block_reason, "due_work_pending": True})
+                continue
             try:
                 result = await service.process_due()
-                if result.get("processed"):
+                if self._schedule_result_has_activity(result):
                     self._trace("schedule_complete", result)
+                if isinstance(result, dict) and int(result.get("failed") or 0) == 0:
+                    self._mark_schedule_recovered()
             except Exception as exc:
                 self._trace("schedule_error", {"error": str(exc)})
                 if self.readiness:
@@ -785,14 +959,7 @@ class AgentScheduler:
             await asyncio.sleep(float(self.schedule_interval))
             if not self._running:
                 break
-            if not self._should_run_cycle():
-                continue
-            block_reason = self._background_llm_block_reason(
-                require_quiet_baa=True,
-                require_conversation_quiet=True,
-                allow_executive_pause=True,
-                baa_blocks_on_backlog=False,
-            )
+            block_reason = await self._body_double_observation_block_reason()
             if block_reason is not None:
                 self._trace("desktop_context_skipped", {"reason": block_reason})
                 continue
@@ -827,6 +994,10 @@ class AgentScheduler:
                 if isinstance(result, dict) and result.get("status") == "changed":
                     self._trace("desktop_media_state_changed", result)
                     if result.get("commentary_observation_requested"):
+                        block_reason = await self._body_double_observation_block_reason()
+                        if block_reason is not None:
+                            self._trace("desktop_media_commentary_skipped", {"reason": block_reason})
+                            continue
                         observe_once = getattr(service, "observe_once", None)
                         if callable(observe_once):
                             observation = observe_once(
@@ -1041,6 +1212,14 @@ class AgentScheduler:
     async def _run_workspace_sync(self) -> None:
         if not self._running:
             return
+        block_reason = self._background_llm_block_reason(
+            require_idle=True,
+            require_quiet_baa=True,
+            require_conversation_quiet=True,
+        )
+        if block_reason is not None:
+            self._trace("workspace_sync_skipped", {"reason": block_reason})
+            return
         ctx = getattr(self.runtime, "ctx", None)
         bridge = getattr(ctx, "artifact_bridge", None)
         if bridge is None or ctx is None:
@@ -1072,6 +1251,28 @@ class AgentScheduler:
             for key in totals:
                 totals[key] += int(result.get(key, 0) or 0)
         self._trace("workspace_sync_complete", totals)
+
+    async def _recovery_loop(self) -> None:
+        while self._running:
+            await asyncio.sleep(300)
+            await self._run_recovery_once()
+
+    async def _run_recovery_once(self) -> None:
+        coordinator = getattr(self.runtime, "recovery_coordinator", None)
+        if coordinator is None:
+            return
+        if not self._should_run_cycle():
+            return
+        if self._background_llm_block_reason(require_quiet_baa=True) is not None:
+            return
+        try:
+            result = await coordinator.run_once(limit_per_store=100, max_actions=5)
+            self._trace("recovery_complete", getattr(result, "__dict__", {"result": str(result)}))
+        except Exception as exc:
+            self._trace("recovery_error", {"error": str(exc)})
+
+    async def _run_recovery_once_for_test(self) -> None:
+        await self._run_recovery_once()
 
     async def _cron_loop(self) -> None:
         await asyncio.gather(

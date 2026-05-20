@@ -4,7 +4,6 @@ import pytest
 import pytest_asyncio
 
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
-from opencas.identity import IdentityRebuildResult
 from opencas.memory import Episode, EpisodeKind
 from opencas.runtime.agent_loop import AgentRuntime
 from opencas.tom import BeliefSubject, IntentionStatus

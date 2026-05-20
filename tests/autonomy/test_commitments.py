@@ -6,7 +6,6 @@ import pytest_asyncio
 
 from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.autonomy.commitment_store import CommitmentStore
-from opencas.autonomy.executive import ExecutiveState
 from opencas.autonomy.models import WorkObject, WorkStage
 from opencas.autonomy.workspace import ExecutiveWorkspace
 from opencas.identity import IdentityManager, IdentityStore

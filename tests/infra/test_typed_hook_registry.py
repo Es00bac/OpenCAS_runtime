@@ -54,6 +54,27 @@ def test_short_circuit() -> None:
     assert result.reason == "blocked"
 
 
+def test_isolated_handler_failure_continues_to_next_handler() -> None:
+    reg = TypedHookRegistry()
+    reg.register_spec(HookSpec(name="post_hook"))
+    calls = []
+
+    def raises(_, ctx):
+        raise RuntimeError("post hook failed")
+
+    def after(_, ctx):
+        calls.append(ctx["value"])
+        return HookResult(allowed=True)
+
+    reg.register("post_hook", raises, priority=10)
+    reg.register("post_hook", after, priority=1)
+
+    result = reg.run("post_hook", {"value": 42}, isolate_handler_failures=True)
+
+    assert result.allowed is True
+    assert calls == [42]
+
+
 def test_mutated_context() -> None:
     reg = TypedHookRegistry()
     reg.register_spec(HookSpec(name="mutate_hook"))

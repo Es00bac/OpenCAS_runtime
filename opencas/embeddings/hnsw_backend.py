@@ -97,6 +97,7 @@ class HnswVectorBackend:
         self._metadata[source_hash] = {
             "model_id": record.model_id,
             "project_id": record.meta.get("project_id") if record.meta else None,
+            "task_type": record.meta.get("task_type") if record.meta else None,
         }
         return True
 
@@ -106,15 +107,11 @@ class HnswVectorBackend:
         limit: int = 10,
         model_id: Optional[str] = None,
         project_id: Optional[str] = None,
+        task_type: Optional[str] = None,
         with_scores: bool = False,
     ) -> List[str] | List[Tuple[str, float]]:
         """Return source_hashes ordered by similarity, with metadata post-filtering."""
         if self._index is None or self._dimension is None:
-            return []
-
-        try:
-            import hnswlib
-        except ImportError:
             return []
 
         query = np.array(vector, dtype=np.float32)
@@ -146,6 +143,8 @@ class HnswVectorBackend:
                 if model_id is not None and meta.get("model_id") != model_id:
                     continue
                 if project_id is not None and meta.get("project_id") != project_id:
+                    continue
+                if task_type is not None and meta.get("task_type") != task_type:
                     continue
                 if with_scores:
                     results.append((source_hash, float(sim)))

@@ -6,7 +6,6 @@ import json
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
-from opencas.telemetry import EventKind
 
 
 def stream_jsonl(path: Path) -> Iterator[Dict[str, Any]]:

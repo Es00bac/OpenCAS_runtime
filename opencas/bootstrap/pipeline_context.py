@@ -25,8 +25,8 @@ async def initialize_workspace_index(
         embeddings_client=embeddings,
         llm_client=llm,
         workspace_roots=config.workspace_roots,
-        llm_model=config.default_llm_model or "kimi-coding/k2p5",
-        embedding_model=config.embedding_model_id or "google/embeddinggemma-300m",
+        llm_model=getattr(llm, "default_model", None) or config.default_llm_model,
+        embedding_model=getattr(embeddings, "model_id", None) or config.embedding_model_id,
     )
     await workspace_index.start()
     return workspace_index

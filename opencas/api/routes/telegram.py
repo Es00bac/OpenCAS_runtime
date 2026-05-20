@@ -50,6 +50,15 @@ def build_telegram_router(runtime: Any) -> APIRouter:
         )
         return await runtime.configure_telegram(settings)
 
+    @r.get("/config")
+    async def get_config() -> Dict[str, Any]:
+        current = runtime.telegram_settings
+        status = await runtime.telegram_status()
+        return {
+            "config": current.redacted_dict(),
+            "status": status,
+        }
+
     @r.post("/pairings/{code}/approve")
     async def approve_pairing(code: str) -> Dict[str, Any]:
         approved = await runtime.approve_telegram_pairing(code)

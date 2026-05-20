@@ -21,9 +21,9 @@ def _packet(
         packet_id=uuid4(),
         task_id=uuid4(),
         attempt=attempt,
-        project_signature="chronicle-4246",
+        project_signature="writing-project-4246",
         project_id="loop-4246",
-        objective="Continue Chronicle 4246 from the existing manuscript.",
+        objective="Continue writing project 4246 from the existing manuscript.",
         canonical_artifact_path=canonical_artifact_path,
         artifact_paths_touched=[canonical_artifact_path] if canonical_artifact_path else [],
         plan_digest="plan-a",
@@ -48,13 +48,13 @@ def test_retry_governor_blocks_second_low_divergence_broad_retry() -> None:
     prior = _packet(
         divergence_signature="same-signature",
         recommended_mode=RetryMode.RESUME_EXISTING_ARTIFACT,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         attempt=1,
     ).model_copy(update={"task_id": task_id, "packet_id": UUID("11111111-1111-1111-1111-111111111111")})
     current = _packet(
         divergence_signature="same-signature",
         recommended_mode=RetryMode.RESUME_EXISTING_ARTIFACT,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         attempt=2,
     ).model_copy(update={"task_id": task_id, "packet_id": UUID("22222222-2222-2222-2222-222222222222")})
 
@@ -76,14 +76,14 @@ def test_retry_governor_allows_retry_when_new_evidence_exists() -> None:
     prior = _packet(
         divergence_signature="same-signature",
         recommended_mode=RetryMode.RESUME_EXISTING_ARTIFACT,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         attempt=1,
         verification_digest="verify-a",
     ).model_copy(update={"task_id": task_id})
     current = _packet(
         divergence_signature="same-signature",
         recommended_mode=RetryMode.RESUME_EXISTING_ARTIFACT,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         attempt=2,
         verification_digest="verify-b",
         discovered_constraints=["new continuity defect surfaced"],
@@ -140,3 +140,83 @@ def test_retry_governor_blocks_broad_no_progress_retry_even_with_changed_digest(
     assert decision.mode == RetryMode.DETERMINISTIC_REVIEW
     assert decision.reuse_packet_id == prior.packet_id
     assert "no meaningful progress" in decision.reason
+
+
+def test_retry_governor_blocks_first_broad_tool_guard_stop() -> None:
+    governor = RetryGovernor()
+    current = _packet(
+        divergence_signature="guard-signature",
+        recommended_mode=RetryMode.DETERMINISTIC_REVIEW,
+        canonical_artifact_path=None,
+    ).model_copy(
+        update={
+            "outcome": AttemptOutcome.GUARD_STOPPED,
+            "meaningful_progress_signal": "blocker",
+            "best_next_step": "Inspect the repeated tool call and reframe narrowly.",
+        }
+    )
+
+    decision = governor.decide(
+        candidate=current,
+        prior_packets=[],
+        has_new_evidence=False,
+        broad_attempt=True,
+    )
+
+    assert decision.allowed is False
+    assert decision.mode == RetryMode.DETERMINISTIC_REVIEW
+    assert "tool loop guard" in decision.reason
+
+
+def test_retry_governor_blocks_guard_stop_with_canonical_artifact_but_no_touched_path() -> None:
+    governor = RetryGovernor()
+    current = _packet(
+        divergence_signature="guard-signature",
+        recommended_mode=RetryMode.RESUME_EXISTING_ARTIFACT,
+        canonical_artifact_path="workspace/self/notes/evidence.md",
+    ).model_copy(
+        update={
+            "outcome": AttemptOutcome.GUARD_STOPPED,
+            "artifact_paths_touched": [],
+            "meaningful_progress_signal": "blocker",
+            "best_next_step": "Inspect the repeated tool call and reframe narrowly.",
+        }
+    )
+
+    decision = governor.decide(
+        candidate=current,
+        prior_packets=[],
+        has_new_evidence=False,
+        broad_attempt=True,
+    )
+
+    assert decision.allowed is False
+    assert decision.mode == RetryMode.RESUME_EXISTING_ARTIFACT
+    assert "tool loop guard" in decision.reason
+
+
+def test_retry_governor_allows_productive_guard_stop_with_artifact_progress() -> None:
+    governor = RetryGovernor()
+    current = _packet(
+        divergence_signature="guard-signature",
+        recommended_mode=RetryMode.DETERMINISTIC_REVIEW,
+        canonical_artifact_path=None,
+    ).model_copy(
+        update={
+            "outcome": AttemptOutcome.GUARD_STOPPED,
+            "artifact_paths_touched": ["workspace/self/notes/evidence.md"],
+            "meaningful_progress_signal": "artifact",
+            "best_next_step": "Resume from the touched artifact and finish verification.",
+        }
+    )
+
+    decision = governor.decide(
+        candidate=current,
+        prior_packets=[],
+        has_new_evidence=False,
+        broad_attempt=True,
+    )
+
+    assert decision.allowed is True
+    assert decision.mode == RetryMode.CONTINUE_RETRY
+    assert "guard" not in decision.reason.lower()

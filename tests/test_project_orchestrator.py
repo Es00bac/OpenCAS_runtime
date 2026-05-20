@@ -244,7 +244,7 @@ async def test_project_orchestrator_injects_shadow_registry_guidance_into_plan_p
                 "available": True,
                 "prompt_block": (
                     "Related blocked-intention clusters:\n"
-                    "- 2x retry_blocked around retry:workspace/Chronicles/4246/chronicle_4246.md\n"
+                    "- 2x retry_blocked around retry:workspace/writing/4246/story_4246.md\n"
                     "Safer alternatives:\n"
                     "- Prefer one narrow edit tied to the canonical artifact, then rerun verification."
                 ),
@@ -258,11 +258,11 @@ async def test_project_orchestrator_injects_shadow_registry_guidance_into_plan_p
         shadow_registry=FakeShadowRegistry(),
     )
     work = WorkObject(
-        content="Continue Chronicle 4246 from the existing manuscript.",
+        content="Continue writing project 4246 from the existing manuscript.",
         stage=WorkStage.PROJECT,
         meta={
             "resume_project": {
-                "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+                "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             }
         },
     )
@@ -272,8 +272,8 @@ async def test_project_orchestrator_injects_shadow_registry_guidance_into_plan_p
     assert plan.summary == "narrow revision"
     assert shadow_calls == [
         {
-            "objective": "Continue Chronicle 4246 from the existing manuscript.",
-            "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+            "objective": "Continue writing project 4246 from the existing manuscript.",
+            "artifact": "workspace/writing/4246/story_4246.md",
         }
     ]
     prompt = llm_calls[0]["messages"][1]["content"]

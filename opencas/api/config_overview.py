@@ -5,10 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, List
 
-from open_llm_auth.config import ModelDefinitionConfig, load_config
-from open_llm_auth.provider_catalog import get_builtin_provider_models
+from open_llm_auth.auth.manager import ProviderManager
+from open_llm_auth.config import load_config
 
 from opencas.api.gateway_admin import resolve_active_gateway_material
+from opencas.generation.policy import GenerationPolicyConfig, GenerationPolicyResolver
 from opencas.model_routing import ModelRoutingConfig
 
 
@@ -34,28 +35,35 @@ def redact_secrets(config_dict: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def provider_summary(provider_id: str, provider_cfg: Any, profile_ids: List[str]) -> Dict[str, Any]:
+def provider_summary(
+    provider_id: str,
+    provider_cfg: Any,
+    profile_ids: List[str],
+    available_models: List[str] | None = None,
+) -> Dict[str, Any]:
     configured_model_ids = [
         str(model.id)
         for model in getattr(provider_cfg, "models", None) or []
         if getattr(model, "id", None)
     ]
-    builtin_model_ids = [
-        str(model.get("id"))
-        for model in get_builtin_provider_models(provider_id)
-        if model.get("id")
+    discovered_model_ids = [
+        ref.split("/", 1)[1]
+        for ref in (available_models or [])
+        if ref.startswith(f"{provider_id}/")
     ]
-    effective_model_ids = sorted(set(builtin_model_ids + configured_model_ids))
+    effective_model_ids = sorted(set(discovered_model_ids + configured_model_ids))
     return {
         "provider_id": provider_id,
         "base_url": getattr(provider_cfg, "base_url", None),
         "auth": getattr(provider_cfg, "auth", None),
         "api": getattr(provider_cfg, "api", None),
         "configured_model_ids": configured_model_ids,
-        "builtin_model_ids": builtin_model_ids,
+        "builtin_model_ids": [],
+        "discovered_model_ids": discovered_model_ids,
         "effective_model_ids": effective_model_ids,
         "configured_model_count": len(configured_model_ids),
-        "builtin_model_count": len(builtin_model_ids),
+        "builtin_model_count": 0,
+        "discovered_model_count": len(discovered_model_ids),
         "effective_model_count": len(effective_model_ids),
         "headers_present": bool(getattr(provider_cfg, "headers", None)),
         "profile_ids": profile_ids,
@@ -184,6 +192,36 @@ def detect_config_mode(runtime_config: Any, materialized: Dict[str, Any]) -> str
     return "shared-default"
 
 
+def generation_policy_summary(value: Any) -> Dict[str, Any]:
+    try:
+        policy = GenerationPolicyConfig.model_validate(value).normalized()
+    except Exception:
+        policy = GenerationPolicyConfig()
+    resolver = GenerationPolicyResolver(policy)
+    profiles = {
+        profile_id: profile.model_dump(mode="json")
+        for profile_id, profile in sorted(policy.profiles.items())
+    }
+    learned_records = {
+        preset_id: preset.model_dump(mode="json")
+        for preset_id, preset in sorted(policy.learned_preset_records.items())
+    }
+    return {
+        "enabled": policy.enabled,
+        "default_profile": policy.default_profile,
+        "preserve_explicit_payload_overrides": policy.preserve_explicit_payload_overrides,
+        "provider_strategy": policy.provider_strategy,
+        "somatic_influence": policy.somatic_influence.model_dump(mode="json"),
+        "local_sampler_experiments": dict(policy.local_sampler_experiments),
+        "profiles": profiles,
+        "profile_count": len(profiles),
+        "phase_summary": resolver.phase_summary(),
+        "learned_presets": policy.learned_presets.model_dump(mode="json"),
+        "learned_preset_records": learned_records,
+        "learned_preset_count": len(learned_records),
+    }
+
+
 async def build_config_overview_payload(runtime: Any) -> Dict[str, Any]:
     mgr = getattr(runtime.ctx.llm, "manager", None)
     if mgr is None:
@@ -223,6 +261,7 @@ async def build_config_overview_payload(runtime: Any) -> Dict[str, Any]:
                     provider_id,
                     provider_cfg,
                     sorted(profiles_by_provider.get(provider_id, [])),
+                    available_models,
                 )
             )
 
@@ -232,12 +271,20 @@ async def build_config_overview_payload(runtime: Any) -> Dict[str, Any]:
     effective_chat_model = getattr(getattr(runtime.ctx, "llm", None), "default_model", None) or configured_chat_model
     effective_embedding_model = getattr(getattr(runtime.ctx, "embeddings", None), "model_id", None) or configured_embedding_model
     embedding_models: List[str] = []
-    if effective_embedding_model:
-        embedding_models.append(effective_embedding_model)
-    if configured_embedding_model and configured_embedding_model not in embedding_models:
-        embedding_models.append(configured_embedding_model)
-    if "local-fallback" not in embedding_models:
-        embedding_models.append("local-fallback")
+    embedding_inventory = getattr(mgr, "embedding_model_refs", None)
+    if callable(embedding_inventory):
+        try:
+            embedding_models = list(embedding_inventory())
+        except Exception:
+            embedding_models = []
+    if not embedding_models and cfg is not None:
+        try:
+            embedding_models = ProviderManager.embedding_model_refs_for_config(cfg)
+        except Exception:
+            embedding_models = []
+    for ref in (effective_embedding_model, configured_embedding_model):
+        if ref and ref not in embedding_models:
+            embedding_models.append(ref)
     state_dir = getattr(runtime_config, "state_dir", None)
     materialized = summarize_materialized_bundle(state_dir)
     config_mode = detect_config_mode(runtime_config, materialized)
@@ -245,6 +292,9 @@ async def build_config_overview_payload(runtime: Any) -> Dict[str, Any]:
     expired_profiles = sum(1 for profile in profiles if profile.get("expired"))
     healthy_profiles = len(profiles) - expired_profiles
     model_routing = getattr(runtime_config, "model_routing", ModelRoutingConfig())
+    generation_policy = generation_policy_summary(
+        getattr(runtime_config, "generation_policy", GenerationPolicyConfig())
+    )
 
     return {
         "config_mode": config_mode,
@@ -285,6 +335,7 @@ async def build_config_overview_payload(runtime: Any) -> Dict[str, Any]:
                 "auto_escalation": model_routing.auto_escalation,
                 "mode": model_routing.mode.value,
             },
+            "generation_policy": generation_policy,
         },
         "credential_health": {
             "provider_count": len(providers),

@@ -2,9 +2,9 @@ import asyncio
 import logging
 import os
 import threading
-from typing import List, Optional, Sequence
-import numpy as np
+from typing import List, Optional
 import torch
+from open_llm_auth.auth.manager import ProviderManager
 
 try:
     from sentence_transformers import SentenceTransformer
@@ -36,7 +36,7 @@ class GemmaEmbedder:
     """High-performance local embedder with dedicated threading."""
 
     def __init__(self, model_id: Optional[str] = None, device: str = "cpu"):
-        self.model_id = model_id or "google/embeddinggemma-300m"
+        self.model_id = model_id or ProviderManager.default_embedding_model_ref()
         self.device = device
         self._model: Optional[SentenceTransformer] = None
         self._dimension: Optional[int] = None

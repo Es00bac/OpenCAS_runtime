@@ -3,7 +3,7 @@
 import logging
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Coroutine, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from opencas.embeddings import EmbeddingService
 
@@ -129,7 +129,6 @@ class SomaticManager:
         felt_certainty = pre_state.certainty
         expressed_valence = expressed_affect.valence
         expressed_arousal = expressed_affect.arousal
-        expressed_certainty = expressed_affect.certainty
 
         # Masking: high internal tension but expressed text claims calm
         if felt_tension > _MASKING_TENSION_THRESHOLD and expressed_valence > _WARM_VALENCE_THRESHOLD and expressed_arousal < _WARM_AROUSAL_CEILING:
@@ -204,6 +203,10 @@ class SomaticManager:
         self._state.somatic_tag = tag
         self.save()
 
+    def set_rest_until(self, value: Optional[datetime]) -> None:
+        self._state.rest_until = value
+        self.save()
+
     def decay(
         self,
         fatigue_delta: float = 0.02,
@@ -241,14 +244,22 @@ class SomaticManager:
     def bump_from_work(self, intensity: float = 0.1, success: bool = True) -> None:
         """Update somatic state based on completed work."""
         bounded_intensity = max(0.0, min(1.0, intensity))
-        self._state.fatigue = _clamp01(self._state.fatigue + bounded_intensity * 0.3)
-        self._state.arousal = _clamp01(self._state.arousal + bounded_intensity * 0.1)
-        self._state.energy = _clamp01(self._state.energy - bounded_intensity * 0.1)
         if success:
+            # Successful, flowing work should feel like gaining traction, not like
+            # hitting the same protective fatigue pathway as errors and retries.
+            self._state.fatigue = _clamp01(self._state.fatigue - bounded_intensity * 0.12)
+            self._state.arousal = _clamp01(self._state.arousal + bounded_intensity * 0.04)
+            if self._state.fatigue > 0.35:
+                self._state.energy = _clamp01(self._state.energy + bounded_intensity * 0.04)
+            else:
+                self._state.energy = _clamp01(self._state.energy - bounded_intensity * 0.05)
             self._state.valence = round(max(-1.0, min(1.0, self._state.valence + 0.05)), 3)
             self._state.tension = round(max(0.0, self._state.tension - 0.05), 3)
             self._state.focus = _clamp01(self._state.focus + bounded_intensity * 0.05)
         else:
+            self._state.fatigue = _clamp01(self._state.fatigue + bounded_intensity * 0.25)
+            self._state.arousal = _clamp01(self._state.arousal + bounded_intensity * 0.1)
+            self._state.energy = _clamp01(self._state.energy - bounded_intensity * 0.1)
             self._state.valence = round(max(-1.0, min(1.0, self._state.valence - 0.05)), 3)
             self._state.tension = round(max(0.0, min(1.0, self._state.tension + 0.1)), 3)
             self._state.focus = _clamp01(self._state.focus - bounded_intensity * 0.05)
@@ -261,25 +272,42 @@ class SomaticManager:
         queue_depth: int,
         active_goal_count: int = 0,
         parked_goal_count: int = 0,
+        active_commitment_count: int = 0,
+        user_facing_commitment_count: int = 0,
+        blocked_commitment_count: int = 0,
     ) -> None:
         """Mirror executive clutter into the somatic layer with a light touch."""
         queue_pressure = max(0.0, float(weighted_queue_load) - 1.0)
         depth_pressure = max(0, int(queue_depth) - 1) * 0.04
         active_goal_pressure = max(0, int(active_goal_count) - 1) * 0.05
         parked_pressure = min(0.2, max(0, int(parked_goal_count)) * 0.02)
+        commitment_pressure = min(
+            0.35,
+            max(0, int(active_commitment_count) - 2) * 0.045
+            + max(0, int(user_facing_commitment_count) - 1) * 0.065
+            + max(0, int(blocked_commitment_count)) * 0.035,
+        )
 
         target_tension = min(
             0.75,
-            0.03 + queue_pressure * 0.18 + depth_pressure + active_goal_pressure + parked_pressure,
+            0.03
+            + queue_pressure * 0.18
+            + depth_pressure
+            + active_goal_pressure
+            + parked_pressure
+            + commitment_pressure,
         )
         target_fatigue = min(
             0.65,
-            queue_pressure * 0.08 + max(0, int(queue_depth) - 2) * 0.03 + parked_pressure * 0.5,
+            queue_pressure * 0.08
+            + max(0, int(queue_depth) - 2) * 0.03
+            + parked_pressure * 0.5
+            + commitment_pressure * 0.45,
         )
         target_arousal = min(0.6, 0.05 + queue_pressure * 0.14 + depth_pressure * 0.5)
         target_certainty = max(
             0.25,
-            min(1.0, 0.7 - queue_pressure * 0.05 - parked_pressure * 0.25),
+            min(1.0, 0.7 - queue_pressure * 0.05 - parked_pressure * 0.25 - commitment_pressure * 0.35),
         )
 
         self._state.tension = _blend(self._state.tension, target_tension, 0.4)
@@ -298,6 +326,8 @@ class SomaticManager:
             parked_goal_count >= 5 and (queue_depth > 0 or active_goal_count > 0 or weighted_queue_load > 1.0)
         ):
             self._state.somatic_tag = "crowded"
+        elif commitment_pressure >= 0.18:
+            self._state.somatic_tag = "commitment_pressure"
         elif weighted_queue_load > 1.5 or active_goal_count > 1:
             self._state.somatic_tag = "task_pressure"
         elif parked_goal_count >= 5:

@@ -7,7 +7,6 @@ from opencas.infra.hook_registry import TypedHookRegistry
 from opencas.plugins import (
     PluginManifestError,
     PluginRegistry,
-    PluginStore,
     SkillRegistry,
     classify_plugin_update,
     evaluate_plugin_compatibility,
@@ -15,7 +14,6 @@ from opencas.plugins import (
     load_builtin_plugins,
     load_plugin_from_manifest,
 )
-from opencas.plugins.lifecycle import PluginLifecycleManager
 from opencas.tools import ToolRegistry
 
 

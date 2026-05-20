@@ -14,12 +14,12 @@ from opencas.execution.store import TaskStore
 
 def _sample_task() -> RepairTask:
     task = RepairTask(
-        objective="Continue Chronicle 4246 from the existing manuscript.",
+        objective="Continue writing project 4246 from the existing manuscript.",
         project_id="loop-4246",
         meta={
             "resume_project": {
-                "signature": "chronicle-4246",
-                "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+                "signature": "writing-project-4246",
+                "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             }
         },
     )
@@ -42,20 +42,20 @@ def test_build_salvage_packet_captures_partial_attempt_shape() -> None:
     packet = build_salvage_packet(
         task,
         outcome=AttemptOutcome.VERIFY_FAILED,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         artifact_paths_touched=[
-            "workspace/Chronicles/4246/chronicle_4246.md",
-            "workspace/Chronicles/4246/chronicle_4246.md",
+            "workspace/writing/4246/story_4246.md",
+            "workspace/writing/4246/story_4246.md",
         ],
         tool_calls=[{"name": "fs_read_file"}, {"name": "fs_write_file"}],
     )
 
-    assert packet.project_signature == "chronicle-4246"
+    assert packet.project_signature == "writing-project-4246"
     assert packet.project_id == "loop-4246"
-    assert packet.canonical_artifact_path == "workspace/Chronicles/4246/chronicle_4246.md"
+    assert packet.canonical_artifact_path == "workspace/writing/4246/story_4246.md"
     assert packet.outcome == AttemptOutcome.VERIFY_FAILED
     assert packet.recommended_mode == RetryMode.RESUME_EXISTING_ARTIFACT
-    assert packet.artifact_paths_touched == ["workspace/Chronicles/4246/chronicle_4246.md"]
+    assert packet.artifact_paths_touched == ["workspace/writing/4246/story_4246.md"]
     assert packet.plan_digest
     assert packet.execution_digest
     assert packet.verification_digest
@@ -93,21 +93,21 @@ def test_build_salvage_packet_is_deterministic_for_equivalent_inputs() -> None:
     packet1 = build_salvage_packet(
         task,
         outcome=AttemptOutcome.VERIFY_FAILED,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         artifact_paths_touched=[
-            "workspace/Chronicles/4246/chronicle_4246.md",
-            "workspace/Chronicles/4246/chronicle_4246.md",
-            "workspace/Chronicles/4246/notes.md",
+            "workspace/writing/4246/story_4246.md",
+            "workspace/writing/4246/story_4246.md",
+            "workspace/writing/4246/notes.md",
         ],
         tool_calls=[{"name": "fs_read_file"}, {"name": "fs_write_file"}],
     )
     packet2 = build_salvage_packet(
         task,
         outcome=AttemptOutcome.VERIFY_FAILED,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         artifact_paths_touched=[
-            "workspace/Chronicles/4246/notes.md",
-            "workspace/Chronicles/4246/chronicle_4246.md",
+            "workspace/writing/4246/notes.md",
+            "workspace/writing/4246/story_4246.md",
         ],
         tool_calls=[{"name": "fs_read_file"}, {"name": "fs_write_file"}],
     )
@@ -128,8 +128,8 @@ async def test_store_round_trips_latest_salvage_packet(tmp_path) -> None:
     packet1 = build_salvage_packet(
         task,
         outcome=AttemptOutcome.FAILED,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
-        artifact_paths_touched=["workspace/Chronicles/4246/chronicle_4246.md"],
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
+        artifact_paths_touched=["workspace/writing/4246/story_4246.md"],
         tool_calls=[{"name": "fs_read_file"}],
     )
     await store.save_salvage_packet(packet1)
@@ -146,10 +146,10 @@ async def test_store_round_trips_latest_salvage_packet(tmp_path) -> None:
     packet2 = build_salvage_packet(
         task,
         outcome=AttemptOutcome.VERIFY_FAILED,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         artifact_paths_touched=[
-            "workspace/Chronicles/4246/chronicle_4246.md",
-            "workspace/Chronicles/4246/notes.md",
+            "workspace/writing/4246/story_4246.md",
+            "workspace/writing/4246/notes.md",
         ],
         tool_calls=[{"name": "fs_read_file"}, {"name": "fs_write_file"}],
     )
@@ -172,11 +172,11 @@ async def test_store_prefers_highest_attempt_when_salvage_timestamps_match(tmp_p
         packet_id=UUID("ffffffff-ffff-ffff-ffff-ffffffffffff"),
         task_id=task.task_id,
         attempt=2,
-        project_signature="chronicle-4246",
+        project_signature="writing-project-4246",
         project_id=task.project_id,
         objective=task.objective,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
-        artifact_paths_touched=["workspace/Chronicles/4246/chronicle_4246.md"],
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
+        artifact_paths_touched=["workspace/writing/4246/story_4246.md"],
         plan_digest="plan-a",
         execution_digest="exec-a",
         verification_digest="verify-a",
@@ -196,13 +196,13 @@ async def test_store_prefers_highest_attempt_when_salvage_timestamps_match(tmp_p
         packet_id=UUID("00000000-0000-0000-0000-000000000000"),
         task_id=task.task_id,
         attempt=3,
-        project_signature="chronicle-4246",
+        project_signature="writing-project-4246",
         project_id=task.project_id,
         objective=task.objective,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         artifact_paths_touched=[
-            "workspace/Chronicles/4246/chronicle_4246.md",
-            "workspace/Chronicles/4246/notes.md",
+            "workspace/writing/4246/story_4246.md",
+            "workspace/writing/4246/notes.md",
         ],
         plan_digest="plan-b",
         execution_digest="exec-b",
@@ -239,11 +239,11 @@ async def test_store_replaces_salvage_packet_for_same_attempt(tmp_path) -> None:
         packet_id=UUID("11111111-1111-1111-1111-111111111111"),
         task_id=task.task_id,
         attempt=2,
-        project_signature="chronicle-4246",
+        project_signature="writing-project-4246",
         project_id=task.project_id,
         objective=task.objective,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
-        artifact_paths_touched=["workspace/Chronicles/4246/chronicle_4246.md"],
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
+        artifact_paths_touched=["workspace/writing/4246/story_4246.md"],
         plan_digest="plan-a",
         execution_digest="exec-a",
         verification_digest="verify-a",
@@ -262,13 +262,13 @@ async def test_store_replaces_salvage_packet_for_same_attempt(tmp_path) -> None:
         packet_id=UUID("22222222-2222-2222-2222-222222222222"),
         task_id=task.task_id,
         attempt=2,
-        project_signature="chronicle-4246",
+        project_signature="writing-project-4246",
         project_id=task.project_id,
         objective=task.objective,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         artifact_paths_touched=[
-            "workspace/Chronicles/4246/chronicle_4246.md",
-            "workspace/Chronicles/4246/notes.md",
+            "workspace/writing/4246/story_4246.md",
+            "workspace/writing/4246/notes.md",
         ],
         plan_digest="plan-b",
         execution_digest="exec-b",
@@ -334,11 +334,11 @@ async def test_store_migrates_legacy_duplicate_salvage_rows_before_unique_index(
         packet_id=UUID("11111111-1111-1111-1111-111111111111"),
         task_id=task.task_id,
         attempt=2,
-        project_signature="chronicle-4246",
+        project_signature="writing-project-4246",
         project_id=task.project_id,
         objective=task.objective,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
-        artifact_paths_touched=["workspace/Chronicles/4246/chronicle_4246.md"],
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
+        artifact_paths_touched=["workspace/writing/4246/story_4246.md"],
         plan_digest="plan-a",
         execution_digest="exec-a",
         verification_digest="verify-a",
@@ -357,13 +357,13 @@ async def test_store_migrates_legacy_duplicate_salvage_rows_before_unique_index(
         packet_id=UUID("22222222-2222-2222-2222-222222222222"),
         task_id=task.task_id,
         attempt=2,
-        project_signature="chronicle-4246",
+        project_signature="writing-project-4246",
         project_id=task.project_id,
         objective=task.objective,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
         artifact_paths_touched=[
-            "workspace/Chronicles/4246/chronicle_4246.md",
-            "workspace/Chronicles/4246/notes.md",
+            "workspace/writing/4246/story_4246.md",
+            "workspace/writing/4246/notes.md",
         ],
         plan_digest="plan-b",
         execution_digest="exec-b",

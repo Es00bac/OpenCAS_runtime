@@ -28,7 +28,7 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO_ROOT))
@@ -178,13 +178,13 @@ def _write_report(report: HarnessReport, out_path: Path) -> None:
 
 def _write_markdown(report: HarnessReport, out_path: Path) -> None:
     lines = [
-        f"# OpenCAS Behavioral Eval Report",
-        f"",
+        "# OpenCAS Behavioral Eval Report",
+        "",
         f"Generated: {report.generated_at}",
-        f"",
+        "",
         f"**Overall**: {'PASSED' if report.overall_passed else 'FAILED'}  "
         f"| {report.total_passed} passed, {report.total_failed} failed",
-        f"",
+        "",
     ]
     if report.critical_failures:
         lines += ["## Critical Failures", ""]
@@ -196,12 +196,12 @@ def _write_markdown(report: HarnessReport, out_path: Path) -> None:
         status = "PASS" if suite.failed == 0 else "FAIL"
         lines += [
             f"## {suite.suite} [{status}]",
-            f"",
+            "",
             f"{suite.passed}/{len(suite.results)} passed | "
             f"mean score {suite.mean_score:.2f} | {suite.duration_seconds:.1f}s",
-            f"",
-            f"| Eval | Passed | Score | Notes |",
-            f"|------|--------|-------|-------|",
+            "",
+            "| Eval | Passed | Score | Notes |",
+            "|------|--------|-------|-------|",
         ]
         for r in suite.results:
             crit = " ⚠️" if r.name in CRITICAL_EVALS else ""

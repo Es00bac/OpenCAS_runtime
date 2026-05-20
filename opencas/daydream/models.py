@@ -35,6 +35,14 @@ class DaydreamThoughtRoute(str, Enum):
     DISCARD = "discard"
 
 
+class DaydreamDialogueTurn(BaseModel):
+    """A compact, persisted self-dialogue turn inside a daydream thought."""
+
+    voice: str = ""
+    stance: str = ""
+    text: str = ""
+
+
 class DaydreamThought(BaseModel):
     """A grounded thought produced during daydreaming."""
 
@@ -44,10 +52,18 @@ class DaydreamThought(BaseModel):
     question: str = ""
     hypothesis: str = ""
     possible_experiment: str = ""
+    imaginative_branch: str = ""
+    practical_branch: str = ""
+    bridge: str = ""
+    suggested_handler: str = ""
+    contact_posture: str = ""
+    self_work_intent: str = ""
     usefulness: float = Field(default=0.5, ge=0.0, le=1.0)
     novelty: float = Field(default=0.5, ge=0.0, le=1.0)
     confidence: float = Field(default=0.5, ge=0.0, le=1.0)
+    risk: float = Field(default=0.0, ge=0.0, le=1.0)
     grounding: List[CognitionGrounding] = Field(default_factory=list)
+    inner_dialogue: List[DaydreamDialogueTurn] = Field(default_factory=list)
 
 
 class DaydreamReflection(BaseModel):

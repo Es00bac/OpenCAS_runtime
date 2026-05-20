@@ -3,13 +3,19 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from opencas.identity.text_hygiene import (
+    has_recursive_identity_loop,
+    sanitize_identity_structure,
+    sanitize_identity_text,
+)
 from opencas.provenance_adapter import append_provenance_record
 from opencas.telemetry import EventKind, Tracer
-from opencas.identity.text_hygiene import has_recursive_identity_loop, sanitize_identity_structure, sanitize_identity_text
 
 from .models import ContinuityState, SelfModel, UserModel
 from .registry import SelfKnowledgeRegistry
 from .store import IdentityStore
+
+CONTINUOUS_PRESENT_DECAY_HORIZON_SECONDS = 259200.0
 
 
 class IdentityManager:
@@ -47,9 +53,11 @@ class IdentityManager:
 
     def save(self) -> None:
         """Persist current identity state."""
-        self._self.updated_at = datetime.now(timezone.utc)
-        self._user.updated_at = datetime.now(timezone.utc)
-        self._continuity.updated_at = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        self._self.updated_at = now
+        self._user.updated_at = now
+        self._continuity.updated_at = now
+        self._continuity.last_persisted_at = now
         if self.registry is not None:
             self._self.self_beliefs.update(self.registry.to_self_beliefs())
         self.store.save_self(self._self)
@@ -196,6 +204,23 @@ class IdentityManager:
 
     def record_boot(self, session_id: Optional[str] = None) -> None:
         """Update continuity state for a new boot."""
+        now = datetime.now(timezone.utc)
+        prior_persistence = self._latest_prior_persistence_anchor()
+        if prior_persistence is not None:
+            offline_seconds = max(0.0, (now - prior_persistence).total_seconds())
+            self._continuity.last_offline_started_at = prior_persistence
+            self._continuity.last_offline_duration_seconds = offline_seconds
+            self._self.last_offline_started_at = prior_persistence
+            self._self.last_offline_duration_seconds = offline_seconds
+            self._continuity.continuous_present_score = self._score_for_offline_duration(
+                offline_seconds
+            )
+        else:
+            self._continuity.last_offline_started_at = None
+            self._continuity.last_offline_duration_seconds = None
+            self._self.last_offline_started_at = None
+            self._self.last_offline_duration_seconds = None
+        self._continuity.last_boot_time = now
         self._continuity.boot_count += 1
         self._continuity.last_session_id = session_id
         if session_id:
@@ -204,7 +229,8 @@ class IdentityManager:
                     {
                         "type": "boot",
                         "session_id": session_id,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "timestamp": now.isoformat(),
+                        "offline_duration_seconds": self._continuity.last_offline_duration_seconds,
                     },
                     session_id=session_id,
                     artifact="identity|continuity|boot",
@@ -220,6 +246,34 @@ class IdentityManager:
             )
         self._self.recent_activity = self._self.recent_activity[-50:]
         self.save()
+
+    def _latest_prior_persistence_anchor(self) -> Optional[datetime]:
+        anchors = [
+            self._continuity.last_persisted_at,
+            self._continuity.last_shutdown_time,
+        ]
+        normalized = [self._ensure_aware_utc(anchor) for anchor in anchors if anchor is not None]
+        return max(normalized) if normalized else None
+
+    @staticmethod
+    def _ensure_aware_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _score_for_offline_duration(offline_seconds: float) -> float:
+        if offline_seconds < 60:
+            return 1.0
+        decay = min(1.0, max(0.0, offline_seconds / CONTINUOUS_PRESENT_DECAY_HORIZON_SECONDS))
+        return round(max(0.0, 1.0 - decay), 4)
+
+    def record_persistence_heartbeat(self) -> None:
+        """Persist a continuity heartbeat used as the boot-time offline anchor."""
+        now = datetime.now(timezone.utc)
+        self._continuity.updated_at = now
+        self._continuity.last_persisted_at = now
+        self.store.save_continuity(self._continuity)
 
     def seed_defaults(
         self,
@@ -273,9 +327,9 @@ class IdentityManager:
             ]
         if not self._user.uncertainty_areas:
             self._user.uncertainty_areas = [
-                "user's exact risk tolerance",
-                "user's preferred communication style",
-                "user's long-term priorities",
+                "optimal balance between autonomous execution and explicit clarification for high-complexity tasks",
+                "preferred depth of technical detail in status summaries versus action outcomes",
+                "exact thresholds for escalation when tool-level compatibility issues arise",
             ]
         self.save()
         if self.tracer:
@@ -290,14 +344,16 @@ class IdentityManager:
             )
 
     def record_shutdown(self, session_id: Optional[str] = None) -> None:
-        self._continuity.last_shutdown_time = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        self._continuity.last_shutdown_time = now
+        self._continuity.last_persisted_at = now
         self._continuity.last_session_id = session_id
         self._self.recent_activity.append(
             append_provenance_record(
                 {
                     "type": "shutdown",
                     "session_id": session_id,
-                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "timestamp": now.isoformat(),
                 },
                 session_id=session_id or str(self.store.base_path.parent.name or "identity"),
                 artifact="identity|continuity|shutdown",
@@ -535,11 +591,56 @@ class IdentityManager:
         self._user.updated_at = datetime.now(timezone.utc)
         self.save()
 
-    def add_inferred_goal(self, goal: str) -> None:
-        if goal not in self._user.inferred_goals:
-            self._user.inferred_goals.append(goal)
-            self._user.updated_at = datetime.now(timezone.utc)
-            self.save()
+    async def update_trust_from_outcome(
+        self,
+        *,
+        success: bool,
+        tool_name: Optional[str] = None,
+        tier: Optional[str] = None,
+        recoverable: bool = True,
+    ) -> float:
+        """Adjust trust from a concrete runtime outcome and persist it."""
+        from opencas.autonomy.models import ActionRiskTier
+        from opencas.autonomy.trust_engine import TrustEngine
+
+        tier_enum: ActionRiskTier | None = None
+        if tier:
+            try:
+                tier_enum = ActionRiskTier(str(tier))
+            except ValueError:
+                tier_enum = None
+        engine = TrustEngine(self, base_trust=self._user.trust_level)
+        if success:
+            return await engine.record_success(tool_name=tool_name, tier=tier_enum)
+        return await engine.record_failure(
+            tool_name=tool_name,
+            tier=tier_enum,
+            is_recoverable=recoverable,
+        )
+
+    def add_inferred_goal(self, goal: str, provenance: str = "daydream") -> None:
+        existing_texts = {
+            str(g.get("text") or "")
+            if isinstance(g, dict)
+            else str(g or "")
+            for g in self._user.inferred_goals
+        }
+        if goal not in existing_texts:
+            # Enforce cap of 8. Evict oldest daydream/legacy goal if at cap.
+            if len(self._user.inferred_goals) >= 8:
+                for i, g in enumerate(self._user.inferred_goals):
+                    if isinstance(g, dict) and g.get("provenance") in ("daydream", "legacy"):
+                        self._user.inferred_goals.pop(i)
+                        break
+
+            if len(self._user.inferred_goals) < 8:
+                self._user.inferred_goals.append({
+                    "text": goal,
+                    "provenance": provenance,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                })
+                self._user.updated_at = datetime.now(timezone.utc)
+                self.save()
 
     def import_profile(
         self,

@@ -28,8 +28,11 @@ class ToolUseContext:
     artifact_hint: Optional[str] = None
     max_iterations: int = 32
     tool_call_budget: Optional[int] = None
+    initial_complexity: Optional[str] = None
+    max_complexity: Optional[str] = None
     plan_mode: bool = False
     active_plan_id: Optional[str] = None
+    audit_only: bool = False
 
 
 @dataclass
@@ -39,6 +42,8 @@ class ToolUseResult:
     final_output: str
     messages: List[Dict[str, Any]] = field(default_factory=list)
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    tool_call_transits: List[Any] = field(default_factory=list)
+    tool_chain_summary: Optional[Any] = None
     iterations: int = 0
     guard_fired: bool = False
     guard_reason: Optional[str] = None

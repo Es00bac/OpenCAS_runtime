@@ -1,22 +1,34 @@
 import pytest
 import httpx
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import ed25519
 from pathlib import Path
+from types import SimpleNamespace
 
 from opencas.api.server import create_app
 from opencas.api.config_overview import build_config_overview_payload
+from opencas.api.routes.monitor import (
+    _executive_assistant_items,
+    _executive_assistant_summary,
+    build_monitor_router,
+)
+from opencas.api.routes.chat import _active_priority_intention, _fast_workflow_status, _merge_priority_goal
 from opencas.bootstrap import BootstrapConfig
+from opencas.context import ContextLane, ContextProposal, ContextProposalStore
 from opencas.governance import build_plugin_trust_feed_signature_payload
+from opencas.generation.policy import GenerationPolicyConfig
 from opencas.model_routing import ModelRoutingConfig
 
 
 class FakeStore:
     def __init__(self, events=None):
         self._events = events or []
+        self.query_calls = 0
 
     def query(self, **kwargs):
+        self.query_calls += 1
         limit = kwargs.get("limit", 1000)
         kinds = kwargs.get("kinds")
         session_id = kwargs.get("session_id")
@@ -43,6 +55,8 @@ class FakeTelemetryEvent:
         self.session_id = session_id
         self.span_id = span_id
         self.timestamp = datetime.now(timezone.utc)
+        self.activated_at = None
+        self.noted_as_such = False
 
 
 class FakeContextStore:
@@ -90,6 +104,12 @@ class FakeMemoryStore:
         return []
 
     async def get_episodes_by_ids(self, ids):
+        return []
+
+    async def get_edges_for_batch(self, *args, **kwargs):
+        return []
+
+    async def search_memories_by_content(self, query, limit=20):
         return []
 
     async def get_stats(self):
@@ -373,6 +393,22 @@ class FakeTokenTelemetry:
             FakeSummaryPayload({"bucketStart": 2, "totalTokens": 1200, "totalCalls": 2, "avgLatencyMs": 330, "costEstimate": 0.0665}),
         ]
 
+    def get_events(self, _start, _end):
+        return [
+            SimpleNamespace(
+                provider="openai-codex",
+                model="openai/gpt-5.5",
+                prompt_tokens=1200,
+                cached_prompt_tokens=480,
+            ),
+            SimpleNamespace(
+                provider="openai-codex",
+                model="openai/gpt-5.5",
+                prompt_tokens=800,
+                cached_prompt_tokens=0,
+            ),
+        ]
+
     def get_breakdown(self, _start, _end, field, limit=20):
         rows = {
             "provider": [{"provider": "anthropic", "totalTokens": 2100, "totalCalls": 3, "avgLatencyMs": 320, "costEstimate": 0.12}],
@@ -519,6 +555,68 @@ class FakeDaydreamStore:
         }
 
 
+class FakeDaydreamSignalStore:
+    async def list_recent(self, limit=10):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        items = [
+            SimpleNamespace(
+                signal_id="sig-1",
+                created_at=datetime(2026, 4, 10, 14, 0, tzinfo=timezone.utc),
+                source_reflection_id="refl-1",
+                source_thought_index=0,
+                source_mode="waking_daydream",
+                summary="Sketch a proof browser.",
+                imaginative_branch="Claims become lit windows.",
+                practical_branch="Operators can inspect unresolved claims.",
+                bridge="The image maps to a provenance panel.",
+                novelty=0.8,
+                usefulness=0.9,
+                confidence=0.75,
+                risk=0.1,
+                suggested_route=type("Route", (), {"value": "self_note"})(),
+                contact_posture=type("Posture", (), {"value": "share_after_artifact"})(),
+                self_work_kind=type("Kind", (), {"value": "note"})(),
+                route_status="routed",
+                route_reason="handler suggested self_note",
+                artifact_paths=["workspace/self/notes/proof-browser.md"],
+                evidence_ids=["evidence-1"],
+                meta={"thought_kind": "system_insight"},
+            )
+        ]
+        return items[:limit]
+
+    async def list_receipts(self, limit=10):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        items = [
+            SimpleNamespace(
+                receipt_id="receipt-1",
+                signal_id="sig-1",
+                created_at=datetime(2026, 4, 10, 14, 5, tzinfo=timezone.utc),
+                route=type("Route", (), {"value": "self_note"})(),
+                kind=type("Kind", (), {"value": "note"})(),
+                outcome="self_note_written",
+                summary="handler suggested self_note",
+                artifact_paths=["workspace/self/notes/proof-browser.md"],
+                raw={"source_reflection_id": "refl-1"},
+            )
+        ]
+        return items[:limit]
+
+    async def get_summary(self, window_days=7):
+        return {
+            "total_signals": 1,
+            "window_days": window_days,
+            "window_signals": 1,
+            "route_counts": {"self_note": 1},
+            "status_counts": {"routed": 1},
+            "window_self_work_receipts": 1,
+        }
+
+
 class FakeConflictStore:
     async def list_conflicts(self, limit=20, resolved=None):
         from datetime import datetime, timezone
@@ -647,7 +745,7 @@ class FakeDaydreamMemoryStore(FakeMemoryStore):
         from datetime import datetime, timezone
         from types import SimpleNamespace
 
-        if tag != "daydream":
+        if tag not in {"daydream", "keeper"}:
             return []
         now = datetime(2026, 4, 10, 7, 31, tzinfo=timezone.utc)
         return [
@@ -681,10 +779,10 @@ class FakeShadowRegistry:
                     "id": "shadow-2",
                     "captured_at": "2026-04-20T01:15:00+00:00",
                     "tool_name": "repair_retry",
-                    "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+                    "intent_summary": "retry:workspace/writing/4246/story_4246.md",
                     "block_reason": "retry_blocked",
                     "block_context": "RetryGovernor blocked a broad retry with no new evidence.",
-                    "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+                    "artifact": "workspace/writing/4246/story_4246.md",
                     "capture_source": "repair_executor",
                 },
                 {
@@ -700,20 +798,20 @@ class FakeShadowRegistry:
             ][:limit],
             "top_clusters": [
                 {
-                    "fingerprint": "cluster-chronicle",
+                    "fingerprint": "cluster-creative_writing",
                     "count": 2,
                     "triage_status": "active",
                     "annotation": None,
                     "block_reason": "retry_blocked",
                     "tool_name": "repair_retry",
-                    "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+                    "intent_summary": "retry:workspace/writing/4246/story_4246.md",
                     "latest_captured_at": "2026-04-20T01:15:00+00:00",
                 }
             ][:cluster_limit],
         }
 
     def inspect_cluster(self, fingerprint, limit=25):
-        if fingerprint != "cluster-chronicle":
+        if fingerprint != "cluster-creative_writing":
             return {"available": False, "fingerprint": fingerprint, "entries": []}
         return {
             "available": True,
@@ -721,7 +819,7 @@ class FakeShadowRegistry:
             "count": 2,
             "block_reason": "retry_blocked",
             "tool_name": "repair_retry",
-            "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+            "intent_summary": "retry:workspace/writing/4246/story_4246.md",
             "latest_captured_at": "2026-04-20T01:15:00+00:00",
             "triage_status": "active",
             "annotation": None,
@@ -732,31 +830,31 @@ class FakeShadowRegistry:
                     "id": "shadow-2",
                     "captured_at": "2026-04-20T01:15:00+00:00",
                     "tool_name": "repair_retry",
-                    "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+                    "intent_summary": "retry:workspace/writing/4246/story_4246.md",
                     "block_reason": "retry_blocked",
                     "block_context": "RetryGovernor blocked a broad retry with no new evidence.",
-                    "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+                    "artifact": "workspace/writing/4246/story_4246.md",
                     "capture_source": "repair_executor",
                     "target_kind": "repair_task",
-                    "target_id": "task-chronicle-1",
+                    "target_id": "task-writing-project-1",
                 },
                 {
                     "id": "shadow-3",
                     "captured_at": "2026-04-20T01:12:00+00:00",
                     "tool_name": "repair_retry",
-                    "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+                    "intent_summary": "retry:workspace/writing/4246/story_4246.md",
                     "block_reason": "retry_blocked",
                     "block_context": "RetryGovernor blocked another broad retry with no new evidence.",
-                    "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+                    "artifact": "workspace/writing/4246/story_4246.md",
                     "capture_source": "repair_executor",
                     "target_kind": "repair_task",
-                    "target_id": "task-chronicle-1",
+                    "target_id": "task-writing-project-1",
                 },
             ][:limit],
         }
 
     def triage_cluster(self, fingerprint, annotation=None, dismissed=None):
-        if fingerprint != "cluster-chronicle":
+        if fingerprint != "cluster-creative_writing":
             return {"available": False, "fingerprint": fingerprint, "entries": []}
         return {
             "available": True,
@@ -764,7 +862,7 @@ class FakeShadowRegistry:
             "count": 2,
             "block_reason": "retry_blocked",
             "tool_name": "repair_retry",
-            "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+            "intent_summary": "retry:workspace/writing/4246/story_4246.md",
             "latest_captured_at": "2026-04-20T01:15:00+00:00",
             "triage_status": "dismissed" if dismissed else "active",
             "annotation": annotation,
@@ -775,13 +873,13 @@ class FakeShadowRegistry:
                     "id": "shadow-2",
                     "captured_at": "2026-04-20T01:15:00+00:00",
                     "tool_name": "repair_retry",
-                    "intent_summary": "retry:workspace/Chronicles/4246/chronicle_4246.md",
+                    "intent_summary": "retry:workspace/writing/4246/story_4246.md",
                     "block_reason": "retry_blocked",
                     "block_context": "RetryGovernor blocked a broad retry with no new evidence.",
-                    "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+                    "artifact": "workspace/writing/4246/story_4246.md",
                     "capture_source": "repair_executor",
                     "target_kind": "repair_task",
-                    "target_id": "task-chronicle-1",
+                    "target_id": "task-writing-project-1",
                 }
             ],
         }
@@ -807,6 +905,7 @@ class FakeCtx:
     receipt_store = FakeReceiptStore()
     tasks = FakeTaskStore()
     daydream_store = FakeDaydreamStore()
+    daydream_signal_store = FakeDaydreamSignalStore()
     conflict_store = FakeConflictStore()
     work_store = FakeWorkStore()
     shadow_registry = FakeShadowRegistry()
@@ -1146,6 +1245,54 @@ class FakeRuntime:
         }
 
 
+def test_fast_chat_workflow_status_prefers_ctx_executive_source():
+    stale = SimpleNamespace(
+        intention="stale runtime executive",
+        active_goals=["stale goal"],
+        intention_source="runtime",
+        capacity_remaining=0,
+        queue=None,
+        recommend_pause=lambda: True,
+    )
+    clean = SimpleNamespace(
+        intention="clean context executive",
+        active_goals=["clean goal"],
+        intention_source="ctx",
+        capacity_remaining=5,
+        queue=None,
+        recommend_pause=lambda: False,
+    )
+    runtime = SimpleNamespace(executive=stale, ctx=SimpleNamespace(executive=clean))
+
+    payload = _fast_workflow_status(runtime)
+
+    assert payload["executive"]["intention"] == "clean context executive"
+    assert payload["executive"]["active_goals"] == ["clean goal"]
+    assert payload["executive"]["capacity_remaining"] == 5
+    assert payload["executive"]["recommend_pause"] is False
+
+
+@pytest.mark.asyncio
+async def test_chat_priority_intention_uses_active_operator_priority():
+    class Store:
+        async def list_attention(self, limit=12):
+            return [
+                SimpleNamespace(
+                    label="Operator priority: WingLab delivery plan",
+                    status="active",
+                    strength=0.91,
+                )
+            ]
+
+    runtime = SimpleNamespace(ctx=SimpleNamespace(cognitive_state_store=Store()))
+
+    assert await _active_priority_intention(runtime) == "Operator priority: WingLab delivery plan"
+    assert _merge_priority_goal(["existing"], "Operator priority: WingLab delivery plan") == [
+        "Operator priority: WingLab delivery plan",
+        "existing",
+    ]
+
+
 class FakeEmbeddingCache:
     def __init__(self, records):
         self.records = records
@@ -1195,6 +1342,26 @@ class FakeProjectionMemoryStore(FakeMemoryStore):
                 affect=None,
             ),
         ]
+
+    async def list_memories(self, limit=100, offset=0):
+        from datetime import datetime, timezone
+        from types import SimpleNamespace
+
+        now = datetime.now(timezone.utc)
+        return [
+            SimpleNamespace(
+                memory_id="mem-1",
+                created_at=now,
+                updated_at=now,
+                content="distilled memory",
+                embedding_id="emb-3",
+                source_episode_ids=["ep-1"],
+                tags=["summary"],
+                salience=2.0,
+                access_count=3,
+                last_accessed=None,
+            )
+        ][offset:offset + limit]
 
 
 class FakeNodeDetailMemoryStore(FakeMemoryStore):
@@ -1390,6 +1557,7 @@ class FakeMutableLLM:
         self.manager = FakeMutableGatewayManager()
         self.model_routing = ModelRoutingConfig()
         self.last_set = None
+        self.last_generation_policy = None
 
     def set_model_routing(self, *, default_model=None, model_routing=None):
         self.default_model = default_model or self.default_model
@@ -1398,6 +1566,9 @@ class FakeMutableLLM:
             "default_model": self.default_model,
             "model_routing": self.model_routing,
         }
+
+    def set_generation_policy(self, generation_policy):
+        self.last_generation_policy = generation_policy
 
 
 class FakePluginTrustService:
@@ -1554,6 +1725,45 @@ def test_health_endpoint():
     assert data["overall"] == "pass"
 
 
+def test_baa_status_endpoint_surfaces_context_guard_holds():
+    runtime = FakeRuntime()
+    guarded = SimpleNamespace(
+        meta={
+            "context_guard_status": "held",
+            "context_guard_reason": "reflective_proposal_not_committed",
+        }
+    )
+    waiting = SimpleNamespace(meta={"held_reason": "waiting_for_dependencies"})
+    runtime.ctx.harness = SimpleNamespace(
+        baa=SimpleNamespace(
+            queue_size=4,
+            held_size=2,
+            active_count=1,
+            _held={"guarded": guarded, "waiting": waiting},
+        )
+    )
+
+    app = create_app(runtime)
+    client = TestClient(app)
+    resp = client.get("/api/monitor/baa")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["queue_size"] == 4
+    assert data["held_size"] == 2
+    assert data["active_count"] == 1
+    assert data["context_guard_held_count"] == 1
+    assert data["held_reason_counts"] == {
+        "reflective_proposal_not_committed": 1,
+        "waiting_for_dependencies": 1,
+    }
+    assert data["context_guard_reason_counts"] == {
+        "reflective_proposal_not_committed": 1,
+    }
+    assert data["dependency_reason_counts"] == {"waiting_for_dependencies": 1}
+    assert data["approval_reason_counts"] == {}
+
+
 def test_config_endpoint():
     app = create_app(FakeRuntime())
     client = TestClient(app)
@@ -1570,6 +1780,53 @@ def test_provider_config_endpoint():
     assert resp.status_code == 200
     data = resp.json()
     assert "providers" in data
+
+
+def test_executive_assistant_memory_binding_uses_current_packet_status() -> None:
+    items = _executive_assistant_items(
+        {
+            "memory_binding": {
+                "duplicate_tool_calls": {
+                    "current_week_rate": 0.0,
+                    "current_week_duplicates": 0,
+                },
+                "compaction_continuation_handles": {
+                    "retained_preservation_rate": "0.00%",
+                    "current_packet_count": 1,
+                    "current_status": "pass",
+                    "status": "retained E9 target_met=False; current continuation_packet episode rows=1",
+                },
+                "exact_handle_recall": {"recall_at_5": "99.00%"},
+                "manuscript_authorship_cold_replay": "source present",
+            }
+        }
+    )
+
+    memory_item = next(item for item in items if item["title"] == "Memory and Binding")
+
+    assert memory_item["status"] == "pass"
+    assert memory_item["continuation_packet_rows"] == 1
+    assert memory_item["retained_continuation_handle_preservation"] == "0.00%"
+
+
+def test_executive_assistant_substrate_gap_marks_future_windows_monitoring() -> None:
+    items = _executive_assistant_items(
+        {
+            "substrate_gaps": {
+                "continuous_present_score": "1 minute pass; 1 hour pending; 24 hours pending; 3 days pending",
+                "phenomenological_audit_dimensions": "PA=0.976; token=0.905; belief=1.0; somatic=1.0; identity=1.0; turns=15/15; status=complete",
+                "phenomenological_audit": {
+                    "pa_score": 0.976,
+                    "regressions": [],
+                    "path": "dev-notes/qualification/phenomenological-audit-2026-05-13.json",
+                },
+            }
+        }
+    )
+
+    item = next(item for item in items if item["title"] == "Substrate Gaps")
+
+    assert item["status"] == "monitoring"
 
 
 def test_memory_stats_endpoint():
@@ -1598,6 +1855,10 @@ async def test_chat_context_summary_surfaces_active_lane():
             "manager": FakeGatewayManager(),
             "default_model": "kimi-coding/k2p5",
             "resolve_reasoning_effort_for_complexity": lambda self, complexity=None: "medium",
+            "model_context_metadata": lambda self: {
+                "context_window": 262144,
+                "prompt_context_budget": 224000,
+            },
         },
     )()
     app = create_app(runtime)
@@ -1611,6 +1872,12 @@ async def test_chat_context_summary_surfaces_active_lane():
     assert data["lane"]["resolved_model"] == "kimi-coding/k2p5"
     assert data["lane"]["reasoning_supported"] is True
     assert data["lane"]["reasoning_effort"] == "medium"
+    assert data["context_budget"]["context_window"] == 262144
+    assert data["context_budget"]["model_prompt_context_budget"] == 224000
+    assert data["context_budget"]["prompt_context_budget"] == 64000
+    assert data["context_budget"]["active_prompt_budget"] == 64000
+    assert data["context_budget"]["prompt_cache_strategy"] == "stable_prefix_then_volatile_runtime_facts"
+    assert "current_time" in data["context_budget"]["volatile_prompt_fields_late"]
 
 
 @pytest.mark.asyncio
@@ -1652,6 +1919,135 @@ def test_runtime_status_endpoint():
     assert data["sandbox"]["mode"] == "workspace-only"
     assert data["execution"]["processes"]["total_count"] == 0
     assert data["execution"]["browser"]["total_count"] == 0
+
+
+def test_executive_assistant_monitor_endpoint_surfaces_repair_loops(tmp_path: Path):
+    runtime = FakeRuntime()
+    state_dir = tmp_path / ".opencas"
+    state_dir.mkdir()
+    runtime.ctx.config = type(
+        "Config",
+        (),
+        {
+            "state_dir": str(state_dir),
+            "session_id": "dashboard-test",
+            "workspace_root": str(tmp_path),
+            "workspace_roots": [str(tmp_path)],
+            "model_dump": lambda self, **kw: {
+                "state_dir": str(state_dir),
+                "session_id": "dashboard-test",
+                "workspace_root": str(tmp_path),
+            },
+        },
+    )()
+    app = FastAPI()
+    app.include_router(build_monitor_router(runtime))
+    client = TestClient(app)
+
+    resp = client.get("/api/monitor/executive-assistant")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["available"] is True
+    assert data["summary"]["audited_turns_7d"] == 0
+    assert data["summary"]["promise_claim_count"] == 0
+    assert data["summary"]["daydream_consecutive_skip_count"] == 0
+    assert {item["title"] for item in data["items"]} >= {
+        "Memory and Binding",
+        "Proactive Surfacing",
+        "Loop Closures",
+        "Substrate Gaps",
+        "Pathology Recurrence",
+    }
+    assert "raw" in data
+    assert "proactive" in data["raw"]
+
+
+def test_executive_assistant_loop_closure_item_warns_on_zero_closures():
+    raw = {
+        "memory_binding": {},
+        "proactive": {},
+        "loop_closures": {
+            "shadow_registry": {"active_clusters": 3, "dismissed_clusters": 0},
+            "wellbeing": {
+                "addressed_drift_observation_count": 0,
+                "coherence": 0.42,
+                "overall_risk": 0.61,
+            },
+            "proof_chain": {"promise_claim_count": 1, "promise_claims_with_receipt_evidence": 1},
+        },
+        "substrate_gaps": {},
+        "pathology": {},
+    }
+
+    items = _executive_assistant_items(raw)
+    loop_item = next(item for item in items if item["title"] == "Loop Closures")
+
+    assert loop_item["status"] == "warn"
+
+
+def test_executive_assistant_substrate_item_surfaces_pa_score():
+    raw = {
+        "memory_binding": {},
+        "proactive": {},
+        "loop_closures": {},
+        "substrate_gaps": {
+            "continuous_present_score": "pass",
+            "phenomenological_audit_dimensions": "PA=0.82; turns=15/15; status=complete",
+            "phenomenological_audit": {
+                "pa_score": 0.82,
+                "path": "/tmp/phenomenological-audit-2026-05-07.json",
+                "regressions": [],
+            },
+        },
+        "pathology": {},
+    }
+
+    summary = _executive_assistant_summary(raw)
+    items = _executive_assistant_items(raw)
+    substrate_item = next(item for item in items if item["title"] == "Substrate Gaps")
+
+    assert summary["phenomenological_pa_score"] == 0.82
+    assert substrate_item["phenomenological_pa_score"] == 0.82
+    assert substrate_item["phenomenological_regression_count"] == 0
+
+
+def test_executive_assistant_pathology_item_warns_on_recursive_recurrence():
+    raw = {
+        "memory_binding": {},
+        "proactive": {},
+        "loop_closures": {},
+        "substrate_gaps": {},
+        "pathology": {
+            "recursive_parked_goal_recurrence": 1,
+            "canned_phrase_regression": "not yet run by Prompt G harness",
+        },
+    }
+
+    items = _executive_assistant_items(raw)
+    pathology_item = next(item for item in items if item["title"] == "Pathology Recurrence")
+
+    assert pathology_item["status"] == "warn"
+
+
+def test_executive_assistant_pathology_item_preserves_archived_evidence_without_warning():
+    raw = {
+        "memory_binding": {},
+        "proactive": {},
+        "loop_closures": {},
+        "substrate_gaps": {},
+        "pathology": {
+            "recursive_parked_goal_recurrence": 0,
+            "recursive_parked_goal_archived_evidence": 4,
+            "canned_phrase_regression": "not yet run by Prompt G harness",
+        },
+    }
+
+    items = _executive_assistant_items(raw)
+    pathology_item = next(item for item in items if item["title"] == "Pathology Recurrence")
+
+    assert pathology_item["status"] == "pending"
+    assert pathology_item["recursive_parked_goal_archived_evidence"] == 4
 
 
 @pytest.mark.asyncio
@@ -1703,12 +2099,18 @@ async def test_dashboard_contains_operations_surface():
     assert "Meaningful Loop" in body
     assert "/api/monitor/affective-examinations" in body
     assert "Affective Examinations" in body
+    assert "/api/monitor/affective-trends" in body
+    assert "Affective Trends" in body
     assert "dashboard/static/js/task_beacon.js" in body
     assert "/api/monitor/task-beacon" in body
     assert "/api/daydream/summary" in body
     assert "/api/daydream/reflections" in body
     assert "/api/daydream/conflicts" in body
     assert "/api/daydream/promotions" in body
+    assert "/api/monitor/executive-assistant" in body
+    assert "Executive Assistant System Data" in body
+    assert "renderExecutiveAssistantCard" in body
+    assert "renderExecutiveAssistantPanel" in body
     assert "Usage" in body
     assert "/api/usage/overview" in body
     assert "m.meta?.lane?.resolved_model" in body
@@ -1775,7 +2177,19 @@ def test_operations_hardening_endpoints_surface_memory_approval_and_cost_state()
 
 
 def test_daydream_endpoints_surface_reflections_conflicts_and_promotions():
-    app = create_app(FakeRuntime())
+    runtime = FakeRuntime()
+    runtime.tracer.store._events = [
+        FakeTelemetryEvent(
+            "tom_eval",
+            "AgentScheduler: daydream_complete",
+            payload={
+                "reflections": 0,
+                "keepers": 0,
+                "daydream_memories_created": 0,
+            },
+        )
+    ]
+    app = create_app(runtime)
     client = TestClient(app)
 
     summary = client.get("/api/daydream/summary?window_days=7")
@@ -1785,6 +2199,11 @@ def test_daydream_endpoints_surface_reflections_conflicts_and_promotions():
     assert summary_data["summary"]["active_conflicts"] == 1
     assert summary_data["summary"]["promoted_work_count"] == 1
     assert summary_data["summary"]["keeper_memory_count"] == 1
+    assert summary_data["summary"]["signal_count"] == 1
+    assert summary_data["summary"]["signal_route_counts"]["self_note"] == 1
+    assert summary_data["summary"]["signal_status_counts"]["routed"] == 1
+    assert summary_data["summary"]["self_work_receipt_count"] == 1
+    assert summary_data["recent_runs"][0]["quality_status"] == "empty"
 
     reflections = client.get("/api/daydream/reflections?keeper_only=true")
     assert reflections.status_code == 200
@@ -1803,6 +2222,33 @@ def test_daydream_endpoints_surface_reflections_conflicts_and_promotions():
     promotions_data = promotions.json()
     assert promotions_data["work_count"] == 1
     assert promotions_data["keeper_memory_count"] == 1
+
+    signals = client.get("/api/daydream/signals")
+    assert signals.status_code == 200
+    signals_data = signals.json()
+    assert signals_data["count"] == 1
+    assert signals_data["items"][0]["signal_id"] == "sig-1"
+    assert signals_data["items"][0]["imaginative_branch"] == "Claims become lit windows."
+
+    self_work = client.get("/api/daydream/self-work")
+    assert self_work.status_code == 200
+    self_work_data = self_work.json()
+    assert self_work_data["count"] == 1
+    assert self_work_data["items"][0]["outcome"] == "self_note_written"
+
+
+def test_inner_life_summary_includes_daydream_signal_store_state():
+    app = create_app(FakeRuntime())
+    client = TestClient(app)
+
+    response = client.get("/api/inner-life/summary")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["daydream_signals"]["available"] is True
+    assert data["daydream_signals"]["recent_signals"] == 1
+    assert data["daydream_signals"]["recent_receipts"] == 1
+    assert data["daydream_signals"]["configured_empty"] is False
 
 
 def test_usage_overview_endpoint_surfaces_gateway_and_process_data(monkeypatch):
@@ -1848,6 +2294,9 @@ def test_usage_overview_endpoint_surfaces_gateway_and_process_data(monkeypatch):
     assert resp.status_code == 200
     data = resp.json()
     assert data["opencas"]["summary"]["totalTokens"] == 2400
+    assert data["opencas"]["prompt_cache"]["cachedPromptTokens"] == 480
+    assert data["opencas"]["prompt_cache"]["cacheReuseRatio"] == 0.24
+    assert data["opencas"]["prompt_cache"]["byProvider"][0]["provider"] == "openai-codex"
     assert data["gateway"]["overview"]["summary"]["total_tokens"] == 1400
     assert data["process_hygiene"]["duplicate_server_count"] == 1
 
@@ -1880,6 +2329,10 @@ def test_telegram_status_and_config_endpoints():
     assert status_data["bot"]["username"] == "opencas_bot"
     assert status_data["config"]["token_configured"] is True
     assert len(status_data["pairings"]["pending_requests"]) == 1
+
+    config = client.get("/api/telegram/config")
+    assert config.status_code == 200
+    assert config.json()["config"]["token_configured"] is True
 
     update = client.post(
         "/api/telegram/config",
@@ -1924,7 +2377,7 @@ async def test_chat_context_summary_and_task_routes(tmp_path):
     app = create_app(runtime)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        summary = await client.get("/api/chat/context-summary?session_id=s1")
+        summary = await client.get("/api/chat/context-summary?session_id=s1&include_details=true")
         assert summary.status_code == 200
         summary_data = summary.json()
         assert summary_data["executive"]["intention"] == "Improve the dashboard operator experience"
@@ -1997,7 +2450,7 @@ async def test_chat_context_summary_ignores_artifact_stage_for_current_work(tmp_
     app = create_app(runtime)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        summary = await client.get("/api/chat/context-summary?session_id=s1")
+        summary = await client.get("/api/chat/context-summary?session_id=s1&include_details=true")
 
     assert summary.status_code == 200
     summary_data = summary.json()
@@ -2047,7 +2500,7 @@ async def test_chat_context_summary_uses_active_queue_when_work_store_is_artifac
     app = create_app(runtime)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        summary = await client.get("/api/chat/context-summary?session_id=s1")
+        summary = await client.get("/api/chat/context-summary?session_id=s1&include_details=true")
 
     assert summary.status_code == 200
     summary_data = summary.json()
@@ -2086,7 +2539,7 @@ async def test_chat_context_summary_returns_no_current_work_for_artifact_only_wo
     app = create_app(runtime)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        summary = await client.get("/api/chat/context-summary?session_id=s1")
+        summary = await client.get("/api/chat/context-summary?session_id=s1&include_details=true")
 
     assert summary.status_code == 200
     assert summary.json()["current_work"] is None
@@ -2125,7 +2578,7 @@ async def test_chat_context_summary_clears_stale_active_work_intention_without_f
     app = create_app(runtime)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        summary = await client.get("/api/chat/context-summary?session_id=s1")
+        summary = await client.get("/api/chat/context-summary?session_id=s1&include_details=true")
 
     assert summary.status_code == 200
     summary_data = summary.json()
@@ -2172,7 +2625,7 @@ async def test_chat_context_summary_clears_completed_tasklist_intention_without_
     app = create_app(runtime)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
-        summary = await client.get("/api/chat/context-summary?session_id=s1")
+        summary = await client.get("/api/chat/context-summary?session_id=s1&include_details=true")
 
     assert summary.status_code == 200
     summary_data = summary.json()
@@ -2222,13 +2675,35 @@ async def test_monitor_task_beacon_endpoint_returns_quiet_public_payload(tmp_pat
 
 @pytest.mark.asyncio
 async def test_identity_tom_endpoint_surfaces_belief_and_intention_counts():
+    from datetime import datetime, timedelta, timezone
+
     from opencas.tom import Belief, BeliefSubject, Intention, IntentionStatus, MetacognitiveResult
 
     class FakeTom:
         def __init__(self):
+            now = datetime(2026, 5, 13, 4, 20, tzinfo=timezone.utc)
             self._beliefs = [
-                Belief(subject=BeliefSubject.USER, predicate="prefers patient testing", confidence=0.9),
-                Belief(subject=BeliefSubject.SELF, predicate="is repairing pressure surfaces", confidence=0.8),
+                Belief(
+                    timestamp=now - timedelta(minutes=5),
+                    subject=BeliefSubject.USER,
+                    predicate="prefers patient testing",
+                    relation="prefers",
+                    object="patient testing",
+                    confidence=0.9,
+                    source_kind="conversation_turn",
+                    source_strength=0.75,
+                ),
+                Belief(
+                    timestamp=now,
+                    subject=BeliefSubject.SELF,
+                    predicate="is repairing pressure surfaces",
+                    relation="state",
+                    object="repairing pressure surfaces",
+                    confidence=0.8,
+                    source_kind="self_observation",
+                    source_strength=0.9,
+                    valid_from=now,
+                ),
             ]
             self._intentions = [
                 Intention(actor=BeliefSubject.SELF, content="complete pr-120", status=IntentionStatus.ACTIVE),
@@ -2267,9 +2742,46 @@ async def test_identity_tom_endpoint_surfaces_belief_and_intention_counts():
     assert data["belief_counts"]["by_subject"] == {"self": 1, "user": 1}
     assert data["intention_counts"]["by_status"] == {"active": 1}
     assert data["intention_counts"]["active"] == 1
+    assert data["recent_beliefs"][0]["predicate"] == "is repairing pressure surfaces"
+    assert data["recent_beliefs"][0]["relation"] == "state"
+    assert data["recent_beliefs"][0]["object"] == "repairing pressure surfaces"
+    assert data["recent_beliefs"][0]["source_kind"] == "self_observation"
+    assert data["recent_beliefs"][0]["source_strength"] == 0.9
+    assert data["recent_beliefs"][0]["effective_confidence"] == 0.8
+    assert data["recent_beliefs"][0]["evidence_ids"] == []
+    assert data["recent_beliefs"][0]["valid_from"] == "2026-05-13T04:20:00+00:00"
+    assert data["recent_beliefs"][0]["valid_until"] is None
     assert data["recent_intentions"][0]["content"] == "complete pr-120"
     assert data["consistency"]["belief_count"] == 2
     assert data["consistency"]["intention_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_identity_continuity_endpoint_surfaces_offline_anchor_fields(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from opencas.identity import IdentityManager, IdentityStore
+
+    runtime = FakeRuntime()
+    identity = IdentityManager(IdentityStore(tmp_path / "identity"))
+    identity.load()
+    prior = datetime.now(timezone.utc) - timedelta(minutes=7)
+    identity.continuity.last_persisted_at = prior
+    identity.record_boot(session_id="sess-after-restart")
+    runtime.ctx.identity = identity
+
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/identity/continuity")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["last_persisted_at"] is not None
+    assert data["last_boot_time"] is not None
+    assert data["last_offline_started_at"] == prior.isoformat()
+    assert data["last_offline_duration_seconds"] >= 6 * 60
+    assert data["continuous_present_score"] < 1.0
 
 
 def test_memory_projection_handles_mixed_embedding_dimensions():
@@ -2290,6 +2802,330 @@ def test_memory_projection_handles_mixed_embedding_dimensions():
     data = resp.json()
     assert len(data["points"]) == 2
     assert len(data["groups"]) >= 2
+
+
+def test_memory_landscape_exposes_dual_context_labels_for_dashboard():
+    runtime = FakeRuntime()
+    runtime.memory = FakeProjectionMemoryStore()
+    runtime.ctx.embeddings = FakeEmbeddings()
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get("/api/memory/landscape?limit=10&include_memories=true")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    episode_nodes = [node for node in data["nodes"] if node["node_type"] == "episode"]
+    memory_nodes = [node for node in data["nodes"] if node["node_type"] == "memory"]
+    assert {node["source_lane"] for node in episode_nodes} == {"executive"}
+    assert {node["authority"] for node in episode_nodes} == {"live_observation"}
+    assert {node["context_material"] for node in episode_nodes} == {"episode_record"}
+    assert {node["source_lane"] for node in memory_nodes} == {"database"}
+    assert data["stats"]["lane_distribution"]["executive"] == 2
+    assert data["stats"]["lane_distribution"]["database"] >= 1
+    assert data["stats"]["authority_distribution"]["retrieved_memory"] >= 1
+    assert "lane_source_distribution" in data["stats"]
+
+
+def test_memory_landscape_treats_artifact_episodes_as_reflective():
+    class FakeArtifactMemoryStore(FakeProjectionMemoryStore):
+        async def list_episodes(self, **kwargs):
+            from datetime import datetime, timezone
+            from types import SimpleNamespace
+            from opencas.memory import EpisodeKind
+
+            now = datetime.now(timezone.utc)
+            return [
+                SimpleNamespace(
+                    episode_id="ep-artifact",
+                    created_at=now,
+                    kind=EpisodeKind.ARTIFACT,
+                    session_id="s1",
+                    content="artifact note",
+                    salience=1.1,
+                    compacted=False,
+                    identity_core=False,
+                    confidence_score=0.88,
+                    used_successfully=0,
+                    used_unsuccessfully=0,
+                    somatic_tag=None,
+                    embedding_id="emb-3",
+                    affect=None,
+                    payload={"artifact": {"path": "dist/chapter.txt"}},
+                )
+            ]
+
+    runtime = FakeRuntime()
+    runtime.memory = FakeArtifactMemoryStore()
+    runtime.ctx.embeddings = FakeEmbeddings()
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get("/api/memory/landscape?limit=10&include_memories=false")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    artifact_nodes = [
+        node
+        for node in data["nodes"]
+        if node["node_type"] == "episode" and node["kind"] == "artifact"
+    ]
+    assert len(artifact_nodes) == 1
+    assert artifact_nodes[0]["source_lane"] == "reflective"
+    assert data["stats"]["lane_distribution"]["reflective"] == 1
+
+
+@pytest.mark.asyncio
+async def test_memory_landscape_surfaces_context_proposal_nodes(tmp_path):
+    runtime = FakeRuntime()
+    runtime.memory = FakeProjectionMemoryStore()
+    runtime.ctx.embeddings = FakeEmbeddings(
+        cache=FakeEmbeddingCache(
+            {
+                "emb-1": type("R", (), {"vector": [0.1, 0.2], "dimension": 2, "model_id": "model-a"})(),
+                "emb-2": type("R", (), {"vector": [0.3, 0.4], "dimension": 2, "model_id": "model-a"})(),
+                "emb-3": type("R", (), {"vector": [0.5, 0.6], "dimension": 2, "model_id": "model-a"})(),
+            }
+        )
+    )
+    proposal_store = await ContextProposalStore(tmp_path / "context_proposals.db").connect()
+    proposal = ContextProposal(
+        source_lane=ContextLane.REFLECTIVE,
+        source_snapshot_id="truth:atlas",
+        source_epoch=3,
+        proposal_kind="memory_association",
+        project_id="writing project 4246",
+        content="Chapter 3 should remember the daydream association before repeating the bad idea.",
+        evidence_refs=["episode:ep-1", "mem-1"],
+        confidence=0.72,
+    )
+    await proposal_store.save(proposal)
+    runtime.ctx.context_proposal_store = proposal_store
+    runtime.context_proposals = proposal_store
+
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/api/memory/landscape?limit=10&include_context_proposals=true")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    proposal_nodes = [node for node in data["nodes"] if node["node_type"] == "context_proposal"]
+    assert len(proposal_nodes) == 1
+    assert proposal_nodes[0]["kind"] == "context_proposal"
+    assert proposal_nodes[0]["proposal_kind"] == "memory_association"
+    assert proposal_nodes[0]["salience"] is None
+    assert proposal_nodes[0]["confidence_score"] == 0.72
+    assert proposal_nodes[0]["proposal_status"] == "pending"
+    assert proposal_nodes[0]["source_lane"] == "reflective"
+    assert data["stats"]["visible_context_proposal_count"] == 1
+    assert data["stats"]["proposal_status_distribution"]["pending"] == 1
+    assert any(edge["kind"] == "proposal_evidence" for edge in data["edges"])
+
+    await proposal_store.close()
+
+
+@pytest.mark.asyncio
+async def test_dual_context_endpoint_exposes_truth_and_proposal_contract(tmp_path):
+    runtime = FakeRuntime()
+    proposal_store = await ContextProposalStore(tmp_path / "context_proposals.db").connect()
+    try:
+        proposal = ContextProposal(
+            source_lane=ContextLane.REFLECTIVE,
+            source_snapshot_id="truth:1:abc",
+            source_epoch=1,
+            proposal_kind="context_note",
+            content="Reflective note for dashboard display.",
+            confidence=0.66,
+        )
+        await proposal_store.save(proposal)
+        runtime.ctx.context_proposal_store = proposal_store
+        runtime.context_proposals = proposal_store
+
+        app = create_app(runtime)
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+            resp = await client.get("/api/context/dual?limit=5")
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["architecture"]["lanes"] == ["executive", "reflective"]
+        assert data["lanes"]["executive"]["can_write"] is True
+        assert data["lanes"]["reflective"]["can_write"] is False
+        assert data["proposals"]["stats"]["status_counts"]["pending"] == 1
+        assert data["proposals"]["stats"]["source_lane_counts"]["reflective"] == 1
+        assert data["proposals"]["recent"][0]["source_lane"] == "reflective"
+        assert "source_lane" in data["dashboard_contract"]["node_fields"]
+    finally:
+        await proposal_store.close()
+
+
+@pytest.mark.asyncio
+async def test_memory_landscape_context_proposal_filter_and_limit_are_explicit(tmp_path):
+    runtime = FakeRuntime()
+    runtime.memory = FakeProjectionMemoryStore()
+    runtime.ctx.embeddings = FakeEmbeddings()
+    proposal_store = await ContextProposalStore(tmp_path / "context_proposals.db").connect()
+    for index in range(60):
+        await proposal_store.save(
+            ContextProposal(
+                source_lane=ContextLane.REFLECTIVE,
+                source_snapshot_id=f"truth:{index}:abc",
+                source_epoch=index,
+                proposal_kind="context_note",
+                content=f"Reflective note {index}",
+                confidence=0.4,
+            )
+        )
+    runtime.ctx.context_proposal_store = proposal_store
+    runtime.context_proposals = proposal_store
+
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(
+            "/api/memory/landscape?limit=200&include_context_proposals=true&kind=context_proposal"
+        )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    proposal_nodes = [node for node in data["nodes"] if node["node_type"] == "context_proposal"]
+    assert len(proposal_nodes) == 60
+    assert data["stats"]["visible_context_proposal_count"] == 60
+    assert data["stats"]["context_proposal_limit"] == 200
+    assert data["stats"]["context_proposal_limit_clamped"] is False
+    assert data["stats"]["proposal_kind_distribution"]["context_note"] == 60
+
+    await proposal_store.close()
+
+
+def test_memory_activity_endpoint_surfaces_live_activation_nodes():
+    from opencas.telemetry import EventKind
+
+    runtime = FakeRuntime()
+    event = FakeTelemetryEvent(
+        EventKind.MEMORY_ACTIVATED,
+        "Memory activated",
+        {
+            "node_id": "episode:ep-1",
+            "source_type": "episode",
+            "source_id": "ep-1",
+            "activation_source": "retriever",
+            "query": "writing project 4246 chapter 3",
+            "score": 0.91,
+            "rank": 1,
+        },
+        session_id="s1",
+    )
+    event.noted_as_such = True
+    event.activated_at = event.timestamp
+    runtime.tracer.store = FakeStore([event])
+
+    app = create_app(runtime)
+    client = TestClient(app)
+    resp = client.get("/api/memory/activity?window_seconds=300")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["active_node_ids"] == ["episode:ep-1"]
+    assert data["active_nodes"][0]["node_id"] == "episode:ep-1"
+    assert data["active_nodes"][0]["intensity"] > 0
+    assert data["active_nodes"][0]["timestamp"] == event.timestamp.isoformat()
+    assert data["active_nodes"][0]["temporal_has_metadata"] is True
+    assert data["active_nodes"][0]["temporal_source"] == "last_activated_at"
+    assert data["events"][0]["temporal_has_metadata"] is True
+    assert data["events"][0]["query"] == "writing project 4246 chapter 3"
+
+
+def test_memory_activity_endpoint_enriches_sparse_events_from_node_metadata():
+    from datetime import datetime, timezone
+    from opencas.memory import EpisodeKind
+    from opencas.telemetry import EventKind
+
+    runtime = FakeRuntime()
+
+    class ActivityMemoryStore(FakeMemoryStore):
+        async def get_episodes_by_ids(self, ids):
+            if "ep-reflective" not in ids:
+                return []
+            now = datetime.now(timezone.utc)
+            return [
+                SimpleNamespace(
+                    episode_id="ep-reflective",
+                    created_at=now,
+                    kind=EpisodeKind.ARTIFACT,
+                    session_id="s1",
+                    content="Read chunk 1/2 from workspace/writing/4246/story_4246.md",
+                    salience=1.0,
+                    compacted=False,
+                    identity_core=False,
+                    confidence_score=0.8,
+                    used_successfully=0,
+                    used_unsuccessfully=0,
+                    somatic_tag=None,
+                    embedding_id=None,
+                    affect=None,
+                    payload={"artifact": {"path": "workspace/writing/4246/story_4246.md"}},
+                )
+            ]
+
+    runtime.memory = ActivityMemoryStore()
+    event = FakeTelemetryEvent(
+        EventKind.MEMORY_ACTIVATED,
+        "Memory activated",
+        {
+            "node_id": "episode:ep-reflective",
+            "source_type": "episode",
+            "source_id": "ep-reflective",
+            "activation_source": "retriever",
+        },
+        session_id="s1",
+    )
+    event.activated_at = event.timestamp
+    runtime.tracer.store = FakeStore([event])
+
+    app = create_app(runtime)
+    client = TestClient(app)
+    resp = client.get("/api/memory/activity?window_seconds=300")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["events"][0]["source_lane"] == "reflective"
+    assert data["events"][0]["context_material"] == "artifact"
+    assert data["active_nodes"][0]["source_lane"] == "reflective"
+    assert data["stats"]["source_lane_distribution"]["reflective"] == 1
+
+
+def test_memory_activity_endpoint_reuses_short_lived_cache_for_poll_bursts():
+    from opencas.telemetry import EventKind
+
+    runtime = FakeRuntime()
+    event = FakeTelemetryEvent(
+        EventKind.MEMORY_ACTIVATED,
+        "Memory activated",
+        {
+            "node_id": "episode:ep-1",
+            "source_type": "episode",
+            "source_id": "ep-1",
+            "activation_source": "retriever",
+            "query": "writing project 4246 chapter 3",
+        },
+        session_id="s1",
+    )
+    store = FakeStore([event])
+    runtime.tracer.store = store
+
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    first = client.get("/api/memory/activity?window_seconds=300&limit=80")
+    second = client.get("/api/memory/activity?window_seconds=300&limit=80")
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["active_node_ids"] == ["episode:ep-1"]
+    assert second.json()["active_node_ids"] == ["episode:ep-1"]
+    assert store.query_calls == 1
 
 
 def test_monitor_embeddings_endpoint_surfaces_recent_records():
@@ -2333,11 +3169,11 @@ def test_monitor_shadow_registry_cluster_endpoint_surfaces_raw_entries():
     app = create_app(runtime)
     client = TestClient(app)
 
-    resp = client.get("/api/monitor/shadow-registry/cluster", params={"fingerprint": "cluster-chronicle"})
+    resp = client.get("/api/monitor/shadow-registry/cluster", params={"fingerprint": "cluster-creative_writing"})
     assert resp.status_code == 200
     data = resp.json()
     assert data["available"] is True
-    assert data["fingerprint"] == "cluster-chronicle"
+    assert data["fingerprint"] == "cluster-creative_writing"
     assert data["count"] == 2
     assert data["triage_status"] == "active"
     assert len(data["entries"]) == 2
@@ -2352,7 +3188,7 @@ def test_monitor_shadow_registry_cluster_triage_endpoint_updates_cluster_state()
     resp = client.post(
         "/api/monitor/shadow-registry/cluster/triage",
         json={
-            "fingerprint": "cluster-chronicle",
+            "fingerprint": "cluster-creative_writing",
             "annotation": "Known issue; suppress from main list.",
             "dismissed": True,
         },
@@ -2360,7 +3196,7 @@ def test_monitor_shadow_registry_cluster_triage_endpoint_updates_cluster_state()
     assert resp.status_code == 200
     data = resp.json()
     assert data["available"] is True
-    assert data["fingerprint"] == "cluster-chronicle"
+    assert data["fingerprint"] == "cluster-creative_writing"
     assert data["triage_status"] == "dismissed"
     assert data["annotation"] == "Known issue; suppress from main list."
 
@@ -2415,6 +3251,52 @@ def test_monitor_affective_examinations_endpoint_filters_recent_records():
     assert data["items"][0]["decay_state"] == "active"
 
 
+def test_monitor_affective_trends_endpoint_summarizes_registry_and_telemetry(tmp_path):
+    from opencas.affective_registry import AffectiveRegistryWriter, ExecutionPhase
+    from opencas.somatic.models import SomaticState
+    from opencas.telemetry.affect_models import AffectSnapshot
+    from opencas.telemetry.affect_store import AffectStore
+
+    runtime = FakeRuntime()
+    writer = AffectiveRegistryWriter(tmp_path / "affective_registry" / "events.jsonl")
+    writer.append_from_somatic_state(
+        SomaticState(tension=0.1, fatigue=0.2, valence=0.3, certainty=0.8),
+        phase=ExecutionPhase.TURN_END,
+        session_id="trend-session",
+    )
+    writer.append_from_somatic_state(
+        SomaticState(tension=0.6, fatigue=0.4, valence=-0.2, certainty=0.5),
+        phase=ExecutionPhase.TURN_END,
+        session_id="trend-session",
+    )
+    affect_store = AffectStore(tmp_path / "telemetry_affect")
+    affect_store.save_snapshot(
+        AffectSnapshot(
+            session_id="trend-session",
+            artifact_id="runtime",
+            actor="opencas_agent",
+            dimensions={"valence": -0.2, "arousal": 0.5, "certainty": 0.0, "coherence": 0.0, "urgency": 0.6},
+            source_payload={"source": "affective_registry"},
+        )
+    )
+    runtime.ctx.affective_registry_writer = writer
+    runtime.telemetry_affect_store = affect_store
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get("/api/monitor/affective-trends?limit=10")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["available"] is True
+    assert data["registry"]["count"] == 2
+    assert data["latest"]["session_id"] == "trend-session"
+    assert data["latest"]["dimensions"]["tension"] == 0.6
+    assert data["trend"]["risk_delta"] > 0
+    assert data["trend"]["direction"] == "rising_risk"
+    assert data["telemetry_affect"]["snapshots"] == 1
+
+
 @pytest.mark.asyncio
 async def test_config_overview_endpoint_surfaces_models_profiles_and_material(tmp_path):
     state_dir = tmp_path / "state"
@@ -2449,6 +3331,10 @@ async def test_config_overview_endpoint_surfaces_models_profiles_and_material(tm
                 high_reasoning_effort="high",
                 extra_high_reasoning_effort="xhigh",
             ),
+            "generation_policy": GenerationPolicyConfig(
+                enabled=True,
+                default_profile="balanced",
+            ),
             "model_dump": lambda self, **kw: {"state_dir": str(state_dir)},
         },
     )()
@@ -2463,6 +3349,9 @@ async def test_config_overview_endpoint_surfaces_models_profiles_and_material(tm
     assert "google/gemini-embedding-2-preview" not in data["available_embedding_models"]
     assert data["current"]["model_routing"]["mode"] == "tiered"
     assert data["current"]["model_routing"]["effective_reasoning"]["high"] == "high"
+    assert data["current"]["generation_policy"]["enabled"] is True
+    assert data["current"]["generation_policy"]["profiles"]["daydream"]["authority"] == "reflective_proposal_only"
+    assert data["current"]["generation_policy"]["phase_summary"]["brainstorm"]["temperature"] >= 0.8
     assert "claude-sonnet-4-6" in data["providers"][0]["effective_model_ids"]
     assert data["credential_copy"]["profile_ids"] == ["anthropic-main"]
     assert data["materialized_bundle"]["config_exists"] is True
@@ -2488,14 +3377,16 @@ def test_model_routing_update_persists_runtime_and_gateway_state(tmp_path):
     resp = client.post(
         "/api/config/model-routing",
         json={
-            "default_llm_model": "openai/gpt-5.3-codex",
+            "default_llm_model": "openai/gpt-5.5",
             "model_routing": {
-                "mode": "tiered",
-                "light_model": "google/gemini-2.5-flash",
-                "standard_model": "openai/gpt-5.3-codex",
-                "high_model": "anthropic/claude-sonnet-4-6",
-                "extra_high_model": "codex-cli/gpt-5.3-codex",
+                "mode": "single",
+                "single_model": "openai/gpt-5.5",
+                "light_model": "openai/gpt-5.5",
+                "standard_model": "openai/gpt-5.5",
+                "high_model": "openai/gpt-5.5",
+                "extra_high_model": "openai/gpt-5.5",
                 "light_reasoning_effort": "low",
+                "single_reasoning_effort": "xhigh",
                 "standard_reasoning_effort": "medium",
                 "high_reasoning_effort": "high",
                 "extra_high_reasoning_effort": "xhigh",
@@ -2506,17 +3397,110 @@ def test_model_routing_update_persists_runtime_and_gateway_state(tmp_path):
 
     assert resp.status_code == 200
     data = resp.json()
-    assert data["default_llm_model"] == "openai/gpt-5.3-codex"
-    assert runtime.ctx.config.default_llm_model == "openai/gpt-5.3-codex"
-    assert runtime.ctx.config.model_routing.mode.value == "tiered"
-    assert runtime.ctx.llm.last_set["model_routing"].high_model == "anthropic/claude-sonnet-4-6"
+    assert data["default_llm_model"] == "openai/gpt-5.5"
+    assert runtime.ctx.config.default_llm_model == "openai/gpt-5.5"
+    assert runtime.ctx.config.model_routing.mode.value == "single"
+    assert runtime.ctx.llm.last_set["model_routing"].high_model == "openai/gpt-5.5"
     assert runtime.ctx.llm.last_set["model_routing"].extra_high_reasoning_effort.value == "xhigh"
     assert runtime.ctx.llm.manager.reload_calls >= 1
 
     persisted_path = state_dir / "runtime_model_routing.json"
     assert persisted_path.exists()
     saved_cfg = load_config(config_path=provider_material / "config.json")
-    assert saved_cfg.default_model == "openai/gpt-5.3-codex"
+    assert saved_cfg.default_model == "openai/gpt-5.5"
+
+
+def test_generation_policy_update_persists_runtime_state(tmp_path):
+    state_dir = tmp_path / "state"
+    provider_material = state_dir / "provider_material"
+    provider_material.mkdir(parents=True)
+    (provider_material / "config.json").write_text("{}", encoding="utf-8")
+    runtime = FakeRuntime()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=state_dir,
+        session_id="generation-policy-dashboard",
+    ).resolve_paths()
+    runtime.ctx.llm = FakeMutableLLM(default_model=runtime.ctx.config.default_llm_model)
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/config/generation-policy",
+        json={
+            "enabled": True,
+            "default_profile": "balanced",
+            "somatic_influence": {
+                "enabled": True,
+                "max_temperature_delta": 0.12,
+                "fatigue_clamp": True,
+                "tension_clamp": True,
+            },
+            "profiles": {
+                "brainstorm": {
+                    "temperature": 0.92,
+                    "primary_knob": "temperature",
+                    "candidate_count": 3,
+                },
+                "verify": {
+                    "temperature": 0.0,
+                    "primary_knob": "temperature",
+                },
+            },
+            "local_sampler_experiments": {
+                "min_p": True,
+                "top_h": False,
+                "mirostat": False,
+            },
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["generation_policy"]["profiles"]["brainstorm"]["temperature"] == 0.92
+    assert runtime.ctx.config.generation_policy.profiles["brainstorm"].temperature == 0.92
+    assert runtime.ctx.llm.last_generation_policy.profiles["brainstorm"].temperature == 0.92
+    persisted_path = state_dir / "runtime_generation_policy.json"
+    assert persisted_path.exists()
+
+
+def test_generation_policy_learned_preset_route_persists_new_work_type(tmp_path):
+    state_dir = tmp_path / "state"
+    provider_material = state_dir / "provider_material"
+    provider_material.mkdir(parents=True)
+    (provider_material / "config.json").write_text("{}", encoding="utf-8")
+    runtime = FakeRuntime()
+    runtime.ctx.config = BootstrapConfig(
+        state_dir=state_dir,
+        session_id="generation-policy-learned-preset",
+    ).resolve_paths()
+    runtime.ctx.llm = FakeMutableLLM(default_model=runtime.ctx.config.default_llm_model)
+    app = create_app(runtime)
+    client = TestClient(app)
+
+    resp = client.post(
+        "/api/config/generation-policy/learned-presets",
+        json={
+            "preset_id": "livestream-commentary",
+            "work_type": "livestream_following_commentary",
+            "phase": "synthesize",
+            "domain": "research",
+            "source": "operator_seed",
+            "profile": {
+                "temperature": 0.52,
+                "primary_knob": "temperature",
+                "summary": "Concise commentary while following a livestream.",
+            },
+            "evidence_count": 6,
+            "success_count": 5,
+            "failure_count": 1,
+        },
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["preset"]["work_type"] == "livestream_following_commentary"
+    assert runtime.ctx.config.generation_policy.learned_preset_records["livestream-commentary"].success_rate == pytest.approx(5 / 6)
+    assert (state_dir / "runtime_generation_policy.json").exists()
 
 
 def test_provider_setup_and_model_delete_routes_manage_active_gateway_material(tmp_path):
@@ -2568,7 +3552,8 @@ def test_provider_setup_and_model_delete_routes_manage_active_gateway_material(t
 
     saved_after_delete = load_config(config_path=provider_material / "config.json")
     assert len(saved_after_delete.providers["zai-coding"].models) == 0
-    assert saved_after_delete.default_model == "zai-coding/glm-5.1"
+    assert saved_after_delete.default_model.startswith("zai-coding/")
+    assert saved_after_delete.default_model != "zai-coding/glm-5.1-custom"
     assert runtime.ctx.llm.manager.reload_calls >= 2
 
 
@@ -2730,6 +3715,66 @@ def test_memory_node_detail_endpoint_surfaces_neighbors_and_signals():
     assert any(item["node_id"] == "memory:mem-1" for item in data["neighbors"])
     assert any(edge["kind"] == "semantic" and edge["strongest_signal"] == "semantic" for edge in data["edges"])
     assert any(edge["kind"] == "distilled_from" for edge in data["edges"])
+
+
+@pytest.mark.asyncio
+async def test_memory_node_detail_endpoint_surfaces_context_proposal_evidence(tmp_path):
+    from datetime import datetime, timezone
+    from opencas.memory import EpisodeKind
+
+    runtime = FakeRuntime()
+
+    class ProposalDetailMemoryStore(FakeMemoryStore):
+        async def get_episodes_by_ids(self, ids):
+            if "ep-1" not in ids:
+                return []
+            return [
+                SimpleNamespace(
+                    episode_id="ep-1",
+                    created_at=datetime.now(timezone.utc),
+                    kind=EpisodeKind.OBSERVATION,
+                    session_id="s1",
+                    content="proposal evidence episode",
+                    salience=1.0,
+                    compacted=False,
+                    identity_core=False,
+                    confidence_score=0.8,
+                    used_successfully=0,
+                    used_unsuccessfully=0,
+                    somatic_tag=None,
+                    embedding_id=None,
+                    affect=None,
+                )
+            ]
+
+    runtime.memory = ProposalDetailMemoryStore()
+    proposal_store = await ContextProposalStore(tmp_path / "context_proposals.db").connect()
+    proposal = ContextProposal(
+        source_lane=ContextLane.REFLECTIVE,
+        source_snapshot_id="truth:proposal-detail",
+        source_epoch=7,
+        proposal_kind="bad_idea_to_avoid",
+        content="Do not repeat the earlier bad chapter 3 idea.",
+        evidence_refs=["episode:ep-1"],
+        confidence=0.64,
+    )
+    await proposal_store.save(proposal)
+    runtime.ctx.context_proposal_store = proposal_store
+    runtime.context_proposals = proposal_store
+
+    app = create_app(runtime)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get(f"/api/memory/node-detail?node_id=context_proposal:{proposal.proposal_id}")
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["node"]["node_type"] == "context_proposal"
+    assert data["node"]["proposal_status"] == "pending"
+    assert data["neighbors"][0]["node_id"] == "episode:ep-1"
+    assert data["edges"][0]["kind"] == "proposal_evidence"
+
+    await proposal_store.close()
 
 
 def test_memory_retrieval_inspect_uses_runtime_retriever():

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import httpx
+from open_llm_auth.auth.manager import ProviderManager
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -20,6 +21,17 @@ sys.path.insert(0, str(ROOT))
 
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.embeddings.qdrant_backend import QdrantVectorBackend
+
+
+def _default_embedding_model_id() -> str:
+    return ProviderManager.default_embedding_model_ref()
+
+
+def _default_embedding_dimension() -> int:
+    model_id = _default_embedding_model_id()
+    definition = ProviderManager.local_embedding_model_definition(model_id) or {}
+    value = definition.get("dimensions")
+    return int(value) if isinstance(value, int) and value > 0 else 768
 
 
 async def _get_json(url: str, timeout: float = 10.0) -> dict[str, Any]:
@@ -150,8 +162,8 @@ def main() -> None:
     parser.add_argument("--base-url", default="http://127.0.0.1:32147")
     parser.add_argument("--qdrant-url", default="http://127.0.0.1:6333")
     parser.add_argument("--qdrant-collection", default="episodes_embed_gemma_768_v1")
-    parser.add_argument("--model-id", default="google/embeddinggemma-300m")
-    parser.add_argument("--expected-dimension", type=int, default=768)
+    parser.add_argument("--model-id", default=_default_embedding_model_id())
+    parser.add_argument("--expected-dimension", type=int, default=_default_embedding_dimension())
     parser.add_argument("--duration-seconds", type=float, default=120.0)
     parser.add_argument("--interval-seconds", type=float, default=30.0)
     parser.add_argument(

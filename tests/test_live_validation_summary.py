@@ -179,3 +179,52 @@ def test_legacy_agent_checks_are_inferred_correctly(tmp_path: Path) -> None:
     assert summary["agent_checks"]["browser_probe"]["success_rate"] == 1.0
     assert summary["agent_checks"]["browser_probe"]["outcomes"] == {"completed": 1}
     assert summary["agent_checks"]["write_project_note"]["outcomes"] == {"artifact_verified": 1}
+
+
+def test_aggregate_reports_separates_latest_model_lane_from_retained_history(
+    tmp_path: Path,
+) -> None:
+    _write_report(
+        tmp_path / "old-kimi",
+        {
+            "run_id": "old-kimi",
+            "started_at": "2026-04-15T00:00:00+00:00",
+            "finished_at": "2026-04-15T00:01:00+00:00",
+            "model": "kimi-coding/k2p5",
+            "embedding_model": "google/gemini-embedding-2-preview",
+            "direct_checks": {},
+            "agent_checks": [
+                {
+                    "label": "write_project_note",
+                    "material_success": False,
+                    "outcome": "artifact_missing",
+                },
+            ],
+        },
+    )
+    _write_report(
+        tmp_path / "new-openai",
+        {
+            "run_id": "new-openai",
+            "started_at": "2026-05-12T00:00:00+00:00",
+            "finished_at": "2026-05-12T00:01:00+00:00",
+            "model": "openai/gpt-5.5",
+            "embedding_model": "google/embeddinggemma-300m",
+            "direct_checks": {},
+            "agent_checks": [
+                {
+                    "label": "write_project_note",
+                    "material_success": True,
+                    "outcome": "artifact_verified",
+                },
+            ],
+        },
+    )
+
+    summary = aggregate_reports(load_reports(tmp_path))
+
+    assert summary["agent_success_rate"] == 0.5
+    assert summary["current_model"]["model"] == "openai/gpt-5.5"
+    assert summary["current_model"]["total_agent_checks"] == 1
+    assert summary["current_model"]["agent_success_rate"] == 1.0
+    assert summary["current_model"]["agent_checks"]["write_project_note"]["success_rate"] == 1.0

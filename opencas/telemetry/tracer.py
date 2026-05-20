@@ -128,6 +128,48 @@ class Tracer:
             noted_as_such=True,
         )
 
+    def activate_memory_node(
+        self,
+        *,
+        node_id: str,
+        source_type: str,
+        source_id: str,
+        activation_source: str,
+        query: str | None = None,
+        score: float | None = None,
+        rank: int | None = None,
+        session_id: str | None = None,
+        content_preview: str | None = None,
+        extra: Optional[Dict[str, Any]] = None,
+    ) -> TelemetryEvent:
+        """Record a memory-atlas node activation for live operator surfaces."""
+
+        now = datetime.now(timezone.utc)
+        payload: Dict[str, Any] = {
+            "node_id": str(node_id),
+            "source_type": str(source_type),
+            "source_id": str(source_id),
+            "activation_source": str(activation_source),
+        }
+        if query:
+            payload["query"] = str(query)
+        if score is not None:
+            payload["score"] = float(score)
+        if rank is not None:
+            payload["rank"] = int(rank)
+        if content_preview:
+            payload["content_preview"] = str(content_preview)
+        if extra:
+            payload.update(extra)
+        return self._emit(
+            kind=EventKind.MEMORY_ACTIVATED,
+            message=f"Memory node activated: {node_id}",
+            payload=payload,
+            session_id=session_id,
+            activated_at=now,
+            noted_as_such=True,
+        )
+
     # ── Span Context Manager ──────────────────────────────────────────
 
     @contextmanager

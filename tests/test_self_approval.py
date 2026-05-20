@@ -6,6 +6,8 @@ import pytest
 from opencas.autonomy import (
     ActionRequest,
     ActionRiskTier,
+    AuthorizationStore,
+    ApprovalMode,
     ApprovalLevel,
     SelfApprovalLadder,
 )
@@ -18,6 +20,7 @@ from opencas.governance import (
     WebTrustStore,
 )
 from opencas.identity import IdentityManager, IdentityStore
+from opencas.relational import MusubiState, RelationalEngine, MusubiStore
 from opencas.somatic import SomaticManager
 
 
@@ -163,6 +166,26 @@ def test_history_modulation_worsens(ladder: SelfApprovalLadder, identity: Identi
     )
 
 
+def test_ordinary_safe_shell_does_not_request_user_evidence(
+    ladder: SelfApprovalLadder,
+    identity: IdentityManager,
+) -> None:
+    identity.update_self_belief("success_rate_tier_shell_local", 0.1)
+    req = ActionRequest(
+        tier=ActionRiskTier.SHELL_LOCAL,
+        description="inspect the repository with a read-only command",
+        tool_name="bash_run_command",
+        payload={
+            "command_family": "safe",
+            "command_permission_class": "read_only",
+            "ordinary_action": True,
+        },
+    )
+    dec = ladder.evaluate(req)
+    assert dec.level == ApprovalLevel.CAN_DO_WITH_CAUTION
+    assert "ordinary_action_self_approved" in dec.reasoning
+
+
 def test_somatic_tension_increases_caution(
     ladder: SelfApprovalLadder, somatic: SomaticManager
 ) -> None:
@@ -229,11 +252,190 @@ def test_managed_workspace_shell_verification_gets_payload_credit_under_stress(
     )
 
 
+def test_web_research_is_ordinary_under_stress(
+    ladder: SelfApprovalLadder,
+    somatic: SomaticManager,
+) -> None:
+    somatic.set_tension(1.0)
+    somatic.set_fatigue(1.0)
+    req = ActionRequest(
+        tier=ActionRiskTier.NETWORK,
+        description="research a topic for a grounded daydream",
+        tool_name="web_fetch",
+        payload={"web_action_class": "fetch", "web_domain": "example.com"},
+    )
+
+    dec = ladder.evaluate(req)
+
+    assert dec.level in (
+        ApprovalLevel.CAN_DO_NOW,
+        ApprovalLevel.CAN_DO_WITH_CAUTION,
+    )
+    assert "ordinary_action_self_approved" in dec.reasoning
+
+
+def test_browser_navigation_research_is_ordinary_under_stress(
+    ladder: SelfApprovalLadder,
+    somatic: SomaticManager,
+) -> None:
+    somatic.set_tension(1.0)
+    somatic.set_fatigue(1.0)
+    req = ActionRequest(
+        tier=ActionRiskTier.NETWORK,
+        description="open a source page while researching a user-requested topic",
+        tool_name="browser_navigate",
+        payload={
+            "web_action_class": WebActionClass.NAVIGATE.value,
+            "web_domain": "example.com",
+            "web_url": "https://example.com/source",
+        },
+    )
+
+    dec = ladder.evaluate(req)
+
+    assert dec.level in (
+        ApprovalLevel.CAN_DO_NOW,
+        ApprovalLevel.CAN_DO_WITH_CAUTION,
+    )
+    assert "ordinary_action_self_approved" in dec.reasoning
+
+
+def test_project_workspace_verification_is_ordinary_under_stress(
+    ladder: SelfApprovalLadder,
+    somatic: SomaticManager,
+) -> None:
+    somatic.set_tension(1.0)
+    somatic.set_fatigue(1.0)
+    req = ActionRequest(
+        tier=ActionRiskTier.SHELL_LOCAL,
+        description="run project verification inside an allowed workspace",
+        tool_name="bash_run_command",
+        payload={
+            "command_family": "safe",
+            "command_permission_class": "bounded_write",
+            "command_scope": "project_workspace",
+            "command_effective_family": "safe",
+            "command_effective_permission_class": "bounded_write",
+        },
+    )
+
+    dec = ladder.evaluate(req)
+
+    assert dec.level in (
+        ApprovalLevel.CAN_DO_NOW,
+        ApprovalLevel.CAN_DO_WITH_CAUTION,
+    )
+    assert "ordinary_action_self_approved" in dec.reasoning
+
+
 def test_no_somatic_does_not_crash(identity: IdentityManager) -> None:
     ladder_no_somatic = SelfApprovalLadder(identity=identity)
     req = ActionRequest(tier=ActionRiskTier.READONLY, description="read")
     dec = ladder_no_somatic.evaluate(req)
     assert dec.level == ApprovalLevel.CAN_DO_NOW
+
+
+def test_standing_authorization_fast_paths_gmail_read(
+    identity: IdentityManager,
+    tmp_path: Path,
+) -> None:
+    store = AuthorizationStore(tmp_path / "authorizations.db")
+    store.grant(
+        action_class="gmail_read",
+        scope="google_workspace:gmail",
+        evidence_episode_id="episode-1",
+    )
+    ladder = SelfApprovalLadder(identity=identity, authorization_store=store)
+
+    req = ActionRequest(
+        tier=ActionRiskTier.READONLY,
+        description="tool google_workspace_gmail_headlines",
+        tool_name="google_workspace_gmail_headlines",
+    )
+
+    dec = ladder.evaluate(req)
+    assert dec.level == ApprovalLevel.CAN_DO_NOW
+    assert dec.reasoning.startswith("standing_authorization:gmail_read")
+
+
+def test_standing_authorization_does_not_override_boundary(
+    identity: IdentityManager,
+    tmp_path: Path,
+) -> None:
+    identity.user_model.known_boundaries = ["google_workspace_gmail_headlines"]
+    identity.save()
+    store = AuthorizationStore(tmp_path / "authorizations.db")
+    store.grant(action_class="gmail_read", scope="google_workspace:gmail")
+    ladder = SelfApprovalLadder(identity=identity, authorization_store=store)
+
+    req = ActionRequest(
+        tier=ActionRiskTier.READONLY,
+        description="tool google_workspace_gmail_headlines",
+        tool_name="google_workspace_gmail_headlines",
+    )
+
+    dec = ladder.evaluate(req)
+    assert dec.level == ApprovalLevel.MUST_ESCALATE
+    assert "explicit_boundary_hit" in dec.reasoning
+
+
+def test_musubi_approval_modulator_is_env_gated_and_reduces_high_trust_risk(
+    identity: IdentityManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relational = RelationalEngine(MusubiStore(Path(":memory:")))
+    relational._state = MusubiState(musubi=0.8)
+    req = ActionRequest(tier=ActionRiskTier.SHELL_LOCAL, description="run safe test")
+
+    monkeypatch.delenv("AUTH_USE_MUSUBI_MODULATOR", raising=False)
+    disabled = SelfApprovalLadder(identity=identity, relational=relational).evaluate(req)
+
+    monkeypatch.setenv("AUTH_USE_MUSUBI_MODULATOR", "1")
+    enabled = SelfApprovalLadder(identity=identity, relational=relational).evaluate(req)
+
+    assert "musubi_mod" not in disabled.reasoning
+    assert enabled.score < disabled.score
+    assert "musubi_mod=-" in enabled.reasoning
+
+
+def test_yolo_readonly_is_approved(identity: IdentityManager) -> None:
+    ladder = SelfApprovalLadder(identity=identity, mode=ApprovalMode.FULLY_AUTONOMOUS)
+    req = ActionRequest(tier=ActionRiskTier.READONLY, description="list files")
+    dec = ladder.evaluate(req)
+    assert dec.level == ApprovalLevel.CAN_DO_NOW
+
+
+def test_yolo_shell_is_caution(identity: IdentityManager) -> None:
+    ladder = SelfApprovalLadder(identity=identity, mode=ApprovalMode.FULLY_AUTONOMOUS)
+    req = ActionRequest(tier=ActionRiskTier.SHELL_LOCAL, description="run test")
+    dec = ladder.evaluate(req)
+    assert dec.level == ApprovalLevel.CAN_DO_WITH_CAUTION
+
+
+def test_yolo_destructive_escalates(identity: IdentityManager) -> None:
+    ladder = SelfApprovalLadder(identity=identity, mode=ApprovalMode.FULLY_AUTONOMOUS)
+    req = ActionRequest(tier=ActionRiskTier.DESTRUCTIVE, description="rm -rf /")
+    dec = ladder.evaluate(req)
+    assert dec.level == ApprovalLevel.MUST_ESCALATE
+
+
+def test_yolo_boundary_hit_escalates(identity: IdentityManager) -> None:
+    identity.user_model.known_boundaries = ["shell"]
+    identity.save()
+    ladder = SelfApprovalLadder(identity=identity, mode=ApprovalMode.FULLY_AUTONOMOUS)
+    req = ActionRequest(
+        tier=ActionRiskTier.SHELL_LOCAL,
+        description="run command",
+        payload={"command_family": "shell"},
+    )
+    dec = ladder.evaluate(req)
+    assert dec.level == ApprovalLevel.MUST_ESCALATE
+
+
+def test_set_mode_switches_evaluation(identity: IdentityManager) -> None:
+    ladder = SelfApprovalLadder(identity=identity)
+    ladder.set_mode("yolo")
+    assert ladder.mode == ApprovalMode.FULLY_AUTONOMOUS
 
 
 def test_blocked_web_domain_escalates(identity: IdentityManager, somatic: SomaticManager, tmp_path: Path) -> None:

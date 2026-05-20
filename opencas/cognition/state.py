@@ -35,6 +35,7 @@ class CognitiveEventKind(str, Enum):
     PROCEDURAL_SKILL = "procedural_skill"
     COUNTERFACTUAL = "counterfactual"
     HABIT = "habit"
+    LIFE_PRIORITY = "life_priority"
     NARRATIVE = "narrative"
     TELEMETRY_AFFECT = "telemetry_affect"
     AFFECTIVE_TREND = "affective_trend"
@@ -655,7 +656,11 @@ class CognitiveStateStore:
             f"""
             SELECT raw FROM prospective_memories
             {where}
-            ORDER BY COALESCE(trigger_at, updated_at) ASC
+            ORDER BY
+                CASE WHEN trigger_at IS NULL THEN 1 ELSE 0 END ASC,
+                trigger_at ASC,
+                confidence DESC,
+                updated_at DESC
             LIMIT ?
             """,
             (max(1, int(limit)),),
@@ -751,6 +756,7 @@ class CognitiveStateStore:
         self,
         *,
         activation_status: str | None = None,
+        query: str = "",
         limit: int = 10,
     ) -> list[LearnedSkill]:
         assert self._db is not None
@@ -760,7 +766,11 @@ class CognitiveStateStore:
             clauses.append("activation_status = ?")
             params.append(activation_status)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-        params.append(max(1, int(limit)))
+        query_tokens = _tokens(query)
+        candidate_limit = max(1, int(limit))
+        if query_tokens:
+            candidate_limit = max(candidate_limit, 50)
+        params.append(candidate_limit)
         cursor = await self._db.execute(
             f"""
             SELECT raw FROM learned_skills
@@ -771,7 +781,19 @@ class CognitiveStateStore:
             tuple(params),
         )
         rows = await cursor.fetchall()
-        return [LearnedSkill.model_validate_json(row["raw"]) for row in rows]
+        skills = [LearnedSkill.model_validate_json(row["raw"]) for row in rows]
+        if query_tokens:
+            skills = sorted(
+                skills,
+                key=lambda skill: (
+                    _skill_query_score(query_tokens, skill),
+                    skill.confidence,
+                    skill.updated_at,
+                ),
+                reverse=True,
+            )
+            skills = [skill for skill in skills if _skill_query_score(query_tokens, skill) > 0]
+        return skills[: max(1, int(limit))]
 
     async def extract_skills_from_procedural_memory(self, memory_store: Any, *, limit: int = 200) -> dict[str, Any]:
         """Mine procedural episodes into reusable skill candidates."""
@@ -821,7 +843,7 @@ class CognitiveStateStore:
         events = await self.list_recent_events(limit=80)
         attention = await self.list_attention(limit=8)
         working = await self.list_working_memory(limit=8)
-        skills = await self.list_learned_skills(limit=12)
+        skills = await self.list_learned_skills(query=query, limit=12)
         scored_events = sorted(
             (
                 (
@@ -865,17 +887,27 @@ class CognitiveStateStore:
         scored = sorted(
             (
                 (
-                    _score_text(query_tokens, f"{event.kind.value} {event.summary} {event.content}")
-                    + event.salience * 0.04,
+                    _score_text(query_tokens, f"{event.kind.value} {event.summary} {event.content}"),
+                    event.salience,
                     event,
                 )
                 for event in recent
             ),
-            key=lambda item: (item[0], item[1].created_at),
+            key=lambda item: (item[0] + item[1] * 0.04, item[2].created_at),
             reverse=True,
         )
-        relevant = [event for score, event in scored if score > 0 or event.salience >= 1.4][:5]
-        skills = await self.list_learned_skills(activation_status="evidence_gated_auto_use", limit=3)
+        relevant = [
+            event
+            for query_score, salience, event in scored
+            if query_score > 0 or (not query_tokens and salience >= 1.4)
+        ][:5]
+        skills = await self.list_learned_skills(
+            activation_status="evidence_gated_auto_use",
+            query=query,
+            limit=3,
+        )
+        if query_tokens and not skills:
+            skills = await self.list_learned_skills(activation_status="evidence_gated_auto_use", limit=3)
 
         lines: list[str] = []
         if attention:
@@ -918,7 +950,9 @@ class CognitiveStateStore:
             return ""
         lines.append(
             "Use this as compact autobiographical/cognitive evidence. It is not a response script; "
-            "apply it only when relevant and keep claims grounded in the evidence shown."
+            "apply it only when relevant and keep claims grounded in the evidence shown. "
+            "When a turn reveals a reusable procedure or the operator asks to teach/remember a workflow, "
+            "preserve it with cognitive_skill_create using concrete evidence_refs and tool_sequence."
         )
         block = "\n".join(lines)
         return block[: max(200, int(char_budget))]
@@ -963,6 +997,18 @@ def _score_text(query_tokens: set[str], text: str) -> float:
         return 0.0
     overlap = len(query_tokens & text_tokens)
     return overlap / max(1, len(query_tokens))
+
+
+def _skill_query_score(query_tokens: set[str], skill: LearnedSkill) -> float:
+    """Score a learned skill by task relevance, not global confidence alone."""
+
+    if not query_tokens:
+        return 0.0
+    name_score = _score_text(query_tokens, skill.name) * 1.6
+    description_score = _score_text(query_tokens, skill.description)
+    precondition_score = _score_text(query_tokens, " ".join(skill.preconditions)) * 1.3
+    tool_score = _score_text(query_tokens, " ".join(skill.tool_sequence)) * 0.7
+    return name_score + description_score + precondition_score + tool_score
 
 
 def _extract_tool_sequence(content: str) -> list[str]:

@@ -1,5 +1,7 @@
 """Tests for the agentic harness and research notebook layer."""
 
+from types import SimpleNamespace
+
 import pytest
 import pytest_asyncio
 
@@ -200,7 +202,11 @@ async def test_harness_drafts_missing_objective_contract_with_llm(harness_store)
             self.submitted.append(task)
 
     class FakeLLM:
+        def __init__(self):
+            self.calls = []
+
         async def chat_completion(self, messages, **kwargs):
+            self.calls.append({"messages": messages, "kwargs": kwargs})
             if kwargs.get("source") == "harness_contract_drafting":
                 return {
                     "choices": [
@@ -208,7 +214,7 @@ async def test_harness_drafts_missing_objective_contract_with_llm(harness_store)
                             "message": {
                                 "content": """
                                 {
-                                  "goal": "Revise Chronicle 4246 as Bulma's own manuscript project.",
+                                  "goal": "Revise writing project 4246 as Bulma's own manuscript project.",
                                   "expected_output": "A concrete manuscript revision saved in the workspace.",
                                   "success_check": "The target chapter file contains new or revised prose.",
                                   "stop_condition": "Stop after one verified manuscript edit or a clear blocker.",
@@ -220,12 +226,18 @@ async def test_harness_drafts_missing_objective_contract_with_llm(harness_store)
                         }
                     ]
                 }
-            return {"choices": [{"message": {"content": "Revise one Chronicle chapter and verify the file changed."}}]}
+            return {"choices": [{"message": {"content": "Revise one Writing Project chapter and verify the file changed."}}]}
 
     baa = FakeBAA()
-    h = AgenticHarness(store=harness_store, llm=FakeLLM(), baa=baa)
+    llm = FakeLLM()
+    h = AgenticHarness(
+        store=harness_store,
+        llm=llm,
+        baa=baa,
+        identity=SimpleNamespace(self_model=SimpleNamespace(name="TestAgent")),
+    )
     loop = await h.create_objective_loop(
-        title="Continue Chronicle 4246",
+        title="Continue writing project 4246",
         description="Return to the manuscript and keep improving it.",
     )
 
@@ -242,6 +254,8 @@ async def test_harness_drafts_missing_objective_contract_with_llm(harness_store)
     assert fetched.meta["objective_contract"]["success_check"] == (
         "The target chapter file contains new or revised prose."
     )
+    contract_call = next(call for call in llm.calls if call["kwargs"].get("source") == "harness_contract_drafting")
+    assert "You are TestAgent drafting an outcome contract" in contract_call["messages"][0]["content"]
 
 
 @pytest.mark.asyncio
@@ -300,7 +314,7 @@ async def test_harness_switches_to_resume_mode_when_latest_salvage_blocks_broad_
     class MockResumeSnapshot:
         def __init__(self):
             self.retry_state = "blocked_low_divergence"
-            self.signature = "chronicle-4246"
+            self.signature = "writing-project-4246"
             self.best_next_step = "fix the dialogue tags"
             self.has_live_workstream = False
         def to_meta(self):
@@ -326,12 +340,12 @@ async def test_harness_switches_to_resume_mode_when_latest_salvage_blocks_broad_
     harness._generate_loop_plan = mock_generate_loop_plan
 
     loop = ObjectiveLoop(
-        title="Continue Chronicle 4246",
+        title="Continue writing project 4246",
         description="Write the next chapter.",
         status=ObjectiveStatus.ACTIVE,
         meta={
             "objective_contract": {
-                "goal": "Continue Chronicle 4246",
+                "goal": "Continue writing project 4246",
                 "expected_output": "A deterministic resume decision for the existing manuscript.",
                 "success_check": "The loop switches to salvage resume instead of broad replanning.",
                 "stop_condition": "Stop immediately when the latest salvage packet blocks broad retry.",
@@ -357,7 +371,7 @@ async def test_harness_injects_shadow_registry_guidance_into_loop_plan_prompt(ha
     class FakeLLM:
         async def chat_completion(self, messages, **kwargs):
             llm_calls.append({"messages": messages, "kwargs": kwargs})
-            return {"choices": [{"message": {"content": "Make one narrow revision to the chronicle draft."}}]}
+            return {"choices": [{"message": {"content": "Make one narrow revision to the creative_writing draft."}}]}
 
     class FakeShadowRegistry:
         def build_planning_context(self, **kwargs):
@@ -366,7 +380,7 @@ async def test_harness_injects_shadow_registry_guidance_into_loop_plan_prompt(ha
                 "available": True,
                 "prompt_block": (
                     "Related blocked-intention clusters:\n"
-                    "- 2x retry_blocked around retry:workspace/Chronicles/4246/chronicle_4246.md\n"
+                    "- 2x retry_blocked around retry:workspace/writing/4246/story_4246.md\n"
                     "Safer alternatives:\n"
                     "- Prefer deterministic review of the existing artifact rather than broad replanning."
                 ),
@@ -378,23 +392,23 @@ async def test_harness_injects_shadow_registry_guidance_into_loop_plan_prompt(ha
         shadow_registry=FakeShadowRegistry(),
     )
     loop = ObjectiveLoop(
-        title="Continue Chronicle 4246",
+        title="Continue writing project 4246",
         description="Write the next chapter from the existing manuscript.",
         status=ObjectiveStatus.ACTIVE,
         meta={
             "resume_project": {
-                "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+                "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             }
         },
     )
 
     plan = await harness._generate_loop_plan(loop, None)
 
-    assert plan == "Make one narrow revision to the chronicle draft."
+    assert plan == "Make one narrow revision to the creative_writing draft."
     assert shadow_calls == [
         {
-            "objective": "Continue Chronicle 4246",
-            "artifact": "workspace/Chronicles/4246/chronicle_4246.md",
+            "objective": "Continue writing project 4246",
+            "artifact": "workspace/writing/4246/story_4246.md",
         }
     ]
     prompt = llm_calls[0]["messages"][1]["content"]

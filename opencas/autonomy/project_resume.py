@@ -29,6 +29,7 @@ _GENERIC_PROJECT_TOKENS = {
     "draft",
     "final",
     "finish",
+    "i",
     "include",
     "instead",
     "manuscript",
@@ -40,6 +41,7 @@ _GENERIC_PROJECT_TOKENS = {
     "real",
     "restart",
     "review",
+    "should",
     "starting",
     "third",
     "write",
@@ -345,7 +347,7 @@ class ProjectResumeResolver:
                 if token not in _GENERIC_PROJECT_TOKENS
             ]
             if len(anchor_tokens) >= 2:
-                return " ".join(anchor_tokens[:5])
+                return ProjectResumeResolver._compact_signature_tokens(anchor_tokens)
             return anchors[0].strip().lower()
         tokens = [
             token
@@ -354,6 +356,13 @@ class ProjectResumeResolver:
         ]
         if len(tokens) < 2:
             return None
+        return ProjectResumeResolver._compact_signature_tokens(tokens)
+
+    @staticmethod
+    def _compact_signature_tokens(tokens: Sequence[str]) -> str:
+        for index, token in enumerate(tokens):
+            if token.isdigit() and index > 0:
+                return " ".join(tokens[index - 1:index + 1])
         return " ".join(tokens[:5])
 
     async def _collect_candidate_signatures(
@@ -737,6 +746,13 @@ class ProjectResumeResolver:
 
     @classmethod
     def _project_label(cls, text: str) -> str:
+        generic_title = re.search(
+            r"\b(?:writing project|story project|manuscript project)\s+\d+\b",
+            text or "",
+            re.IGNORECASE,
+        )
+        if generic_title:
+            return generic_title.group(0).lower()
         anchors = extract_anchor_terms(text or "")
         if anchors:
             return anchors[0].strip()
@@ -787,20 +803,20 @@ class ProjectResumeResolver:
     def _artifact_path_priority(path: str) -> float:
         lower = path.lower()
         score = 0.0
-        if lower.startswith("workspace/chronicles/"):
-            score += 3.0
-        elif lower.startswith("workspace/review/"):
-            score += 1.5
-        elif "/archive/" in lower or lower.startswith("workspace/archive/"):
+        if lower.startswith("workspace/"):
+            score += 2.0
+        if lower.startswith("workspace/review/") or "/review/" in lower:
+            score -= 0.75
+        if "/archive/" in lower or lower.startswith("workspace/archive/"):
             score -= 1.0
 
         name = PurePosixPath(lower).name
-        if name == "chronicle_4246.md":
-            score += 3.0
-        if "outline" in name:
+        if any(term in name for term in ("canonical", "current", "main", "manuscript", "draft")):
             score += 1.0
+        if any(term in name for term in ("outline", "map", "plan")):
+            score += 0.25
         if any(term in name for term in ("review", "critique", "source_packet", "status_matrix")):
-            score -= 0.5
+            score -= 1.0
         return score
 
     @staticmethod

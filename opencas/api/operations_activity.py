@@ -129,7 +129,7 @@ class ActivityOperationsService:
             )
             if ui_status in {"queued", "planning", "executing", "verifying", "recovering"}:
                 counts["active"] += 1
-            elif ui_status in {"needs approval", "needs clarification"}:
+            elif ui_status in {"held", "needs approval", "needs clarification"}:
                 counts["waiting"] += 1
             elif ui_status == "completed":
                 counts["completed"] += 1

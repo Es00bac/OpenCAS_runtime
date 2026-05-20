@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import hashlib
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
-from .affect_models import AffectDimension, AffectSnapshot, MoodSignalSource
+from .affect_models import AffectDimension, AffectSnapshot, AffectTrajectory, MoodSignalSource
 
 
 # Simple lexicon-based sentiment analysis
@@ -186,7 +186,7 @@ def analyze_commit_message(
     )
 
     if timestamp:
-        from datetime import datetime, timezone
+        from datetime import datetime
         try:
             snapshot.timestamp = datetime.fromisoformat(timestamp)
         except ValueError:
@@ -328,8 +328,6 @@ def compute_trajectory_from_snapshots(
     actor: Optional[str] = None,
 ) -> "AffectTrajectory":
     """Build an AffectTrajectory from a chronologically sorted list of snapshots."""
-    from .affect_models import AffectTrajectory
-
     snapshots = sorted(snapshots, key=lambda s: s.timestamp)
     traj = AffectTrajectory(
         session_id=session_id,

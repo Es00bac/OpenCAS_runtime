@@ -36,6 +36,9 @@ def register_runtime_shadow_registry_hooks(runtime: Any) -> None:
 
 
 def _post_action_decision(runtime: Any, _hook_name: str, ctx: Dict[str, Any]) -> HookResult:
+    if bool(ctx.get("audit_only", False)):
+        return HookResult(allowed=True)
+
     shadow_registry = getattr(getattr(runtime, "ctx", None), "shadow_registry", None)
     if shadow_registry is not None:
         shadow_registry.capture_action_decision(ctx)
@@ -43,6 +46,9 @@ def _post_action_decision(runtime: Any, _hook_name: str, ctx: Dict[str, Any]) ->
 
 
 def _post_tool_execute(runtime: Any, _hook_name: str, ctx: Dict[str, Any]) -> HookResult:
+    if bool(ctx.get("audit_only", False)):
+        return HookResult(allowed=True)
+
     shadow_registry = getattr(getattr(runtime, "ctx", None), "shadow_registry", None)
     if shadow_registry is not None:
         shadow_registry.capture_tool_block(ctx)

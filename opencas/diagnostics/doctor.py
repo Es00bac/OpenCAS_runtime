@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Optional
 
@@ -627,7 +628,11 @@ class Doctor:
             "run_id": payload.get("run_id"),
             "age_seconds": age_seconds,
             "error_message": payload.get("error_message"),
+            "reason": payload.get("reason"),
         }
+        pid_alive = _worker_pid_alive(payload)
+        if pid_alive is not None:
+            details["pid_alive"] = pid_alive
 
         terminal_failure_statuses = {
             "failed",
@@ -636,8 +641,15 @@ class Doctor:
             "timeout_killed",
             "start_failed",
             "no_result",
-            "cancelled",
         }
+        if worker_status == "cancelled":
+            reason = str(payload.get("reason") or "cancelled")
+            return DiagnosticCheck(
+                name="consolidation_worker",
+                status=CheckStatus.WARN,
+                message=f"Consolidation worker was cancelled intentionally: {reason}",
+                details=details,
+            )
         if worker_status in terminal_failure_statuses:
             if worker_status == "timeout_killed":
                 reason = "worker timed out and was killed"
@@ -647,6 +659,25 @@ class Doctor:
                 name="consolidation_worker",
                 status=CheckStatus.FAIL,
                 message=f"Consolidation worker status is {worker_status}: {reason}",
+                details=details,
+            )
+        if worker_status in {"running", "started"} and pid_alive is False:
+            readiness_since = _readiness_since(self.context)
+            if (
+                readiness_since is not None
+                and timestamp is not None
+                and timestamp < readiness_since
+            ):
+                return DiagnosticCheck(
+                    name="consolidation_worker",
+                    status=CheckStatus.WARN,
+                    message="Consolidation worker status is stale from a previous boot",
+                    details=details,
+                )
+            return DiagnosticCheck(
+                name="consolidation_worker",
+                status=CheckStatus.FAIL,
+                message="Consolidation worker status is running but its pid is not alive",
                 details=details,
             )
         if worker_status in {"running", "started"} and age_seconds is not None and age_seconds > 2 * 60 * 60:
@@ -714,6 +745,38 @@ def _latest_status_timestamp(payload: dict[str, Any]) -> Optional[datetime]:
         if parsed is not None:
             return parsed
     return None
+
+
+def _worker_pid_alive(payload: dict[str, Any]) -> Optional[bool]:
+    try:
+        pid = int(payload.get("pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except Exception:
+        return None
+    return True
+
+
+def _readiness_since(context: Any) -> Optional[datetime]:
+    readiness = getattr(context, "readiness", None)
+    snapshot = getattr(readiness, "snapshot", None)
+    if not callable(snapshot):
+        return None
+    try:
+        payload = snapshot()
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return _parse_timestamp(payload.get("since"))
 
 
 def _parse_timestamp(value: Any) -> Optional[datetime]:

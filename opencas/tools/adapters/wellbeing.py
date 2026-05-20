@@ -26,12 +26,15 @@ class WellbeingToolAdapter:
         events = []
         recommendations = []
         proposals = []
+        maintenance_outcomes = []
         if bool(args.get("include_recent_events", False)):
             events = await store.list_events(limit=limit)
         if bool(args.get("include_recommendations", False)):
             recommendations = await store.list_recommendations(limit=limit)
         if bool(args.get("include_proposals", False)):
             proposals = await store.list_self_modification_proposals(limit=limit)
+        if bool(args.get("include_maintenance_outcomes", False)):
+            maintenance_outcomes = await store.list_maintenance_outcomes(limit=limit)
 
         payload = {
             "latest_state": latest.model_dump(mode="json") if latest is not None else None,
@@ -44,5 +47,9 @@ class WellbeingToolAdapter:
             ],
             "proposal_count": len(proposals),
             "proposals": [proposal.model_dump(mode="json") for proposal in proposals],
+            "maintenance_outcome_count": len(maintenance_outcomes),
+            "maintenance_outcomes": [
+                outcome.model_dump(mode="json") for outcome in maintenance_outcomes
+            ],
         }
         return ToolResult(True, json.dumps(payload), payload)

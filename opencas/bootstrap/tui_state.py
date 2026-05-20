@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 from open_llm_auth.config import load_config
-from open_llm_auth.provider_catalog import get_builtin_provider_models
+from open_llm_auth.auth.manager import ProviderManager
 
 
 class WizardState:
@@ -29,7 +29,7 @@ class WizardState:
         self.credential_env_keys: List[str] = []
         self.selected_profiles: List[str] = []
         self.default_llm_model: Optional[str] = None
-        self.embedding_model_id: str = "google/embeddinggemma-300m"
+        self.embedding_model_id: str = ProviderManager.default_embedding_model_ref()
         self.model_routing_mode: str = "single"
         self.routing_light_model: str = ""
         self.routing_standard_model: str = ""
@@ -45,8 +45,8 @@ class WizardState:
         self.mcp_auto_register: bool = False
         self.mcp_servers_json: str = ""
         self.approval_mode: str = "auto_review"
-        self.desktop_context_enabled: bool = False
-        self.desktop_capture_interval_seconds: str = "300"
+        self.desktop_context_enabled: bool = True
+        self.desktop_capture_interval_seconds: str = "60"
         self.desktop_min_speech_interval_seconds: str = "60"
         self.desktop_tts_enabled: bool = True
         self.desktop_play_audio: bool = True
@@ -150,7 +150,8 @@ def discover_model_choices(state: WizardState) -> Dict[str, List[tuple[str, str]
 
     providers: set[str] = set()
     chat_models: Dict[str, str] = {}
-    embedding_models: Dict[str, str] = {"local-fallback": "local-fallback (offline fallback)"}
+    offline_embedding = ProviderManager.offline_embedding_model_ref()
+    embedding_models: Dict[str, str] = {offline_embedding: f"{offline_embedding} (offline fallback)"}
 
     try:
         cfg = load_config(config_path=config_path, env_path=env_path)
@@ -164,15 +165,18 @@ def discover_model_choices(state: WizardState) -> Dict[str, List[tuple[str, str]
         providers.update(provider_map.keys())
         providers.update(profile.provider for profile in profile_map.values())
 
-        for provider_id in sorted(providers):
+        available_refs = ProviderManager.model_refs_for_config(cfg)
+        embedding_refs = ProviderManager.embedding_model_refs_for_config(cfg)
+        available_by_provider: Dict[str, List[str]] = {}
+        for ref in available_refs:
+            if "/" not in ref:
+                continue
+            provider_id, model_id = ref.split("/", 1)
+            available_by_provider.setdefault(provider_id, []).append(model_id)
+
+        for provider_id in sorted(providers | set(available_by_provider)):
             provider_cfg = provider_map.get(provider_id)
             model_defs = list(getattr(provider_cfg, "models", []) or [])
-            if not model_defs:
-                for model in get_builtin_provider_models(provider_id):
-                    try:
-                        model_defs.append(type("ModelDef", (), model))
-                    except Exception:
-                        continue
             for model in model_defs:
                 model_id = getattr(model, "id", None)
                 if not model_id:
@@ -183,6 +187,15 @@ def discover_model_choices(state: WizardState) -> Dict[str, List[tuple[str, str]
                 chat_models.setdefault(full_ref, label)
                 if "embedding" in full_ref.lower():
                     embedding_models.setdefault(full_ref, label)
+            for model_id in available_by_provider.get(provider_id, []):
+                full_ref = f"{provider_id}/{model_id}"
+                label = f"{provider_id} / {model_id}"
+                chat_models.setdefault(full_ref, label)
+                if "embedding" in full_ref.lower():
+                    embedding_models.setdefault(full_ref, label)
+        for ref in embedding_refs:
+            label = ref if "/" not in ref else ref.replace("/", " / ", 1)
+            embedding_models.setdefault(ref, label)
     except Exception:
         pass
 

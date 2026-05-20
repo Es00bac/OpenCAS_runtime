@@ -10,6 +10,7 @@ from opencas.relational import (
     RelationalEngine,
     ResonanceDimension,
 )
+from opencas.runtime.cognition_bus import AffectiveEvent
 
 
 @pytest_asyncio.fixture
@@ -104,6 +105,42 @@ async def test_record_boundary_violated(engine: RelationalEngine) -> None:
     await engine.initialize()
     state = await engine.record_boundary_respected(respected=False)
     assert state.dimensions[ResonanceDimension.TRUST.value] < 0.0
+
+
+@pytest.mark.asyncio
+async def test_record_affective_user_frustration_changes_musubi(engine: RelationalEngine) -> None:
+    await engine.initialize(trust=0.9, resonance=0.9, presence=0.9, attunement=0.9)
+    before = engine.state.musubi
+
+    await engine.record_affective_event(
+        AffectiveEvent(
+            kind="affective.user_frustration",
+            source="test",
+            magnitude=0.9,
+            evidence_ids=["episode-1"],
+        )
+    )
+
+    history = await engine.store.list_history(limit=1)
+    assert engine.state.musubi < before
+    assert history[0].trigger_event == "affective.user_frustration"
+    assert history[0].delta != 0
+
+
+@pytest.mark.asyncio
+async def test_cycle_burst_started_does_not_write_zero_delta_musubi_record(
+    engine: RelationalEngine,
+) -> None:
+    await engine.initialize(trust=0.5, resonance=0.5, presence=0.5, attunement=0.5)
+    before = len(await engine.store.list_history(limit=10))
+
+    await engine.record_burst_event(
+        "cycle_burst_started",
+        "cycle continuity breadcrumb",
+    )
+
+    after_history = await engine.store.list_history(limit=10)
+    assert len(after_history) == before
 
 
 def test_derive_musubi_bounds() -> None:

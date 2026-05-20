@@ -151,6 +151,14 @@
             <div class="card-body"><span class="muted">Loading…</span></div>
           </div>
           <div class="card"
+            hx-get="/api/monitor/affective-trends?limit=24"
+            hx-trigger="load, every 30s"
+            hx-swap="innerHTML"
+            hx-target="find .card-body">
+            <div class="card-title">Affective Trends</div>
+            <div class="card-body"><span class="muted">Loading…</span></div>
+          </div>
+          <div class="card"
             hx-get="/api/monitor/shadow-registry"
             hx-trigger="load, every 20s"
             hx-swap="innerHTML"
@@ -165,6 +173,15 @@
             hx-swap="innerHTML"
             hx-target="find .card-body">
             <div class="card-title">Qualification</div>
+            <div class="card-body"><span class="muted">Loading…</span></div>
+          </div>
+          <div class="card"
+            data-panel="executive-assistant-card"
+            hx-get="/api/monitor/executive-assistant"
+            hx-trigger="load, every 60s"
+            hx-swap="innerHTML"
+            hx-target="find .card-body">
+            <div class="card-title">Executive Assistant System Data</div>
             <div class="card-body"><span class="muted">Loading…</span></div>
           </div>
         </div>
@@ -548,6 +565,13 @@
             <p class="muted">Loading qualification summary…</p>
           </div>
           <div class="panel scroll"
+            data-panel="operations-executive-assistant"
+            hx-get="/api/monitor/executive-assistant"
+            hx-trigger="load, every 60s"
+            hx-swap="innerHTML">
+            <p class="muted">Loading executive assistant system data…</p>
+          </div>
+          <div class="panel scroll"
             hx-get="/api/operations/validation-runs?limit=10"
             hx-trigger="load, every 60s"
             hx-swap="innerHTML">
@@ -696,6 +720,14 @@
                     <div class="usage-stat-label">OpenCAS calls</div>
                   </div>
                   <div class="usage-stat-card">
+                    <div class="usage-stat-value" x-text="formatCompact(payload.opencas?.prompt_cache?.cachedPromptTokens || 0)"></div>
+                    <div class="usage-stat-label">Cached prompt tokens</div>
+                  </div>
+                  <div class="usage-stat-card">
+                    <div class="usage-stat-value" x-text="formatRatioPercent(payload.opencas?.prompt_cache?.cacheReuseRatio || 0)"></div>
+                    <div class="usage-stat-label">Prompt cache reuse</div>
+                  </div>
+                  <div class="usage-stat-card">
                     <div class="usage-stat-value" x-text="formatCompact(payload.gateway?.overview?.summary?.total_tokens || 0)"></div>
                     <div class="usage-stat-label">Gateway tokens</div>
                   </div>
@@ -783,6 +815,39 @@
                 </tbody>
               </table>
             </div>
+          </div>
+          <div class="panel panel-span-6">
+            <div class="card-title">Prompt Cache Efficiency</div>
+            <template x-if="payload">
+              <div>
+                <div class="stat-grid">
+                  <div><div class="stat-value" x-text="formatCompact(payload.opencas?.prompt_cache?.totalPromptTokens || 0)"></div><div class="stat-label">Prompt tokens</div></div>
+                  <div><div class="stat-value" x-text="formatCompact(payload.opencas?.prompt_cache?.cachedPromptTokens || 0)"></div><div class="stat-label">Cached tokens</div></div>
+                  <div><div class="stat-value" x-text="formatCompact(payload.opencas?.prompt_cache?.cacheHitCalls || 0)"></div><div class="stat-label">Cache-hit calls</div></div>
+                  <div><div class="stat-value" x-text="formatRatioPercent(payload.opencas?.prompt_cache?.cacheReuseRatio || 0)"></div><div class="stat-label">Reuse ratio</div></div>
+                </div>
+                <ul class="list mt-4">
+                  <template x-for="note in (payload.opencas?.prompt_cache?.notes || [])" :key="'cache-note-' + note">
+                    <li x-text="note"></li>
+                  </template>
+                </ul>
+                <div class="table-wrap mt-4">
+                  <table class="data-table">
+                    <thead><tr><th>Provider</th><th>Cached</th><th>Prompt</th><th>Reuse</th></tr></thead>
+                    <tbody>
+                      <template x-for="row in (payload.opencas?.prompt_cache?.byProvider || [])" :key="'cache-provider-' + row.provider">
+                        <tr>
+                          <td x-text="row.provider"></td>
+                          <td x-text="formatCompact(row.cachedPromptTokens || 0)"></td>
+                          <td x-text="formatCompact(row.promptTokens || 0)"></td>
+                          <td x-text="formatRatioPercent(row.cacheReuseRatio || 0)"></td>
+                        </tr>
+                      </template>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </template>
           </div>
           <div class="panel panel-span-6">
             <div class="card-title">Gateway Provider Telemetry</div>
@@ -907,13 +972,17 @@
             <div class="card-title">Keeper Memories</div>
             <div x-html="keeperMemoriesMarkup()"></div>
           </div>
+          <div class="panel scroll">
+            <div class="card-title">Reflective Proposals</div>
+            <div x-html="proposalMarkup()"></div>
+          </div>
         </div>
       </section>
       </template>
 
       <!-- Memory -->
       <template x-if="tab === 'memory'">
-      <section x-cloak x-data="memoryApp()" x-init="initMemory()">
+      <section x-cloak x-data="memoryApp()" x-init="initMemory()" class="memory-shell" :class="atlasExpanded ? 'atlas-expanded' : ''">
         <div class="section-heading">
           <div>
             <h2>Memory Atlas</h2>
@@ -922,10 +991,15 @@
           <div class="inline-actions">
             <button class="btn primary" @click="loadLandscape()" :disabled="landscapeLoading" x-text="landscapeLoading ? 'Refreshing…' : 'Refresh Atlas'"></button>
             <button class="btn" @click="resetLandscapeFilters()">Reset Filters</button>
+            <button class="btn" @click="setCognitiveFlowMode('projection')" x-bind:class="cognitiveFlowMode === 'projection' ? 'primary' : ''">Atlas Projection</button>
+            <button class="btn" @click="setCognitiveFlowMode('flow')" x-bind:class="cognitiveFlowMode === 'flow' ? 'primary' : ''">Flow View</button>
+            <button class="btn" @click="toggleAtlasExpanded()" x-text="atlasExpanded ? 'Collapse Atlas' : 'Expand Atlas'"></button>
+            <button class="btn" @click="openCognitiveFlowPopout()">Open Flow View</button>
           </div>
         </div>
 
         <div class="panel memory-health-panel" x-html="memoryHealthMarkup()"></div>
+        <div class="panel memory-activity-panel" x-html="memoryActivityMarkup()"></div>
 
         <div class="memory-layout">
           <div class="panel memory-controls">
@@ -1018,38 +1092,79 @@
                   <option value="false">episodes only</option>
                 </select>
               </label>
+              <label class="field-label">Reflective proposals
+                <select class="input" x-model="includeContextProposals" @change="loadLandscape()">
+                  <option value="true">show proposal recall</option>
+                  <option value="false">hide proposals</option>
+                </select>
+              </label>
               <label class="field-label">Edges
                 <select class="input" x-model="showEdges" @change="renderLandscapeChart()">
                   <option value="true">show</option>
                   <option value="false">hide</option>
                 </select>
               </label>
+              <label class="field-label">Flow window (sec)
+                <input class="input" type="number" min="5" max="7200" step="1" x-model.number="cognitiveFlowWindowSeconds" @change="loadCognitiveFlow()" />
+              </label>
+              <label class="field-label">Flow event cap
+                <input class="input" type="number" min="20" max="600" step="10" x-model.number="cognitiveFlowLimit" @change="loadCognitiveFlow()" />
+              </label>
+              <label class="field-label">Flow detail
+                <select class="input" x-model="cognitiveFlowIncludeNoise" @change="loadCognitiveFlow()">
+                  <option :value="false">signal focus</option>
+                  <option :value="true">all telemetry</option>
+                </select>
+              </label>
+              <label class="field-label">Flow kind filter
+                <input class="input" type="text" x-model="cognitiveFlowKindFilter" @change="loadCognitiveFlow()" placeholder="span_start,llm_call,tool_call" />
+              </label>
+              <label class="field-label">Flow links
+                <select class="input" x-model="cognitiveFlowShowSequential" @change="loadCognitiveFlow()">
+                  <option :value="true">sequential + hierarchical</option>
+                  <option :value="false">hierarchical only</option>
+                </select>
+              </label>
+              <label class="field-label">Span hierarchy
+                <select class="input" x-model="cognitiveFlowShowSpanFlow" @change="loadCognitiveFlow()">
+                  <option :value="true">enabled</option>
+                  <option :value="false">disabled</option>
+                </select>
+              </label>
             </div>
             <div class="helper-text mt-3">
               The atlas projects each embedding dimension family into its own lane so mixed model histories stay visible instead of crashing the view.
             </div>
-            <div class="summary-grid mt-4" x-html="landscapeSummaryMarkup()"></div>
+            <div class="summary-grid mt-4" x-show="cognitiveFlowMode !== 'flow'" x-html="landscapeSummaryMarkup()"></div>
+            <div class="summary-grid mt-4" x-show="cognitiveFlowMode === 'flow'" x-html="cognitiveFlowSummaryMarkup()"></div>
+            <div class="mt-3" x-show="cognitiveFlowMode === 'flow'" x-html="cognitiveFlowStripMarkup()"></div>
+            <div class="mt-3" x-show="cognitiveFlowMode === 'flow'" x-html="cognitiveFlowThoughtLedgerMarkup()"></div>
           </div>
 
           <div class="panel memory-atlas-panel">
             <h4>Connected Memory Atlas</h4>
             <p class="muted">Click a node to inspect the memory, its affect, embedding lineage, and strongest links.</p>
             <div class="inline-actions mt-3">
-              <button class="btn" @click="resetZoom()">Reset Zoom</button>
-              <button class="btn" @click="viewMode = 'selected'; renderLandscapeChart()" :disabled="!selectedNodeId">Focus Selection</button>
-              <button class="btn" @click="viewMode = 'atlas'; renderLandscapeChart()">Show Full Atlas</button>
+              <button class="btn" @click="resetZoom()" x-show="cognitiveFlowMode !== 'flow'">Reset Zoom</button>
+              <button class="btn" @click="viewMode = 'selected'; renderLandscapeChart()" :disabled="!selectedNodeId" x-show="cognitiveFlowMode !== 'flow'">Focus Selection</button>
+              <button class="btn" @click="viewMode = 'atlas'; renderLandscapeChart()" x-show="cognitiveFlowMode !== 'flow'">Show Full Atlas</button>
+              <span class="muted" x-show="cognitiveFlowMode === 'flow'">Flow rendering is timeline-based with causal/symbolic links.</span>
             </div>
-            <p class="muted" x-show="landscapeLoading">Loading atlas…</p>
-            <p class="muted" x-show="!landscapeLoading && !landscape.nodes.length">No memory nodes available.</p>
-            <div class="memory-atlas-wrap" x-show="landscape.nodes.length">
+            <p class="muted" x-show="cognitiveFlowMode !== 'flow' && landscapeLoading">Loading atlas…</p>
+            <p class="muted" x-show="cognitiveFlowMode !== 'flow' && !landscapeLoading && !landscape.nodes.length">No memory nodes available.</p>
+            <div class="memory-atlas-wrap" x-show="cognitiveFlowMode !== 'flow' && landscape.nodes.length">
               <canvas id="memoryLandscapeChart"></canvas>
             </div>
-            <div class="helper-text mt-3" x-html="atlasLegendMarkup()"></div>
+            <div class="memory-flow-wrap" x-show="cognitiveFlowMode === 'flow'">
+              <canvas id="memoryFlowCanvas"></canvas>
+            </div>
+            <p class="muted mt-3" x-show="cognitiveFlowMode === 'flow' && !cognitiveFlow.nodes.length">No cognitive-flow events available for this window.</p>
+            <div class="helper-text mt-3" x-show="cognitiveFlowMode !== 'flow'" x-html="atlasLegendMarkup()"></div>
           </div>
 
           <div class="panel memory-detail-panel">
             <h4>Selection</h4>
-            <div x-html="selectedNodeMarkup()"></div>
+            <div x-html="cognitiveFlowMode === 'flow' ? cognitiveFlowSelectionMarkup() : selectedNodeMarkup()"></div>
           </div>
         </div>
 
@@ -1912,6 +2027,8 @@
               evt.detail.serverResponse = renderBaa(data);
             } else if (url.startsWith('/api/monitor/embeddings')) {
               evt.detail.serverResponse = renderEmbeddings(data);
+            } else if (url.startsWith('/api/monitor/executive-assistant')) {
+              evt.detail.serverResponse = tgt.closest('.card') ? renderExecutiveAssistantCard(data) : renderExecutiveAssistantPanel(data);
             } else if (url.startsWith('/api/monitor/shadow-registry/cluster')) {
               evt.detail.serverResponse = renderShadowRegistryClusterDetail(data);
             } else if (url.startsWith('/api/monitor/shadow-registry')) {
@@ -2025,11 +2142,16 @@
 
       // Memory dashboard globals live in dashboard/static/js/memory_app.js.
       function renderBaa(d) {
+        const heldReasons = d.held_reason_counts || {};
+        const reasonText = Object.entries(heldReasons).map(([reason, count]) => `${reason} ${count}`).join(' • ') || 'none';
+        const contextReasons = Object.entries(d.context_guard_reason_counts || {}).map(([reason, count]) => `${reason} ${count}`).join(' • ') || 'none';
+        const dependencyReasons = Object.entries(d.dependency_reason_counts || {}).map(([reason, count]) => `${reason} ${count}`).join(' • ') || 'none';
         return `<div class="stat-grid">
           <div><div class="stat-value">${d.queue_size}</div><div class="stat-label">Queue</div></div>
           <div><div class="stat-value">${d.held_size}</div><div class="stat-label">Held</div></div>
+          <div><div class="stat-value">${d.context_guard_held_count || 0}</div><div class="stat-label">Context Guard</div></div>
           <div><div class="stat-value">${d.active_count}</div><div class="stat-label">Active</div></div>
-        </div>`;
+        </div><p class="muted mt-2">held reasons: ${escapeHtml(reasonText)}</p><p class="muted">context guard: ${escapeHtml(contextReasons)} • dependencies: ${escapeHtml(dependencyReasons)}</p>`;
       }
       function renderEmbeddings(d) {
         const status = d.healthy ? '<span class="badge ok">OK</span>' : '<span class="badge warn">Slow</span>';
@@ -2056,6 +2178,80 @@
         }
         html += '</tbody></table>';
         return html;
+      }
+      function renderExecutiveAssistantCard(d) {
+        if (!d.available) {
+          return `<div class="stat-grid">
+            <div><div class="stat-value">n/a</div><div class="stat-label">Available</div></div>
+            <div><div class="stat-value">0</div><div class="stat-label">Sections</div></div>
+          </div><p class="muted mt-3">${escapeHtml(d.error || 'Executive assistant system data is not available.')}</p>`;
+        }
+        const summary = d.summary || {};
+        return `<div class="stat-grid">
+          <div><div class="stat-value">${formatExecutivePercent(summary.duplicate_tool_call_rate)}</div><div class="stat-label">Duplicate tools</div></div>
+          <div><div class="stat-value">${escapeHtml(String(summary.audited_turns_7d ?? 0))}</div><div class="stat-label">Audited turns</div></div>
+          <div><div class="stat-value">${escapeHtml(String(summary.promise_receipt_evidence_count ?? 0))}/${escapeHtml(String(summary.promise_claim_count ?? 0))}</div><div class="stat-label">Proof receipts</div></div>
+          <div><div class="stat-value">${escapeHtml(String(summary.daydream_consecutive_skip_count ?? 0))}</div><div class="stat-label">Daydream skips</div></div>
+        </div><p class="muted mt-3 wrap-code">continuous present: ${escapeHtml(summary.continuous_present_score || 'pending')}</p>`;
+      }
+      function renderExecutiveAssistantPanel(d) {
+        if (!d.available) {
+          return `<div class="health-header"><span class="badge fail">Unavailable</span><span class="muted">Executive Assistant System Data</span></div>
+            <p class="muted mt-3">${escapeHtml(d.error || 'No executive assistant system data is available.')}</p>`;
+        }
+        const summary = d.summary || {};
+        let html = `<div class="health-header"><span class="badge warn">Executive Assistant System Data</span><span class="muted">${escapeHtml(d.generated_at || '-')}</span></div>`;
+        html += `<div class="stat-grid">
+          <div><div class="stat-value">${formatExecutivePercent(summary.duplicate_tool_call_rate)}</div><div class="stat-label">Duplicate tool rate</div></div>
+          <div><div class="stat-value">${escapeHtml(String(summary.proactive_observations_7d ?? 0))}</div><div class="stat-label">Proactive observations</div></div>
+          <div><div class="stat-value">${escapeHtml(String(summary.audited_turns_7d ?? 0))}</div><div class="stat-label">E12 audited turns</div></div>
+          <div><div class="stat-value">${escapeHtml(String(summary.channels_with_daily_novel_signal ?? 0))}</div><div class="stat-label">Novel channels</div></div>
+          <div><div class="stat-value">${escapeHtml(String(summary.promise_receipt_evidence_count ?? 0))}/${escapeHtml(String(summary.promise_claim_count ?? 0))}</div><div class="stat-label">Promise proof</div></div>
+          <div><div class="stat-value">${escapeHtml(String(summary.daydream_consecutive_skip_count ?? 0))}</div><div class="stat-label">Daydream skips</div></div>
+        </div>`;
+        html += `<p class="muted mt-3">State dir: <code>${escapeHtml(d.state_dir || '-')}</code></p>`;
+        if (d.report_path) html += `<p class="muted">Latest report: <code>${escapeHtml(d.report_path)}</code></p>`;
+        const items = d.items || [];
+        if (!items.length) {
+          return html + '<p class="muted mt-3">No section records are visible.</p>';
+        }
+        html += '<table class="data-table mt-4"><thead><tr><th>Loop</th><th>Status</th><th>Primary Signals</th><th>Summary</th></tr></thead><tbody>';
+        for (const item of items) {
+          html += `<tr>
+            <td>${escapeHtml(item.title || '-')}</td>
+            <td><span class="badge ${executiveStatusClass(item.status)}">${escapeHtml(item.status || 'unknown')}</span></td>
+            <td class="wrap-code">${escapeHtml(executiveItemSignals(item))}</td>
+            <td class="wrap-code">${escapeHtml(item.summary || '-')}</td>
+          </tr>`;
+        }
+        html += '</tbody></table>';
+        return html;
+      }
+      function executiveItemSignals(item) {
+        const skip = new Set(['title', 'status', 'summary']);
+        return Object.keys(item || {})
+          .filter((key) => !skip.has(key))
+          .slice(0, 6)
+          .map((key) => `${key}: ${formatExecutiveValue(item[key])}`)
+          .join(' | ') || '-';
+      }
+      function formatExecutiveValue(value) {
+        if (value === null || value === undefined || value === '') return '-';
+        if (typeof value === 'number') return Number.isInteger(value) ? String(value) : String(Math.round(value * 10000) / 10000);
+        return String(value);
+      }
+      function formatExecutivePercent(value) {
+        if (value === null || value === undefined || value === '') return '-';
+        const numeric = Number(value);
+        if (Number.isNaN(numeric)) return escapeHtml(String(value));
+        return `${Math.round(numeric * 10000) / 100}%`;
+      }
+      function executiveStatusClass(status) {
+        const value = String(status || '').toLowerCase();
+        if (value === 'pass' || value === 'ok') return 'ok';
+        if (value === 'warn' || value === 'pending') return 'warn';
+        if (value === 'fail' || value === 'error') return 'fail';
+        return '';
       }
       function renderMeaningfulLoopCard(d) {
         const counts = d.stop_counts || {};
@@ -4121,23 +4317,110 @@
               try {
                 const d = await http.fetchJson(`/api/chat/sessions/${encodeURIComponent(this.sessionId)}/history?limit=200`);
                 const messages = d.messages || [];
-                const userIndex = (() => {
-                  for (let idx = messages.length - 1; idx >= 0; idx -= 1) {
-                    const message = messages[idx];
-                    if (message?.role === 'user' && message?.content === userMsg) return idx;
-                  }
-                  return -1;
-                })();
-                if (userIndex >= 0) {
-                  const assistantIndex = messages.findIndex((message, idx) => idx > userIndex && message?.role === 'assistant');
-                  if (assistantIndex >= 0) return messages[assistantIndex];
-                }
+                const assistant = this.findAssistantAfterUser(messages, userMsg);
+                if (assistant) return assistant;
               } catch (error) {
                 console.error(error);
               }
               await new Promise(resolve => window.setTimeout(resolve, 1000));
             }
             return null;
+          },
+          findUserMessage(messages, userMsg) {
+            for (let idx = (messages || []).length - 1; idx >= 0; idx -= 1) {
+              const message = messages[idx];
+              if (message?.role === 'user' && message?.content === userMsg) return { message, index: idx };
+            }
+            return null;
+          },
+          findAssistantAfterUser(messages, userMsg) {
+            const userMatch = this.findUserMessage(messages, userMsg);
+            if (!userMatch) return null;
+            return (messages || []).find((message, idx) => idx > userMatch.index && message?.role === 'assistant') || null;
+          },
+          async userMessageWasPersisted(userMsg) {
+            if (!this.sessionId) return false;
+            try {
+              const d = await http.fetchJson(`/api/chat/sessions/${encodeURIComponent(this.sessionId)}/history?limit=200`);
+              return !!this.findUserMessage(d.messages || [], userMsg);
+            } catch (error) {
+              console.error(error);
+              return false;
+            }
+          },
+          isTransientChatSendError(error) {
+            const text = String(error?.message || error || '').toLowerCase();
+            return ['failed to fetch', 'networkerror', 'connection', 'closed', 'aborted', 'load failed', 'timed out', 'timeout'].some(fragment => text.includes(fragment));
+          },
+          isChatTurnInProgressError(error) {
+            const text = String(error?.message || error || '').toLowerCase();
+            return ['chat_turn_in_progress', 'failed: 409', 'conflict', 'already in progress', 'response is already in progress'].some(fragment => text.includes(fragment));
+          },
+          isChatTurnTimeoutError(error) {
+            const code = String(error?.code || error?.detail?.code || '').toLowerCase();
+            if (code === 'chat_turn_timeout') return true;
+            return String(error?.message || error || '').toLowerCase().includes('chat_turn_timeout');
+          },
+          formatChatSendError(error) {
+            const text = String(error?.message || error || '').trim();
+            if (this.isChatTurnInProgressError(error)) return 'A response is already in progress; waiting for it to finish before retrying.';
+            if (this.isChatTurnTimeoutError(error)) return 'The response timed out and the chat lock was released. Retry the message, or move long-running work into a background task.';
+            if (!text) return 'Connection closed before the message could be confirmed.';
+            if (this.isTransientChatSendError(error)) return `Connection closed before the message could be confirmed. ${text}`;
+            return text;
+          },
+          async waitForChatReady(timeoutMs = 15000) {
+            const startedAt = Date.now();
+            while (Date.now() - startedAt < timeoutMs) {
+              try {
+                await http.fetchJson('/health');
+                return true;
+              } catch (error) {
+                console.error(error);
+              }
+              await new Promise(resolve => window.setTimeout(resolve, 1000));
+            }
+            return false;
+          },
+          async waitForChatTurnAvailable(timeoutMs = 120000) {
+            const startedAt = Date.now();
+            while (Date.now() - startedAt < timeoutMs) {
+              try {
+                const status = await http.fetchJson(http.buildUrl('/api/chat/inflight', { session_id: this.sessionId }));
+                if (!status?.in_progress) return true;
+              } catch (error) {
+                console.error(error);
+              }
+              await new Promise(resolve => window.setTimeout(resolve, 1000));
+            }
+            return false;
+          },
+          sendChatRequest(payload) {
+            return http.fetchJson('/api/chat/send', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(payload),
+            });
+          },
+          async recoverChatSendAfterTransientFailure(error, payload, userMsg) {
+            if (this.isChatTurnTimeoutError(error)) throw error;
+            let response = await this.waitForPersistedAssistant(userMsg, 45000);
+            const turnInProgress = this.isChatTurnInProgressError(error);
+            if (response || (!this.isTransientChatSendError(error) && !turnInProgress)) return response;
+            if (turnInProgress) {
+              await this.waitForChatTurnAvailable();
+            } else if (await this.userMessageWasPersisted(userMsg)) {
+              return await this.waitForPersistedAssistant(userMsg, 45000);
+            }
+            await this.waitForChatReady();
+            try {
+              return await this.sendChatRequest(payload);
+            } catch (retryError) {
+              console.error(retryError);
+              response = await this.waitForPersistedAssistant(userMsg, 30000);
+              if (response) return response;
+              throw retryError;
+            }
           },
           async waitForAssistantVoiceOutput(assistantMessage, timeoutMs = 45000) {
             if (!this.sessionId || !assistantMessage) return null;
@@ -4199,28 +4482,27 @@
             this.pendingVoiceInput = null;
             this.voiceThinking = !!voiceInput;
             this.voiceError = '';
+            let sendError = null;
             try {
-              const requestPromise = http.fetchJson('/api/chat/send', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  session_id: this.sessionId,
-                  message: userMsg,
-                  attachments,
-                  voice_input: voiceInput,
-                  speak_response: this.voiceAutoSpeak,
-                  voice_prefer_local: this.voiceMode === 'local',
-                  voice_expressive: this.voiceExpressive,
-                })
-              });
-              const safeRequestPromise = requestPromise.catch(error => {
+              const payload = {
+                session_id: this.sessionId,
+                message: userMsg,
+                attachments,
+                voice_input: voiceInput,
+                speak_response: this.voiceAutoSpeak,
+                voice_prefer_local: this.voiceMode === 'local',
+                voice_expressive: this.voiceExpressive,
+                suppress_body_double_voice: true,
+              };
+              const requestPromise = this.sendChatRequest(payload);
+              let response = null;
+              try {
+                response = await requestPromise;
+              } catch (error) {
                 console.error(error);
-                return null;
-              });
-              const response = await Promise.race([
-                safeRequestPromise,
-                this.waitForPersistedAssistant(userMsg),
-              ]);
+                sendError = error;
+                response = await this.recoverChatSendAfterTransientFailure(error, payload, userMsg);
+              }
               if (response?.response) {
                 this.messages.push({
                   role: 'assistant',
@@ -4232,7 +4514,16 @@
               }
               await this.loadHistory();
               await this.loadContextSummary();
-              let latestAssistant = [...this.messages].reverse().find(message => message.role === 'assistant');
+              const assistantAfterUser = this.findAssistantAfterUser(this.messages, userMsg);
+              let latestAssistant = assistantAfterUser
+                || [...this.messages].reverse().find(message => message.role === 'assistant');
+              if (!assistantAfterUser && sendError) {
+                this.messages.push({
+                  role: 'system',
+                  content: `Send failed: ${this.formatChatSendError(sendError)}`,
+                  created_at: new Date().toISOString(),
+                });
+              }
               let voiceOutput = response?.voice_output || latestAssistant?.meta?.voice_output || null;
               if (!voiceOutput && this.voiceAutoSpeak) {
                 voiceOutput = await this.waitForAssistantVoiceOutput(latestAssistant);
@@ -4241,14 +4532,14 @@
               if (latestAssistant && voiceOutput) {
                 latestAssistant = this.mergeVoiceOutputIntoLatestAssistant(voiceOutput) || latestAssistant;
               }
-              if (voiceOutput && this.voiceAutoSpeak) {
+              if (voiceOutput && this.voiceAutoSpeak && !sendError) {
                 this.voiceSynthesizing = true;
                 await this.playVoiceAttachment(voiceOutput);
               }
             } catch (e) {
               console.error(e);
               this.voiceError = 'Voice-enabled send failed.';
-              this.messages.push({ role: 'system', content: 'Error sending message.', created_at: new Date().toISOString() });
+              this.messages.push({ role: 'system', content: `Send failed: ${this.formatChatSendError(e)}`, created_at: new Date().toISOString() });
             }
             this.voiceThinking = false;
             this.sending = false;
@@ -4391,7 +4682,7 @@
           voiceStatusText() {
             if (this.voiceListening) return 'Listening for your voice…';
             if (this.voiceTranscribing) return 'Transcribing audio…';
-            if (this.voiceThinking) return 'Bulma is thinking…';
+            if (this.voiceThinking) return 'Agent is thinking…';
             if (this.voiceSynthesizing) return 'Rendering speech…';
             if (this.voicePlaying) return 'Playing speech…';
             if (this.voiceError) return this.voiceError;
@@ -4656,7 +4947,7 @@
           summary: null,
           reflections: [],
           conflicts: [],
-          promotions: { work_items: [], keeper_memories: [] },
+          promotions: { work_items: [], keeper_memories: [], context_proposals: [] },
           loadingSummary: false,
           loadingReflections: false,
           loadingConflicts: false,
@@ -4723,7 +5014,7 @@
               this.promotions = await http.fetchJson('/api/daydream/promotions?limit=24');
             } catch (e) {
               console.error(e);
-              this.promotions = { work_items: [], keeper_memories: [] };
+              this.promotions = { work_items: [], keeper_memories: [], context_proposals: [] };
             }
             this.loadingPromotions = false;
           },
@@ -4742,11 +5033,12 @@
               <div class="card"><div class="card-title">Keepers</div><div class="card-body"><div class="stat-value">${summary.total_keepers ?? 0}</div><div class="stat-label">${summary.window_keepers ?? 0} recent • ${summary.keeper_memory_count ?? 0} keeper memories</div></div></div>
               <div class="card"><div class="card-title">Conflicts</div><div class="card-body"><div class="stat-value">${summary.active_conflicts ?? 0}</div><div class="stat-label">active • ${summary.resolved_conflicts ?? 0} resolved</div></div></div>
               <div class="card"><div class="card-title">Promotion Flow</div><div class="card-body"><div class="stat-value">${summary.promoted_work_count ?? 0}</div><div class="stat-label">${escapeHtml(stageText)}</div></div></div>
+              <div class="card"><div class="card-title">Proposal Recall</div><div class="card-body"><div class="stat-value">${summary.context_proposal_count ?? 0}</div><div class="stat-label">${escapeHtml(Object.entries(summary.context_proposal_status_counts || {}).map(([status, count]) => `${status} ${count}`).join(' • ') || 'none')}</div></div></div>
             </div>
             <div class="panel mt-4">
               <div class="card-title">Latest Active Run</div>
               ${latestRun ? `<p>${escapeHtml(formatDateTime(latestRun.timestamp))}</p>
-                <p class="muted">reflections ${latestRun.reflections} • keepers ${latestRun.keepers} • promoted work ${latestRun.promoted_work_count} • memories ${latestRun.memories_created}</p>` : '<p class="muted">No content-bearing daydream run is visible in the current telemetry window.</p>'}
+                <p class="muted">reflections ${latestRun.reflections} • keepers ${latestRun.keepers} • promoted work ${latestRun.promoted_work_count} • memories ${latestRun.memories_created} • proposals ${latestRun.context_proposals_created || 0}</p>` : '<p class="muted">No content-bearing daydream run is visible in the current telemetry window.</p>'}
               <p class="muted">Latest reflection: ${escapeHtml(summary.latest_reflection_at ? formatDateTime(summary.latest_reflection_at) : 'none')}</p>
             </div>`;
           },
@@ -4754,7 +5046,7 @@
             if (this.loadingSummary && !this.summary) return '<p class="muted">Loading run timeline…</p>';
             const runs = this.summary?.recent_runs || [];
             if (!runs.length) return '<p class="muted">No daydream scheduler runs surfaced yet.</p>';
-            let html = '<table class="data-table"><thead><tr><th>When</th><th>Reflections</th><th>Keepers</th><th>Promotions</th><th>Memories</th></tr></thead><tbody>';
+            let html = '<table class="data-table"><thead><tr><th>When</th><th>Reflections</th><th>Keepers</th><th>Promotions</th><th>Memories</th><th>Proposals</th></tr></thead><tbody>';
             runs.slice().reverse().forEach(run => {
               html += `<tr>
                 <td>${escapeHtml(formatDateTime(run.timestamp))}</td>
@@ -4762,6 +5054,7 @@
                 <td>${run.keepers}</td>
                 <td>${run.promoted_work_count}</td>
                 <td>${run.memories_created}</td>
+                <td>${run.context_proposals_created || 0}</td>
               </tr>`;
             });
             html += '</tbody></table>';
@@ -4842,6 +5135,26 @@
                 <td>${Number(item.salience || 0).toFixed(2)}</td>
                 <td>${item.access_count || 0}</td>
                 <td>${escapeHtml((item.source_episode_ids || []).join(' • ') || '-')}</td>
+              </tr>`;
+            });
+            html += '</tbody></table>';
+            return html;
+          },
+          proposalMarkup() {
+            if (this.loadingPromotions && !(this.promotions?.context_proposals || []).length) return '<p class="muted">Loading reflective proposals…</p>';
+            const items = this.promotions?.context_proposals || [];
+            if (!items.length) return '<p class="muted">No reflective context proposals have been recorded yet.</p>';
+            let html = '<table class="data-table"><thead><tr><th>Proposal</th><th>Status</th><th>Authority</th><th>Refs</th></tr></thead><tbody>';
+            items.forEach(item => {
+              const refs = [
+                item.source_snapshot_id ? `truth ${item.source_snapshot_id}` : null,
+                ...(item.evidence_refs || []),
+              ].filter(Boolean).join(' • ');
+              html += `<tr>
+                <td><strong>${escapeHtml(item.proposal_kind || '-')}</strong><div class="muted">${escapeHtml(item.content_preview || '')}</div></td>
+                <td><span class="badge">${escapeHtml(item.status || '-')}</span></td>
+                <td>${escapeHtml(item.authority || '-')}</td>
+                <td>${escapeHtml(refs || '-')}</td>
               </tr>`;
             });
             html += '</tbody></table>';
@@ -5816,7 +6129,7 @@
             <form class="telegram-config-form" onsubmit="savePhoneSessionProfiles(event)">
               <div class="control-grid">
                 <label class="field-label">Owner entry prompt
-                  <input id="phone-session-owner-entry-prompt" class="input" value="${escapeHtml(ownerSession.prompt || '')}" placeholder="Hi, this is Bulma. Press 1..." />
+                  <input id="phone-session-owner-entry-prompt" class="input" value="${escapeHtml(ownerSession.prompt || '')}" placeholder="Hi, this is the OpenCAS agent. Press 1..." />
                 </label>
                 <label class="field-label">Owner entry reprompt
                   <input id="phone-session-owner-entry-reprompt" class="input" value="${escapeHtml(ownerSession.reprompt || '')}" placeholder="Press 1 to continue..." />
@@ -6019,7 +6332,7 @@
               </div>
               <div class="control-grid mt-3">
                 <label class="field-label">Test call message
-                  <input id="phone-call-message" class="input" value="${escapeHtml(defaultCallMessage)}" placeholder="What Bulma should say when the call starts" />
+                  <input id="phone-call-message" class="input" value="${escapeHtml(defaultCallMessage)}" placeholder="What the agent should say when the call starts" />
                 </label>
                 <label class="field-label">Call reason
                   <input id="phone-call-reason" class="input" value="" placeholder="Optional trace note" />
@@ -6060,7 +6373,7 @@
         const configuredChatModel = current.configured_default_llm_model || '';
         const configuredEmbeddingModel = current.configured_embedding_model_id || '';
         const chatOptions = availableModels.length ? availableModels : (effectiveChatModel ? [effectiveChatModel] : ['']);
-        const embeddingOptions = embeddingModels.length ? embeddingModels : (effectiveEmbeddingModel ? [effectiveEmbeddingModel] : ['local-fallback']);
+        const embeddingOptions = embeddingModels.length ? embeddingModels : (effectiveEmbeddingModel ? [effectiveEmbeddingModel] : ['']);
         const configModeClass = overview.config_mode === 'copied-local' ? 'ok' : overview.config_mode === 'custom-linked' ? 'warn' : '';
         const providerMap = Object.fromEntries(providers.map(provider => [provider.provider_id, provider]));
         const uiMessage = window.__configUiMessage || null;
@@ -7031,7 +7344,7 @@
       function renderUserModel(d) {
         let html = '<h4>User Model</h4>';
         html += '<p class="muted">Trust Level: <strong>' + (d.trust_level ?? '-') + '</strong></p>';
-        html += renderTagList('Inferred Goals', d.inferred_goals || []);
+        html += renderTagList('Inferred Goals', (d.inferred_goals || []).map(g => (typeof g === 'object' ? g.text : g)));
         html += renderTagList('Known Boundaries', d.known_boundaries || []);
         html += renderTagList('Uncertainty Areas', d.uncertainty_areas || []);
         html += '<h5 class="mt-4">Explicit Preferences</h5><pre class="json">' + escapeHtml(JSON.stringify(d.explicit_preferences || {}, null, 2)) + '</pre>';
@@ -7650,6 +7963,11 @@
           if (tokens) parts.push(`tok ${tokens}`);
           if (rateLimits.retry_after) parts.push(`retry ${rateLimits.retry_after}s`);
           return parts.join(' • ');
+        },
+        formatRatioPercent(value) {
+          const numeric = Number(value || 0);
+          if (!Number.isFinite(numeric)) return '0%';
+          return `${Math.round(numeric * 1000) / 10}%`;
         },
         formatRecentTime(value) {
           if (!value) return 'unknown';

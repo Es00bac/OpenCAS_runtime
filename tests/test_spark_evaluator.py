@@ -3,15 +3,14 @@
 import pytest
 import pytest_asyncio
 
-import numpy as np
 from unittest.mock import AsyncMock, MagicMock
 
 from opencas.autonomy.executive import ExecutiveState
-from opencas.autonomy.models import WorkObject, WorkStage
+from opencas.autonomy.models import WorkObject
 from opencas.autonomy.work_store import WorkStore
 from opencas.daydream import SparkEvaluator
 from opencas.embeddings import EmbeddingCache, EmbeddingService
-from opencas.somatic import SomaticManager, SomaticState
+from opencas.somatic import SomaticManager
 
 
 @pytest_asyncio.fixture

@@ -47,16 +47,24 @@ class DesktopContextToolAdapter:
         enabled = self._enabled_label(config.get("enabled"))
         media = "on" if config.get("media_commentary_mode_enabled") else "off"
         live = "on" if config.get("live_transcription_enabled") else "off"
+        pause = "on" if config.get("pause_media_while_speaking", True) else "off"
         task = self._task_label(config.get("declared_task"))
-        return f"Body Double is {enabled}. Media commentary is {media}. Live transcription is {live}. Task: {task}."
+        return (
+            f"Body Double is {enabled}. Media commentary is {media}. Live transcription is {live}. "
+            f"Pause media while speaking is {pause}. Task: {task}."
+        )
 
     def _configure_output(self, result: Dict[str, Any]) -> str:
         config = self._config_from_result(result)
         enabled = self._enabled_label(config.get("enabled"))
         media = "on" if config.get("media_commentary_mode_enabled") else "off"
         live = "on" if config.get("live_transcription_enabled") else "off"
+        pause = "on" if config.get("pause_media_while_speaking", True) else "off"
         task = self._task_label(config.get("declared_task"))
-        return f"Body Double is now {enabled}. Media commentary is {media}. Live transcription is {live}. Task: {task}."
+        return (
+            f"Body Double is now {enabled}. Media commentary is {media}. Live transcription is {live}. "
+            f"Pause media while speaking is {pause}. Task: {task}."
+        )
 
     def _task_output(self, result: Dict[str, Any]) -> str:
         config = self._config_from_result(result)

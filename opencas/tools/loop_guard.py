@@ -19,7 +19,9 @@ class ToolLoopGuard:
     FOCUS_MODE_DEPTH: int = 8
 
     def __init__(self, *, max_rounds: Optional[int] = None) -> None:
-        self.max_rounds = max(1, int(max_rounds or self.MAX_ROUNDS))
+        if max_rounds is not None and max_rounds < 1:
+            raise ValueError(f"max_rounds must be >= 1, got {max_rounds}")
+        self.max_rounds = max(1, int(max_rounds if max_rounds is not None else self.MAX_ROUNDS))
         self._sessions: Dict[str, Dict[str, Any]] = {}
 
     def record_call(

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from opencas.runtime.telegram_runtime import (
+from opencas.platform.telegram_runtime import (
     approve_runtime_telegram_pairing,
     build_runtime_telegram_service,
     configure_runtime_telegram,
@@ -64,8 +64,8 @@ def test_initialize_runtime_telegram_loads_and_builds(monkeypatch: pytest.Monkey
     runtime = _Runtime()
     loaded = TelegramRuntimeConfig(enabled=True, bot_token="abc123", allow_from=["42"])
 
-    monkeypatch.setattr("opencas.runtime.telegram_runtime.load_telegram_runtime_config", lambda _state_dir: loaded)
-    monkeypatch.setattr("opencas.runtime.telegram_runtime.TelegramBotService", _FakeTelegramService)
+    monkeypatch.setattr("opencas.platform.telegram_runtime.load_telegram_runtime_config", lambda _state_dir: loaded)
+    monkeypatch.setattr("opencas.platform.telegram_runtime.TelegramBotService", _FakeTelegramService)
 
     initialize_runtime_telegram(runtime, runtime.ctx.config.state_dir)
 
@@ -97,8 +97,8 @@ async def test_configure_runtime_telegram_rebuilds_and_restarts(monkeypatch: pyt
         saved["state_dir"] = state_dir
         saved["config"] = config
 
-    monkeypatch.setattr("opencas.runtime.telegram_runtime.save_telegram_runtime_config", _fake_save)
-    monkeypatch.setattr("opencas.runtime.telegram_runtime.TelegramBotService", _FakeTelegramService)
+    monkeypatch.setattr("opencas.platform.telegram_runtime.save_telegram_runtime_config", _fake_save)
+    monkeypatch.setattr("opencas.platform.telegram_runtime.TelegramBotService", _FakeTelegramService)
 
     status = await configure_runtime_telegram(
         runtime,
@@ -140,6 +140,6 @@ async def test_approve_runtime_telegram_pairing_returns_bool() -> None:
 
 def test_build_runtime_telegram_service_returns_none_when_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     runtime = _Runtime()
-    monkeypatch.setattr("opencas.runtime.telegram_runtime.TelegramBotService", _FakeTelegramService)
+    monkeypatch.setattr("opencas.platform.telegram_runtime.TelegramBotService", _FakeTelegramService)
 
     assert build_runtime_telegram_service(runtime) is None

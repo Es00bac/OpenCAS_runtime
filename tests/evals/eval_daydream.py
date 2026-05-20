@@ -14,14 +14,12 @@ from __future__ import annotations
 
 import asyncio
 import json
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List
 from unittest.mock import AsyncMock, MagicMock
 
 from opencas.autonomy.models import WorkStage
-from opencas.embeddings.service import EmbeddingCache, EmbeddingService
 from opencas.memory import Episode, EpisodeKind, MemoryStore
 from opencas.runtime.daydream import DaydreamGenerator
 
@@ -175,7 +173,7 @@ async def eval_llm_failure_graceful(tmp: Path) -> EvalResult:
     try:
         work_objects, reflections = await gen.generate(tension=0.0)
         crashed = False
-    except Exception as exc:
+    except Exception:
         work_objects = []
         reflections = []
         crashed = True

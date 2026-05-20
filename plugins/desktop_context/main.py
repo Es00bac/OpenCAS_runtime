@@ -44,6 +44,10 @@ def register_skills(skill_registry, tools) -> None:
                 "min_speech_interval_seconds": {"type": "integer"},
                 "tts_enabled": {"type": "boolean"},
                 "play_audio": {"type": "boolean"},
+                "pause_media_while_speaking": {
+                    "type": "boolean",
+                    "description": "When local voice output plays, pause/resume currently playing MPRIS media around the spoken comment.",
+                },
                 "vision_enabled": {"type": "boolean"},
                 "ocr_enabled": {"type": "boolean"},
                 "capture_backend": {"type": "string"},

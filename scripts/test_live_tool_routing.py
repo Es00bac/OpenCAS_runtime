@@ -13,7 +13,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
 from opencas.runtime import AgentRuntime
 from opencas.tools.context import ToolUseContext
-from opencas.tools.loop import ToolUseLoop
 
 
 passed = 0

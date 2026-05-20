@@ -28,6 +28,37 @@ def register_foundation_fs_tools(runtime: Any, *, roots: Sequence[str]) -> None:
                         "file_path": {
                             "type": "string",
                             "description": "Absolute path to the file to read.",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "Optional 0-based character offset to start reading.",
+                            "minimum": 0,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": (
+                                "Optional max number of characters to return. "
+                                "If omitted, uses the runtime read limit."
+                            ),
+                            "minimum": 1,
+                        },
+                        "read_session_id": {
+                            "type": "string",
+                            "description": (
+                                "Optional identifier for a continuous read session, so chunk "
+                                "episodes can be linked across multiple reads."
+                            ),
+                        },
+                        "concept_scope": {
+                            "type": "string",
+                            "description": (
+                                "Optional concept bucket for this chunk (e.g., character, "
+                                "location, or event)."
+                            ),
+                        },
+                        "concept_label": {
+                            "type": "string",
+                            "description": "Optional concept label for a chunk-level artifact.",
                         }
                     },
                     "required": ["file_path"],
@@ -35,7 +66,12 @@ def register_foundation_fs_tools(runtime: Any, *, roots: Sequence[str]) -> None:
             ),
             ToolRegistrationSpec(
                 name="fs_list_dir",
-                description="List the contents of a directory",
+                description=(
+                    "List the contents of a directory. Returns total_count, "
+                    "returned_count, truncated, and next_offset so absence is "
+                    "never confused with truncation; paginate with offset/limit "
+                    "before concluding a file does not exist."
+                ),
                 risk_tier=ActionRiskTier.READONLY,
                 schema={
                     "type": "object",
@@ -43,7 +79,17 @@ def register_foundation_fs_tools(runtime: Any, *, roots: Sequence[str]) -> None:
                         "dir_path": {
                             "type": "string",
                             "description": "Absolute path to the directory to list.",
-                        }
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "0-based offset into the sorted listing.",
+                            "minimum": 0,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max entries to return for this page.",
+                            "minimum": 1,
+                        },
                     },
                     "required": ["dir_path"],
                 },
@@ -103,7 +149,12 @@ def register_foundation_fs_tools(runtime: Any, *, roots: Sequence[str]) -> None:
         [
             ToolRegistrationSpec(
                 name="grep_search",
-                description="Search files for a regex pattern with optional glob filter and per-file match cap.",
+                description=(
+                    "Search files for a regex pattern with optional glob filter "
+                    "and per-file match cap. Reports total_count, returned_count, "
+                    "truncated, and next_offset; treat the first page as a sample "
+                    "and paginate with offset/limit before drawing conclusions."
+                ),
                 risk_tier=ActionRiskTier.READONLY,
                 schema={
                     "type": "object",
@@ -124,7 +175,17 @@ def register_foundation_fs_tools(runtime: Any, *, roots: Sequence[str]) -> None:
                         },
                         "max_count": {
                             "type": "integer",
-                            "description": "Max matches per file (ripgrep --max-count).",
+                            "description": "Max matches per file (ripgrep --max-count). This is per-file, not pagination.",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "0-based offset into the sorted result set for pagination.",
+                            "minimum": 0,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max items to return for this page.",
+                            "minimum": 1,
                         },
                     },
                     "required": ["pattern"],
@@ -132,7 +193,11 @@ def register_foundation_fs_tools(runtime: Any, *, roots: Sequence[str]) -> None:
             ),
             ToolRegistrationSpec(
                 name="glob_search",
-                description="Find files matching a glob pattern.",
+                description=(
+                    "Find files matching a glob pattern. Reports total_count, "
+                    "returned_count, truncated, and next_offset; paginate with "
+                    "offset/limit before concluding files are missing."
+                ),
                 risk_tier=ActionRiskTier.READONLY,
                 schema={
                     "type": "object",
@@ -144,6 +209,16 @@ def register_foundation_fs_tools(runtime: Any, *, roots: Sequence[str]) -> None:
                         "path": {
                             "type": "string",
                             "description": "Directory to search (default: workspace root).",
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "description": "0-based offset into the sorted result set for pagination.",
+                            "minimum": 0,
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "description": "Max files to return for this page.",
+                            "minimum": 1,
                         },
                     },
                     "required": ["pattern"],

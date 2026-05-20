@@ -88,7 +88,22 @@ def _item_to_dict(item: ScheduleItem) -> Dict[str, Any]:
     }
 
 
-def _run_to_dict(run: ScheduleRun) -> Dict[str, Any]:
+async def _run_to_dict(run: ScheduleRun, service: Any = None) -> Dict[str, Any]:
+    receipts: List[Dict[str, Any]] = []
+    receipt_loader = getattr(service, "_receipt_refs_for_run", None)
+    compact_payload = getattr(service, "_compact_payload", None)
+    truncate_text = getattr(service, "_truncate_text", None)
+    if callable(receipt_loader):
+        try:
+            receipts = await receipt_loader(run)
+        except Exception:
+            receipts = []
+    meta = run.meta
+    if callable(compact_payload):
+        meta = compact_payload(meta)
+    error = run.error
+    if callable(truncate_text) and error:
+        error = truncate_text(error, 1000)
     return {
         "run_id": str(run.run_id),
         "schedule_id": str(run.schedule_id),
@@ -97,8 +112,10 @@ def _run_to_dict(run: ScheduleRun) -> Dict[str, Any]:
         "finished_at": run.finished_at.isoformat() if run.finished_at else None,
         "status": run.status.value,
         "task_id": run.task_id,
-        "error": run.error,
-        "meta": run.meta,
+        "error": error,
+        "meta": meta,
+        "receipt_count": len(receipts),
+        "receipts": receipts,
     }
 
 
@@ -109,6 +126,39 @@ def _parse_dt(value: Optional[str], default: datetime) -> datetime:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def _schedule_processing_payload(runtime: Any, agenda: Dict[str, Any]) -> Dict[str, Any]:
+    counts = agenda.get("counts") if isinstance(agenda, dict) else {}
+    due_now = int((counts or {}).get("due_now") or 0) if isinstance(counts, dict) else 0
+    scheduler = getattr(runtime, "scheduler", None)
+    status = getattr(scheduler, "schedule_processing_status", None)
+    if callable(status):
+        try:
+            payload = status(due_now=due_now)
+            if isinstance(payload, dict):
+                return payload
+        except Exception as exc:
+            return {
+                "scheduler_running": False,
+                "can_process": False,
+                "blocked_reason": "scheduler_status_error",
+                "error": str(exc),
+                "due_now": due_now,
+                "will_process_due_now": False,
+            }
+
+    readiness = getattr(runtime, "readiness", None) or getattr(getattr(runtime, "ctx", None), "readiness", None)
+    readiness_payload = readiness.snapshot() if hasattr(readiness, "snapshot") else None
+    return {
+        "scheduler_running": bool(scheduler is not None),
+        "can_process": bool(scheduler is not None),
+        "blocked_reason": None if scheduler is not None else "scheduler_not_available",
+        "focus_mode": bool(getattr(scheduler, "focus_mode", False)) if scheduler is not None else False,
+        "readiness": readiness_payload,
+        "due_now": due_now,
+        "will_process_due_now": bool(scheduler is not None and due_now > 0),
+    }
 
 
 def build_schedule_router(runtime: Any) -> APIRouter:
@@ -156,7 +206,12 @@ def build_schedule_router(runtime: Any) -> APIRouter:
         if item is None:
             return {"found": False}
         runs = await store.list_runs(schedule_id=schedule_id, limit=20)
-        return {"found": True, "item": _item_to_dict(item), "runs": [_run_to_dict(run) for run in runs]}
+        service = _service()
+        return {
+            "found": True,
+            "item": _item_to_dict(item),
+            "runs": [await _run_to_dict(run, service=service) for run in runs],
+        }
 
     @router.patch("/items/{schedule_id}")
     async def update_item(schedule_id: str, payload: ScheduleItemUpdateRequest) -> Dict[str, Any]:
@@ -215,6 +270,7 @@ def build_schedule_router(runtime: Any) -> APIRouter:
             recent_limit=recent_limit,
         )
         payload["available"] = True
+        payload["processing"] = _schedule_processing_payload(runtime, payload)
         return payload
 
     @router.get("/runs")
@@ -223,7 +279,8 @@ def build_schedule_router(runtime: Any) -> APIRouter:
         if store is None:
             return {"count": 0, "items": []}
         runs = await store.list_runs(schedule_id=schedule_id, limit=limit)
-        return {"count": len(runs), "items": [_run_to_dict(run) for run in runs]}
+        service = _service()
+        return {"count": len(runs), "items": [await _run_to_dict(run, service=service) for run in runs]}
 
     @router.post("/items/{schedule_id}/trigger")
     async def trigger(schedule_id: str) -> Dict[str, Any]:
@@ -231,6 +288,6 @@ def build_schedule_router(runtime: Any) -> APIRouter:
         if service is None:
             return {"triggered": False, "error": "Schedule service not available"}
         run = await service.trigger(schedule_id, manual=True)
-        return {"triggered": True, "run": _run_to_dict(run)}
+        return {"triggered": True, "run": await _run_to_dict(run, service=service)}
 
     return router

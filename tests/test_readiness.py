@@ -1,6 +1,5 @@
 """Tests for the AgentReadiness state machine."""
 
-import pytest
 
 from opencas.runtime import AgentReadiness, ReadinessState
 

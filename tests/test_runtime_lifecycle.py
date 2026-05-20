@@ -136,8 +136,19 @@ async def test_run_autonomous_runtime_sequences_start_and_shutdown(monkeypatch: 
         runtime._scheduler_kwargs = kwargs
         return _FakeScheduler(**kwargs)
 
+    diagnostics_events: list[object] = []
+
+    def _fake_start_runtime_diagnostics(fake_runtime: _FakeRuntime) -> str:
+        diagnostics_events.append("start")
+        return "diagnostics-handle"
+
+    async def _fake_stop_runtime_diagnostics(fake_runtime: _FakeRuntime, handle: object) -> None:
+        diagnostics_events.append(("stop", handle))
+
     monkeypatch.setattr("opencas.runtime.lifecycle.AgentScheduler", _fake_scheduler)
     monkeypatch.setattr("opencas.runtime.lifecycle.install_runtime_signal_handlers", lambda runtime, event: None)
+    monkeypatch.setattr("opencas.runtime.lifecycle.start_runtime_diagnostics", _fake_start_runtime_diagnostics)
+    monkeypatch.setattr("opencas.runtime.lifecycle.stop_runtime_diagnostics", _fake_stop_runtime_diagnostics)
     monkeypatch.setattr("opencas.runtime.lifecycle.asyncio.Event", _ImmediateEvent)
     monkeypatch.setattr("opencas.runtime.lifecycle.shutdown_runtime_resources", _fake_shutdown_runtime_resources)
 
@@ -155,6 +166,7 @@ async def test_run_autonomous_runtime_sequences_start_and_shutdown(monkeypatch: 
     assert runtime.scheduler is None
     assert ("ready", "autonomous_mode_active") in runtime.readiness.events
     assert ("shutdown", "signal_received") in runtime.readiness.events
+    assert diagnostics_events == ["start", ("stop", "diagnostics-handle")]
     assert any(event == "autonomous_start" for event, _ in runtime.traces)
     assert any(event == "autonomous_shutdown" for event, _ in runtime.traces)
     assert runtime._scheduler_kwargs == {
@@ -176,11 +188,12 @@ async def test_run_autonomous_with_server_runtime_sequences_server_shutdown(
     created_server: dict[str, object] = {}
 
     class _FakeConfig:
-        def __init__(self, app, host, port, log_level):
+        def __init__(self, app, host, port, log_level, **kwargs):
             self.app = app
             self.host = host
             self.port = port
             self.log_level = log_level
+            self.kwargs = kwargs
 
     class _FakeServer:
         def __init__(self, config):
@@ -199,11 +212,22 @@ async def test_run_autonomous_with_server_runtime_sequences_server_shutdown(
         runtime._scheduler_kwargs = kwargs
         return _FakeScheduler(**kwargs)
 
+    diagnostics_events: list[object] = []
+
+    def _fake_start_runtime_diagnostics(fake_runtime: _FakeRuntime) -> str:
+        diagnostics_events.append("start")
+        return "diagnostics-handle"
+
+    async def _fake_stop_runtime_diagnostics(fake_runtime: _FakeRuntime, handle: object) -> None:
+        diagnostics_events.append(("stop", handle))
+
     monkeypatch.setattr("opencas.runtime.lifecycle.AgentScheduler", _fake_scheduler)
     monkeypatch.setattr("opencas.runtime.lifecycle.create_app", lambda runtime: {"app": "fake"})
     monkeypatch.setattr("opencas.runtime.lifecycle.uvicorn.Config", _FakeConfig)
     monkeypatch.setattr("opencas.runtime.lifecycle.uvicorn.Server", _FakeServer)
     monkeypatch.setattr("opencas.runtime.lifecycle.install_runtime_signal_handlers", lambda runtime, event: None)
+    monkeypatch.setattr("opencas.runtime.lifecycle.start_runtime_diagnostics", _fake_start_runtime_diagnostics)
+    monkeypatch.setattr("opencas.runtime.lifecycle.stop_runtime_diagnostics", _fake_stop_runtime_diagnostics)
     monkeypatch.setattr("opencas.runtime.lifecycle.asyncio.Event", _ImmediateEvent)
     monkeypatch.setattr("opencas.runtime.lifecycle.shutdown_runtime_resources", _fake_shutdown_runtime_resources)
 
@@ -224,10 +248,13 @@ async def test_run_autonomous_with_server_runtime_sequences_server_shutdown(
     assert runtime.scheduler is None
     assert ("ready", "autonomous_mode_with_server") in runtime.readiness.events
     assert ("shutdown", "signal_received") in runtime.readiness.events
+    assert diagnostics_events == ["start", ("stop", "diagnostics-handle")]
     assert any(event == "autonomous_with_server_start" for event, _ in runtime.traces)
     assert any(event == "autonomous_with_server_shutdown" for event, _ in runtime.traces)
     assert getattr(server, "serve_called", False) is True
     assert getattr(server, "should_exit", False) is True
+    assert server.config.kwargs["timeout_graceful_shutdown"] == 2
+    assert runtime.server_base_url == "http://127.0.0.1:20020"
     assert runtime._scheduler_kwargs == {
         "runtime": runtime,
         "cycle_interval": 15,

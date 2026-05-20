@@ -1,5 +1,7 @@
 """Tests for the embeddings module."""
 
+import asyncio
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -192,6 +194,117 @@ async def test_cache_isolation_by_model_and_task_type(embedding_cache: Embedding
 
 
 @pytest.mark.asyncio
+async def test_cache_isolation_by_project_id(embedding_cache: EmbeddingCache) -> None:
+    svc = EmbeddingService(embedding_cache)
+
+    rec_a = await svc.embed(
+        "shared project text",
+        meta={"project_id": "project-a"},
+        task_type="retrieval_document",
+    )
+    rec_b = await svc.embed(
+        "shared project text",
+        meta={"project_id": "project-b"},
+        task_type="retrieval_document",
+    )
+
+    assert rec_a.source_hash != rec_b.source_hash
+    assert rec_a.embedding_id != rec_b.embedding_id
+    assert rec_a.meta["project_id"] == "project-a"
+    assert rec_b.meta["project_id"] == "project-b"
+
+
+@pytest.mark.asyncio
+async def test_search_similar_filters_task_type(
+    embedding_cache: EmbeddingCache,
+) -> None:
+    async def _same_vector(texts: list[str]) -> list[list[float]]:
+        return [[1.0, 0.0] for _text in texts]
+
+    svc = EmbeddingService(
+        embedding_cache,
+        embed_batch_fn=_same_vector,
+        model_id="scope-test-model",
+    )
+
+    doc = await svc.embed(
+        "search scoped document",
+        meta={"project_id": "project-a"},
+        task_type="retrieval_document",
+    )
+    await svc.embed(
+        "search scoped query",
+        meta={"project_id": "project-a"},
+        task_type="retrieval_query",
+    )
+
+    results = await embedding_cache.search_similar(
+        doc.vector,
+        limit=10,
+        model_id="scope-test-model",
+        project_id="project-a",
+        task_type="retrieval_document",
+    )
+
+    assert results
+    assert {record.meta["task_type"] for record, _score in results} == {
+        "retrieval_document"
+    }
+
+
+@pytest.mark.asyncio
+async def test_cache_marks_stale_backend_upserts_and_reindexes(
+    tmp_path: Path,
+) -> None:
+    class FlakyBackend:
+        def __init__(self) -> None:
+            self.fail = True
+            self.upserts: list[str] = []
+
+        async def upsert(self, record) -> bool:
+            if self.fail:
+                raise RuntimeError("backend unavailable")
+            self.upserts.append(record.source_hash)
+            return True
+
+    vector_backend = FlakyBackend()
+    hnsw_backend = FlakyBackend()
+    cache = EmbeddingCache(
+        tmp_path / "embeddings.db",
+        vector_backend=vector_backend,
+        hnsw_backend=hnsw_backend,
+    )
+    await cache.connect()
+    try:
+        svc = EmbeddingService(
+            cache,
+            embed_batch_fn=lambda _texts: _fixed_batch(2),
+            model_id="vector-model",
+        )
+        record = await svc.embed("stale backend record")
+        cached = await cache.get(record.source_hash)
+
+        assert cached is not None
+        assert cached.meta["vector_status"] == "stale"
+        assert cached.meta["hnsw_status"] == "stale"
+
+        vector_backend.fail = False
+        hnsw_backend.fail = False
+        stats = await cache.reindex_stale()
+        refreshed = await cache.get(record.source_hash)
+
+        assert stats["vector_reindexed"] == 1
+        assert stats["hnsw_reindexed"] == 1
+        assert refreshed is not None
+        assert refreshed.meta["vector_status"] == "ok"
+        assert refreshed.meta["hnsw_status"] == "ok"
+        assert vector_backend.upserts == [record.source_hash]
+        assert hnsw_backend.upserts == [record.source_hash]
+    finally:
+        await cache.close()
+
+
+@pytest.mark.asyncio
 async def test_remote_embedding_failure_degrades_to_local_fallback(
     embedding_cache: EmbeddingCache,
 ) -> None:
@@ -317,12 +430,7 @@ async def test_embeddinggemma_stores_768_native_vectors_without_padding(
 @pytest.mark.asyncio
 async def test_embeddinggemma_hash_fallback_uses_768_store_dimension(
     embedding_cache: EmbeddingCache,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def _no_local_gemma(_self):
-        return False
-
-    monkeypatch.setattr(EmbeddingService, "_get_local_gemma", _no_local_gemma)
     svc = EmbeddingService(
         embedding_cache,
         model_id="google/embeddinggemma-300m",
@@ -336,6 +444,31 @@ async def test_embeddinggemma_hash_fallback_uses_768_store_dimension(
     assert record.meta["requested_model_id"] == "google/embeddinggemma-300m"
     assert record.meta["embedding_degraded"] is True
     assert "embedding_dimension_coercion" not in record.meta
+
+
+@pytest.mark.asyncio
+async def test_embeddinggemma_gateway_timeout_degrades_to_hash_fallback(
+    embedding_cache: EmbeddingCache,
+) -> None:
+    async def _gateway_timeout(_texts: list[str]) -> list[list[float]]:
+        await asyncio.sleep(0.05)
+        raise TimeoutError("gateway timeout")
+
+    start = time.perf_counter()
+    svc = EmbeddingService(
+        embedding_cache,
+        embed_batch_fn=_gateway_timeout,
+        model_id="google/embeddinggemma-300m",
+        expected_dimension=768,
+    )
+    record = await svc.embed("slow gateway embedding")
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 2.0
+    assert record.model_id == "local-fallback"
+    assert record.meta["embedding_degraded"] is True
+    reason = record.meta["embedding_degraded_reason"].lower()
+    assert "gateway timeout" in reason
 
 
 @pytest.mark.asyncio

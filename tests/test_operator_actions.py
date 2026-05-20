@@ -1,6 +1,5 @@
 from pathlib import Path
 
-import pytest
 
 from opencas.api import operator_actions as oa
 from opencas.api.operator_action_store import OperatorActionRegistryStore

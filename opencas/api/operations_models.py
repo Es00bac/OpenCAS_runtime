@@ -167,6 +167,7 @@ class CommitmentUpdateRequest(BaseModel):
     content: Optional[str] = None
     priority: Optional[float] = None
     tags: Optional[List[str]] = None
+    completion_evidence: Optional[str] = None
 
 
 class PlanSummary(BaseModel):

@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Iterable, List, Sequence
 from uuid import uuid4
 
+from open_llm_auth.auth.manager import ProviderManager
+
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 RUN_VALIDATION_SCRIPT = REPO_ROOT / "scripts" / "run_live_debug_validation.py"
@@ -44,8 +46,8 @@ def build_validation_command(
     skip_direct_checks: bool,
     prompt_timeout_seconds: float,
     run_timeout_seconds: float,
-    model: str,
-    embedding_model: str,
+    model: str | None,
+    embedding_model: str | None,
     request_id: str | None = None,
     rerun_history_path: Path | None = None,
 ) -> List[str]:
@@ -58,11 +60,11 @@ def build_validation_command(
         str(prompt_timeout_seconds),
         "--run-timeout-seconds",
         str(run_timeout_seconds),
-        "--model",
-        model,
-        "--embedding-model",
-        embedding_model,
     ]
+    if model:
+        command.extend(["--model", model])
+    if embedding_model:
+        command.extend(["--embedding-model", embedding_model])
     if skip_direct_checks:
         command.append("--skip-direct-checks")
     if request_id:
@@ -225,13 +227,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--model",
-        default="kimi-coding/k2p5",
-        help="Conversation model passed through to the live validation harness.",
+        default=None,
+        help="Conversation model passed through to the live validation harness. Defaults to the OpenLLMAuth configured model.",
     )
     parser.add_argument(
         "--embedding-model",
-        default="google/embeddinggemma-300m",
-        help="Embedding model passed through to the live validation harness.",
+        default=ProviderManager.default_embedding_model_ref(),
+        help="Embedding model passed through to the live validation harness. Defaults to the OpenLLMAuth embedding model.",
     )
     parser.add_argument(
         "--include-direct-checks",

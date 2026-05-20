@@ -21,12 +21,121 @@ from opencas.api.chat_service import (
     resolve_uploaded_attachment,
     store_uploaded_file,
 )
+from opencas.identity.agent_name import resolve_agent_name
+from opencas.runtime.system_message_awareness import record_agent_visible_system_message
 from opencas.telegram_commands import BOT_COMMAND_MENU, TelegramCommandRouter
 from opencas.telemetry import EventKind, Tracer
 
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_ATTACHMENT_MAX_BYTES = 20_000_000
 TELEGRAM_VISION_MAX_BYTES = 5_000_000
+TELEGRAM_OUTBOUND_CONTEXT_MAX_AGE_SECONDS = 3 * 60 * 60
+TELEGRAM_OUTBOUND_CONTEXT_MAX_ENTRIES = 80
+
+
+class TelegramOutboundContextStore:
+    """Persist recent bot-originated Telegram messages for reply grounding."""
+
+    def __init__(self, path: Path | str) -> None:
+        self.path = Path(path)
+        self._lock = asyncio.Lock()
+
+    async def record(
+        self,
+        *,
+        chat_id: int | str,
+        message_id: int | str,
+        text: str,
+        full_text: str = "",
+        reason: str = "",
+        urgency: str = "",
+        source: str = "",
+    ) -> None:
+        if not str(chat_id).strip() or not str(message_id).strip() or not str(text).strip():
+            return
+        async with self._lock:
+            state = self._load()
+            entries = list(state.get("entries") or [])
+            entries.append(
+                {
+                    "chat_id": str(chat_id),
+                    "message_id": str(message_id),
+                    "text": str(text),
+                    "full_text": str(full_text or text),
+                    "reason": str(reason or ""),
+                    "urgency": str(urgency or ""),
+                    "source": str(source or ""),
+                    "created_at": time.time(),
+                }
+            )
+            state["entries"] = self._pruned(entries)
+            self._save(state)
+
+    async def lookup(self, *, chat_id: int | str, message_id: int | str) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            state = self._load()
+            entries = self._pruned(list(state.get("entries") or []))
+            state["entries"] = entries
+            self._save(state)
+            chat_key = str(chat_id)
+            message_key = str(message_id)
+            for entry in reversed(entries):
+                if str(entry.get("chat_id")) == chat_key and str(entry.get("message_id")) == message_key:
+                    return dict(entry)
+        return None
+
+    async def latest(
+        self,
+        *,
+        chat_id: int | str,
+        max_age_seconds: int = TELEGRAM_OUTBOUND_CONTEXT_MAX_AGE_SECONDS,
+    ) -> Optional[Dict[str, Any]]:
+        async with self._lock:
+            state = self._load()
+            entries = self._pruned(list(state.get("entries") or []))
+            state["entries"] = entries
+            self._save(state)
+            chat_key = str(chat_id)
+            now = time.time()
+            for entry in reversed(entries):
+                if str(entry.get("chat_id")) != chat_key:
+                    continue
+                try:
+                    age = now - float(entry.get("created_at") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if age <= max_age_seconds:
+                    return dict(entry)
+        return None
+
+    def _load(self) -> Dict[str, Any]:
+        if not self.path.exists():
+            return {"entries": []}
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if isinstance(raw, dict):
+                raw.setdefault("entries", [])
+                return raw
+        except Exception:
+            pass
+        return {"entries": []}
+
+    def _save(self, state: Dict[str, Any]) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.write_text(json.dumps(state, ensure_ascii=True, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _pruned(entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        cutoff = time.time() - TELEGRAM_OUTBOUND_CONTEXT_MAX_AGE_SECONDS
+        kept: List[Dict[str, Any]] = []
+        for entry in entries:
+            try:
+                created_at = float(entry.get("created_at") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if created_at >= cutoff:
+                kept.append(entry)
+        return kept[-TELEGRAM_OUTBOUND_CONTEXT_MAX_ENTRIES:]
 
 
 class TelegramPairingRequest(BaseModel):
@@ -279,6 +388,9 @@ class TelegramBotService:
         self._last_error: Optional[str] = None
         self._bot_info: Optional[Dict[str, Any]] = None
         self._chat_locks: Dict[int, asyncio.Lock] = {}
+        self.outbound_context_store = TelegramOutboundContextStore(
+            telegram_state_dir / "outbound_context.json"
+        )
         self.commands = TelegramCommandRouter(
             runtime,
             state_path=telegram_state_dir / "command_sessions.json",
@@ -377,6 +489,7 @@ class TelegramBotService:
         document_path: Optional[Path] = None,
         document_filename: Optional[str] = None,
         document_caption: Optional[str] = None,
+        record_awareness: bool = True,
     ) -> Dict[str, Any]:
         """Send an owner-directed proactive notification to approved private chats."""
         del document_path, document_filename, document_caption
@@ -390,12 +503,34 @@ class TelegramBotService:
 
         sent: list[str] = []
         failed: list[Dict[str, str]] = []
+        outbound_records: list[Dict[str, str]] = []
         for raw_chat_id in chat_ids:
             try:
                 chat_id = int(raw_chat_id)
                 chunks = _chunk_telegram_text(text)
                 for chunk in chunks:
-                    await self.client.send_message(chat_id, chunk)
+                    sent_message = await self.client.send_message(chat_id, chunk)
+                    message_id = (
+                        str(sent_message.get("message_id"))
+                        if isinstance(sent_message, dict) and sent_message.get("message_id") is not None
+                        else ""
+                    )
+                    if message_id:
+                        await self.outbound_context_store.record(
+                            chat_id=chat_id,
+                            message_id=message_id,
+                            text=chunk,
+                            full_text=text,
+                            reason=reason,
+                            urgency=urgency,
+                            source=source,
+                        )
+                        outbound_records.append(
+                            {
+                                "chat_id": str(raw_chat_id),
+                                "message_id": message_id,
+                            }
+                        )
                 sent.append(str(raw_chat_id))
             except Exception as exc:
                 self._last_error = str(exc)
@@ -411,6 +546,31 @@ class TelegramBotService:
             },
             kind=EventKind.TOOL_CALL if sent else EventKind.ERROR,
         )
+        if record_awareness and (sent or failed):
+            status = "sent" if sent else "failed"
+            await record_agent_visible_system_message(
+                self.runtime,
+                content=_owner_notification_awareness_content(
+                    text=text,
+                    status=status,
+                    channel="telegram",
+                    source=source,
+                    reason=reason,
+                    urgency=urgency,
+                ),
+                event_kind="telegram_owner_notification",
+                status=status,
+                reason=reason,
+                source=source,
+                channel="telegram",
+                urgency=urgency,
+                salience=6.5 if sent else 5.5,
+                payload={
+                    "chat_ids": sent,
+                    "failed": failed,
+                    "outbound_records": outbound_records,
+                },
+            )
         return {"sent": len(sent), "chat_ids": sent, "failed": failed}
 
     async def _owner_chat_ids(self) -> list[str]:
@@ -516,6 +676,17 @@ class TelegramBotService:
 
             session_id = self.commands.session_id_for(chat.get("type", "chat"), chat_id)
             conversation_text = text.strip() or "Please review the attached Telegram media."
+            telegram_context = await self._telegram_context_for_message(
+                message,
+                chat_id=chat_id,
+                text=conversation_text,
+            )
+            user_meta: Dict[str, Any] = {}
+            if attachments:
+                user_meta["attachments"] = attachments
+            if telegram_context:
+                user_meta["telegram_context"] = telegram_context
+            user_meta_payload = user_meta or None
             stop_typing = asyncio.Event()
             try:
                 await self.client.send_chat_action(chat_id, "typing")
@@ -538,13 +709,14 @@ class TelegramBotService:
                         "user_id": user_id,
                         "session_id": session_id,
                         "attachment_count": len(attachments),
+                        "telegram_context": bool(telegram_context),
                     },
                 )
-                if attachments:
+                if user_meta_payload is not None:
                     response = await self.runtime.converse(
                         conversation_text,
                         session_id=session_id,
-                        user_meta={"attachments": attachments},
+                        user_meta=user_meta_payload,
                     )
                 else:
                     response = await self.runtime.converse(
@@ -582,6 +754,49 @@ class TelegramBotService:
                 reply_to_message_id=reply_to_message_id,
                 placeholder_message_id=placeholder_message_id,
             )
+
+    async def _telegram_context_for_message(
+        self,
+        message: Dict[str, Any],
+        *,
+        chat_id: int,
+        text: str,
+    ) -> Optional[Dict[str, Any]]:
+        reply_to = message.get("reply_to_message")
+        if isinstance(reply_to, dict):
+            reply_message_id = reply_to.get("message_id")
+            if reply_message_id is not None:
+                stored = await self.outbound_context_store.lookup(
+                    chat_id=chat_id,
+                    message_id=reply_message_id,
+                )
+                if stored:
+                    return _telegram_context_payload(
+                        stored,
+                        relation="reply_to_outbound",
+                        confidence="exact",
+                    )
+            reply_text = reply_to.get("text") or reply_to.get("caption") or ""
+            if isinstance(reply_text, str) and reply_text.strip():
+                sender = reply_to.get("from") if isinstance(reply_to.get("from"), dict) else {}
+                return {
+                    "source": "telegram_reply_to_message",
+                    "relation": "reply_to_message",
+                    "confidence": "exact",
+                    "message_id": str(reply_message_id or ""),
+                    "text": reply_text.strip(),
+                    "from_bot": bool(sender.get("is_bot")) if isinstance(sender, dict) else False,
+                }
+
+        if _looks_like_context_dependent_reply(text):
+            latest = await self.outbound_context_store.latest(chat_id=chat_id)
+            if latest:
+                return _telegram_context_payload(
+                    latest,
+                    relation="recent_outbound_candidate",
+                    confidence="candidate",
+                )
+        return None
 
     async def _materialize_telegram_attachments(self, message: Dict[str, Any]) -> List[Dict[str, Any]]:
         specs = self._telegram_attachment_specs(message)
@@ -662,8 +877,9 @@ class TelegramBotService:
             media_type=media_type,
             payload=base64.b64encode(image_bytes).decode("ascii"),
         )
+        agent_name = resolve_agent_name(runtime=self.runtime)
         prompt = (
-            "Describe this Telegram image attachment for Bulma's chat context. "
+            f"Describe this Telegram image attachment for {agent_name}'s chat context. "
             "Be factual and concise. If it is a screenshot or document-like image, "
             "summarize visible text and layout without inventing missing details."
         )
@@ -912,6 +1128,65 @@ def _chunk_telegram_text(text: str, limit: int = TELEGRAM_TEXT_LIMIT) -> List[st
             chunks.append(chunk)
         remaining = remaining[split_at:].lstrip()
     return chunks
+
+
+def _owner_notification_awareness_content(
+    *,
+    text: str,
+    status: str,
+    channel: str,
+    source: str,
+    reason: str,
+    urgency: str,
+) -> str:
+    lines = [
+        "Automated owner notification recorded.",
+        f"Status: {status or 'unknown'}",
+        f"Channel: {channel or 'telegram'}",
+        f"Source: {source or 'runtime'}",
+        f"Reason: {reason or 'owner_contact'}",
+        f"Urgency: {urgency or 'normal'}",
+    ]
+    message = str(text or "").strip()
+    if message:
+        lines.extend(["Message:", message])
+    return "\n".join(lines)
+
+
+_CONTEXT_DEPENDENT_REPLY_RE = re.compile(
+    r"\b("
+    r"this|that|it|sounds interesting|interesting|tell me more|what does that mean|"
+    r"what it means|no idea what|support you|go ahead|yes|no|okay|ok"
+    r")\b",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_context_dependent_reply(text: str) -> bool:
+    normalized = str(text or "").strip()
+    if not normalized or len(normalized) > 180:
+        return False
+    return bool(_CONTEXT_DEPENDENT_REPLY_RE.search(normalized))
+
+
+def _telegram_context_payload(
+    stored: Dict[str, Any],
+    *,
+    relation: str,
+    confidence: str,
+) -> Dict[str, Any]:
+    return {
+        "source": "telegram_outbound_context",
+        "relation": relation,
+        "confidence": confidence,
+        "message_id": str(stored.get("message_id") or ""),
+        "text": str(stored.get("full_text") or stored.get("text") or "").strip(),
+        "chunk_text": str(stored.get("text") or "").strip(),
+        "reason": str(stored.get("reason") or ""),
+        "urgency": str(stored.get("urgency") or ""),
+        "notification_source": str(stored.get("source") or ""),
+        "created_at": stored.get("created_at"),
+    }
 
 
 def _safe_telegram_filename(filename: str) -> str:

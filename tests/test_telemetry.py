@@ -1,9 +1,8 @@
 """Tests for the telemetry module."""
 
-from datetime import datetime
-import pytest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from opencas.telemetry import EventKind, TelemetryStore, Tracer
+from opencas.telemetry import EventKind, TelemetryEvent, TelemetryStore, Tracer
 
 
 def test_telemetry_store_append_and_query(tmp_path: Path) -> None:
@@ -71,3 +70,42 @@ def test_telemetry_store_prune_old_files(tmp_path: Path) -> None:
     assert not old_path.exists()
     assert keep_path.exists()
     assert non_date_path.exists()
+
+
+def test_telemetry_query_limit_prefers_newest_events_within_daily_file(tmp_path: Path) -> None:
+    store = TelemetryStore(tmp_path)
+    base = datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc)
+    store.append(TelemetryEvent(timestamp=base, kind=EventKind.MEMORY_ACTIVATED, message="old"))
+    store.append(
+        TelemetryEvent(
+            timestamp=base + timedelta(minutes=1),
+            kind=EventKind.MEMORY_ACTIVATED,
+            message="new",
+        )
+    )
+
+    results = store.query(kinds=[EventKind.MEMORY_ACTIVATED], limit=1)
+
+    assert len(results) == 1
+    assert results[0].message == "new"
+
+
+def test_telemetry_query_ignores_token_event_sidecar_file(tmp_path: Path) -> None:
+    store = TelemetryStore(tmp_path)
+    daily_event = TelemetryEvent(
+        timestamp=datetime(2026, 5, 9, 10, 0, tzinfo=timezone.utc),
+        kind=EventKind.MEMORY_ACTIVATED,
+        message="daily telemetry",
+    )
+    token_sidecar_event = TelemetryEvent(
+        timestamp=datetime(2026, 5, 9, 11, 0, tzinfo=timezone.utc),
+        kind=EventKind.MEMORY_ACTIVATED,
+        message="token sidecar should not be scanned as daily telemetry",
+    )
+
+    store.append(daily_event)
+    (tmp_path / "token-events.jsonl").write_text(token_sidecar_event.to_jsonl(), encoding="utf-8")
+
+    results = store.query(kinds=[EventKind.MEMORY_ACTIVATED], limit=10)
+
+    assert [event.message for event in results] == ["daily telemetry"]

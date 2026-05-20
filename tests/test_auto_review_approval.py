@@ -10,7 +10,9 @@ from opencas.autonomy.models import (
     ActionRiskTier,
     ApprovalDecision,
     ApprovalLevel,
+    ApprovalMode,
 )
+from opencas.autonomy.mode_utils import normalize_approval_mode
 from opencas.bootstrap.config import BootstrapConfig
 from opencas.governance.auto_review import (
     AutoReviewerSubagent,
@@ -273,6 +275,7 @@ async def test_auto_reviewer_subagent_denies_invalid_or_missing_llm() -> None:
 
 def test_auto_review_mode_normalization_and_runtime_policy_wiring() -> None:
     assert normalize_auto_review_mode("auto-review") is AutoReviewMode.AUTO_REVIEW
+    assert normalize_approval_mode("yolo") is ApprovalMode.FULLY_AUTONOMOUS
     config = BootstrapConfig(approval_mode="auto-review")
     assert config.approval_mode == "auto_review"
 
@@ -306,3 +309,74 @@ def test_auto_review_mode_marks_tool_requests_as_on_request(tmp_path: Path) -> N
 
     assert payload["approval_mode"] == "auto_review"
     assert payload["approval_channel"] == "on_request"
+
+
+def test_bootstrap_config_accepts_all_approval_modes() -> None:
+    assert BootstrapConfig().approval_mode == "auto_review"
+    assert BootstrapConfig(approval_mode="default").approval_mode == "default"
+    assert BootstrapConfig(approval_mode="trust-based").approval_mode == "trust_based"
+    assert BootstrapConfig(approval_mode="fully-autonomous").approval_mode == "fully_autonomous"
+    assert BootstrapConfig(approval_mode="yolo").approval_mode == "fully_autonomous"
+
+
+def test_tool_request_payload_preserves_non_auto_review_mode(tmp_path: Path) -> None:
+    config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        workspace_root=tmp_path,
+        approval_mode="yolo",
+    ).resolve_paths()
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            config=config,
+            sandbox=SimpleNamespace(allowed_roots=[]),
+        )
+    )
+
+    payload = _build_tool_request_payload(
+        runtime,
+        "fs_write_file",
+        {"path": str(config.agent_workspace_root() / "example.md"), "content": "x"},
+    )
+
+    assert payload["approval_mode"] == "fully_autonomous"
+    assert payload["approval_channel"] == "on_request"
+
+
+def test_tool_request_payload_marks_research_and_project_verification_ordinary(
+    tmp_path: Path,
+) -> None:
+    config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        workspace_root=tmp_path,
+        approval_mode="auto_review",
+    ).resolve_paths()
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            config=config,
+            sandbox=SimpleNamespace(allowed_roots=[]),
+        )
+    )
+
+    research = _build_tool_request_payload(
+        runtime,
+        "web_search",
+        {"query": "grounded autonomous agent research"},
+    )
+    browser_research = _build_tool_request_payload(
+        runtime,
+        "browser_navigate",
+        {"url": "https://example.com/research"},
+    )
+    verification = _build_tool_request_payload(
+        runtime,
+        "bash_run_command",
+        {"command": f"cd {tmp_path} && pytest -q tests/test_self_approval.py"},
+    )
+
+    assert research["ordinary_action"] is True
+    assert research["ordinary_action_reason"] == "network_read:web_search"
+    assert browser_research["ordinary_action"] is True
+    assert browser_research["ordinary_action_reason"] == "network_read:browser_navigate"
+    assert verification["command_scope"] == "project_workspace"
+    assert verification["ordinary_action"] is True
+    assert verification["ordinary_action_reason"] == "safe_project_workspace_command"

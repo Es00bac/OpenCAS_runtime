@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.memory import Episode, EpisodeKind
-from opencas.memory.fabric.indexer import Candidate, MemoryIndexer
+from opencas.memory.fabric.indexer import MemoryIndexer
 
 
 @pytest_asyncio.fixture

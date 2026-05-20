@@ -35,6 +35,7 @@ _BASE_SIGNALS = (
 def build_candidate_map(
     semantic_results: List[RetrievalResult],
     keyword_results: List[RetrievalResult],
+    exact_handle_results: Optional[List[RetrievalResult]] = None,
     *,
     now: datetime,
     query_affect: Any,
@@ -50,6 +51,7 @@ def build_candidate_map(
                     "result": result,
                     "semantic_score": 0.0,
                     "keyword_score": 0.0,
+                    "exact_handle_score": 0.0,
                     "recency_score": 0.0,
                     "salience_score": 0.0,
                     "graph_score": 0.0,
@@ -60,8 +62,18 @@ def build_candidate_map(
                     "affective_pressure_score": 0.0,
                     "affective_pressure_reason": "",
                     "affective_action_pressure": "",
+                    "cognitive_focus_score": 0.0,
+                    "cognitive_focus_reason": "",
+                    "cognitive_working_memory_score": 0.0,
+                    "cognitive_working_memory_reason": "",
+                    "cognitive_prospective_score": 0.0,
+                    "cognitive_prospective_reason": "",
+                    "cognitive_event_score": 0.0,
+                    "cognitive_event_reason": "",
                 }
             candidate_map[key][score_key] = result.score
+            if score_key == "exact_handle_score":
+                candidate_map[key]["result"] = result
 
             episode = getattr(result, "episode", None)
             memory = getattr(result, "memory", None)
@@ -94,6 +106,7 @@ def build_candidate_map(
 
     add_results(semantic_results, "semantic_score")
     add_results(keyword_results, "keyword_score")
+    add_results(exact_handle_results or [], "exact_handle_score")
     return candidate_map
 
 
@@ -226,6 +239,7 @@ def fuse_candidates(
                 "embedding_dimension": embedding_dimension,
                 "semantic_score": round(float(candidate["semantic_score"]), 6),
                 "keyword_score": round(float(candidate["keyword_score"]), 6),
+                "exact_handle_score": round(float(candidate.get("exact_handle_score", 0.0)), 6),
                 "recency_score": round(float(candidate["recency_score"]), 6),
                 "salience_score": round(float(candidate["salience_score"]), 6),
                 "graph_score": round(float(candidate["graph_score"]), 6),
@@ -236,6 +250,14 @@ def fuse_candidates(
                 "affective_pressure_score": round(float(candidate.get("affective_pressure_score", 0.0)), 6),
                 "affective_action_pressure": candidate.get("affective_action_pressure", ""),
                 "affective_pressure_reason": candidate.get("affective_pressure_reason", ""),
+                "cognitive_focus_score": round(float(candidate.get("cognitive_focus_score", 0.0)), 6),
+                "cognitive_focus_reason": candidate.get("cognitive_focus_reason", ""),
+                "cognitive_working_memory_score": round(float(candidate.get("cognitive_working_memory_score", 0.0)), 6),
+                "cognitive_working_memory_reason": candidate.get("cognitive_working_memory_reason", ""),
+                "cognitive_prospective_score": round(float(candidate.get("cognitive_prospective_score", 0.0)), 6),
+                "cognitive_prospective_reason": candidate.get("cognitive_prospective_reason", ""),
+                "cognitive_event_score": round(float(candidate.get("cognitive_event_score", 0.0)), 6),
+                "cognitive_event_reason": candidate.get("cognitive_event_reason", ""),
                 "base_score": round(float(base_score), 6),
                 "somatic_bonus": round(float(somatic_bonus), 6),
                 "reliability_multiplier": round(float(reliability_multiplier), 6),

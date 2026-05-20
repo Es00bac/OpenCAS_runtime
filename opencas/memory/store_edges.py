@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List, Optional, Sequence
 
 from .models import EdgeKind, EpisodeEdge
 from .store_serialization import edge_db_params, row_to_edge as deserialize_edge
@@ -169,6 +169,41 @@ async def decay_all_edges(store: "MemoryStore", decay: float = 0.95) -> int:
     )
     await store._db.commit()
     return cursor.rowcount
+
+
+async def decay_edges_for(
+    store: "MemoryStore",
+    episode_id: str,
+    decay: float = 0.95,
+    exclude_edge_ids: Optional[Sequence[str]] = None,
+) -> List[str]:
+    """Decay edges connected to one episode and return affected edge IDs."""
+    assert store._db is not None
+    excluded = [str(edge_id) for edge_id in (exclude_edge_ids or ()) if edge_id]
+    params: list[object] = [episode_id, episode_id]
+    exclusion_sql = ""
+    if excluded:
+        placeholders = ",".join("?" for _ in excluded)
+        exclusion_sql = f" AND edge_id NOT IN ({placeholders})"
+        params.extend(excluded)
+    cursor = await store._db.execute(
+        f"""
+        SELECT edge_id FROM episode_edges
+        WHERE (source_id = ? OR target_id = ?){exclusion_sql}
+        """,
+        tuple(params),
+    )
+    rows = await cursor.fetchall()
+    edge_ids = [str(row["edge_id"]) for row in rows]
+    if not edge_ids:
+        return []
+    placeholders = ",".join("?" for _ in edge_ids)
+    await store._db.execute(
+        f"UPDATE episode_edges SET confidence = confidence * ? WHERE edge_id IN ({placeholders})",
+        (decay, *edge_ids),
+    )
+    await store._db.commit()
+    return edge_ids
 
 
 async def prune_weak_edges(store: "MemoryStore", min_confidence: float = 0.05) -> int:

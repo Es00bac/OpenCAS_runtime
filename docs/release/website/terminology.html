@@ -17,7 +17,7 @@
     <div class="site-shell">
       <a class="brand" href="index.html">
         <span class="brand-mark mono">O</span>
-        <span>OpenCAS Documentation</span>
+        <span>OpenCAS Release</span>
       </a>
       <nav class="nav-links">
         <a href="index.html">Home</a>
@@ -43,7 +43,7 @@
         <h2>Core concepts</h2>
         <dl class="term-list">
           <dt>Agent</dt>
-          <dd>The running OpenCAS process. It holds persistent identity, memory, and background activity. Between conversations it can run scheduled work, consolidate memory, and execute queued tasks when configured.</dd>
+          <dd>The running OpenCAS process. It holds a persistent identity, memory, and autonomous background activity. Unlike a stateless chatbot, the agent continues operating between conversations: daydreaming, consolidating memory, and executing queued work.</dd>
           <dt>Bootstrap / BootstrapContext</dt>
           <dd>The startup sequence that initializes every subsystem in order and assembles a <code>BootstrapContext</code> object containing all wired managers. Nothing runs until bootstrap completes. The <code>ready</code> readiness state is emitted at the end of bootstrap.</dd>
           <dt>Operator</dt>
@@ -71,7 +71,7 @@
           <dt>Compaction</dt>
           <dd>Reducing the active context window by summarizing older conversation turns into a synthetic system message. Prevents unbounded context growth while preserving continuity. Managed by <code>ConversationCompactor</code>.</dd>
           <dt>Retrieval fusion</dt>
-          <dd>Combining multiple retrieval signals: semantic vector similarity, keyword match, recency, graph edges, salience, emotional resonance, temporal echo, and reliability. The ranked result list uses Reciprocal Rank Fusion (RRF).</dd>
+          <dd>Combining multiple retrieval signals — semantic vector similarity, keyword match, recency, graph edges, salience, emotional resonance, temporal echo, and reliability — into a single ranked result list using Reciprocal Rank Fusion (RRF). This is how the agent selects relevant memories for each conversation turn.</dd>
           <dt>Embedding</dt>
           <dd>A dense vector representation of a piece of text, used for semantic similarity search. OpenCAS uses <code>google/embeddinggemma-300m</code> as the active default and stores vectors in the canonical 3072-dim space. 768-native Gemma output is zero-padded to 3072 with metadata for traceability; degraded fallback vectors are marked when generated locally.</dd>
           <dt>Embedding backfill</dt>
@@ -97,7 +97,7 @@
         <h2>Somatic state</h2>
         <dl class="term-list">
           <dt>Somatic state</dt>
-          <dd>A set of physiological-analogue dimensions: <code>arousal</code>, <code>fatigue</code>, <code>tension</code>, and <code>valence</code>. These values influence LLM temperature, prompt style, memory salience, and whether the runtime recommends pausing background work.</dd>
+          <dd>A set of physiological-analogue dimensions — <code>arousal</code>, <code>fatigue</code>, <code>tension</code>, <code>valence</code> — that modulate how the agent behaves. These are not cosmetic. They directly influence LLM temperature, prompt style, memory salience, and whether the agent recommends pausing background work.</dd>
           <dt>Somatic modulators</dt>
           <dd>Derived signals from the live somatic state. <code>to_temperature()</code> adjusts LLM sampling heat. <code>to_prompt_style_note()</code> injects a behavioral directive into the system prompt. <code>to_memory_retrieval_boost()</code> emotionally tunes memory ranking toward affectively aligned content.</dd>
         </dl>
@@ -107,7 +107,7 @@
         <h2>Relational state (musubi)</h2>
         <dl class="term-list">
           <dt>Musubi</dt>
-          <dd>The composite relational score derived from four dimensions: <code>trust</code>, <code>resonance</code>, <code>presence</code>, and <code>attunement</code>. A higher musubi score can adjust self-approval thresholds, creative-ladder promotion, and memory salience for relational content.</dd>
+          <dd>The composite relational score derived from four dimensions: <code>trust</code>, <code>resonance</code>, <code>presence</code>, and <code>attunement</code>. Named after the Japanese concept of generative connection. A higher musubi score loosens self-approval thresholds, boosts creative-ladder promotion, and increases memory salience for relational content.</dd>
           <dt>Relational engine</dt>
           <dd>The subsystem (<code>RelationalEngine</code>) that tracks the four musubi dimensions and exposes modifiers for memory retrieval, creative ladder promotion, and self-approval risk. Updated as the agent and operator interact over time.</dd>
         </dl>
@@ -119,7 +119,7 @@
           <dt>Self-approval ladder</dt>
           <dd>A risk-tiered evaluation system that decides whether the agent can proceed with an action without operator intervention. Tiers range from low-risk (auto-approved) to high-risk (escalated or blocked). Every evaluation is recorded to the durable approval ledger.</dd>
           <dt>Creative ladder</dt>
-          <dd>A seven-stage promotion system for internal creative work: <code>spark</code>, <code>note</code>, <code>artifact</code>, <code>micro_task</code>, <code>project_seed</code>, <code>project</code>, and <code>durable_work_stream</code>. Work objects are promoted based on value signals and relational boost. Demotion occurs when value signals are weak.</dd>
+          <dd>A seven-stage promotion system for internal creative work: <code>spark → note → artifact → micro_task → project_seed → project → durable_work_stream</code>. Work objects are promoted based on intrinsic value signals and relational boost. Demotion also occurs when value signals are weak.</dd>
           <dt>Work object</dt>
           <dd>A unit of autonomous work tracked through the creative ladder. Has a stage, content, value signal, and optional plan and commitment links.</dd>
           <dt>Executive state</dt>
@@ -135,7 +135,7 @@
           <dt>BAA (Bounded Assistant Agent)</dt>
           <dd>The background execution engine. Accepts <code>RepairTask</code> objects, queues them, and executes them with concurrency limits and lane routing. Supports retry, recovery, and failure-rate throttling. BAA tasks come from scheduled items, harness objectives, and operator-submitted work.</dd>
           <dt>RepairTask</dt>
-          <dd>The unit of work submitted to the BAA. Has an objective, optional commitment and project links, stage history, and metadata. Progresses through pending, running, succeeded, failed, or recovering states.</dd>
+          <dd>The unit of work submitted to the BAA. Has an objective, optional commitment and project links, stage history, and metadata. Progresses through <code>PENDING → RUNNING → SUCCEEDED / FAILED / RECOVERING</code>.</dd>
           <dt>Repair Executor</dt>
           <dd>Executes a <code>RepairTask</code> through a plan → execute → verify → recover loop using the tool registry and optional LLM planning. Records a git checkpoint before destructive steps when git is available.</dd>
           <dt>Lane</dt>
@@ -143,7 +143,7 @@
           <dt>Execution receipt</dt>
           <dd>A durable audit record created at the end of every terminal BAA task. Stored in <code>receipts.db</code> and surfaced through the dashboard Operations tab. Answers "what did the agent actually do?"</dd>
           <dt>Retry governor</dt>
-          <dd>The control layer that decides whether a failed task should retry, salvage, or stop. It preserves blocked and resumable intent instead of replaying failures without context.</dd>
+          <dd>The control layer that decides whether a failed task should retry, salvage, or stop. It preserves blocked-vs-resumable intent instead of blindly replaying low-divergence failures.</dd>
           <dt>Salvage packet</dt>
           <dd>The durable retry metadata attached to a failed task. It captures the last meaningful attempt state so the governor can resume without losing provenance.</dd>
         </dl>
@@ -179,7 +179,7 @@
           <dt>Voice chat</dt>
           <dd>The chat lane's microphone and speech lane. It transcribes audio into chat text and can synthesize spoken replies. Voice output metadata is stored alongside the message history.</dd>
           <dt>Phone bridge</dt>
-          <dd>The Twilio-backed voice surface for live inbound and outbound calls. It supports owner and caller screening, workspace separation, and recent-call inspection.</dd>
+          <dd>The Twilio-backed voice surface for live inbound and outbound calls. It supports owner-vs-caller screening, workspace separation, and recent-call inspection.</dd>
           <dt>Telegram</dt>
           <dd>The existing chat channel for paired and policy-controlled Telegram access. It supports bot pairing, allowlists, typing indicators, and edited replies.</dd>
         </dl>
@@ -219,7 +219,7 @@
         <h2>Observability</h2>
         <dl class="term-list">
           <dt>Telemetry store</dt>
-          <dd>An append-only JSONL event log. Runtime events such as bootstrap stages, tool calls, memory operations, and LLM calls are logged with a session ID and optional span ID. Queryable through <code>/api/monitor/events</code> and the Logs dashboard tab.</dd>
+          <dd>An append-only JSONL event log. Every meaningful runtime event — bootstrap stages, tool calls, memory operations, LLM calls — is logged with a session ID and optional span ID. Queryable through <code>/api/monitor/events</code> and the Logs dashboard tab.</dd>
           <dt>Token telemetry</dt>
           <dd>Per-call LLM usage recording: prompt tokens, completion tokens, latency, and estimated cost. Rolled up by session and by day. Surfaced in the Usage dashboard tab.</dd>
           <dt>Health monitor</dt>

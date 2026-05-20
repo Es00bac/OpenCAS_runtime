@@ -7,6 +7,7 @@ import pytest
 from opencas.bootstrap import BootstrapConfig
 from opencas.bootstrap.live_objective import read_tasklist_live_objective
 from opencas.bootstrap.pipeline_stores import initialize_runtime_stores
+from opencas.autonomy.models import WorkObject, WorkStage
 from opencas.identity import IdentityManager, IdentityStore
 from opencas.telemetry import TelemetryStore, Tracer
 
@@ -85,6 +86,62 @@ async def test_initialize_runtime_stores_prefers_tasklist_live_objective(tmp_pat
     assert second.executive.intention == "Continuity surface reconciliation decision bead"
     assert second.executive.intention_source == "tasklist_live_objective"
     assert "executive_online" in stages
+
+    await second.memory.close()
+    await second.tasks.close()
+    await second.receipt_store.close()
+    await second.context_store.close()
+    await second.work_store.close()
+    await second.commitment_store.close()
+    await second.portfolio_store.close()
+
+
+@pytest.mark.asyncio
+async def test_initialize_runtime_stores_restores_ready_work_as_active_goal(tmp_path: Path) -> None:
+    config = BootstrapConfig(
+        state_dir=tmp_path / "state",
+        session_id="bootstrap-ready-work",
+    ).resolve_paths()
+
+    identity = IdentityManager(IdentityStore(config.state_dir / "identity"))
+    identity.load()
+    telemetry_store = TelemetryStore(config.state_dir / "telemetry")
+    tracer = Tracer(telemetry_store)
+    stages: list[str] = []
+
+    first = await initialize_runtime_stores(
+        config,
+        identity=identity,
+        tracer=tracer,
+        stage=lambda name, _meta=None: stages.append(name),
+    )
+    work = WorkObject(
+        content="Repair bootstrap active-goal restore from ready work",
+        stage=WorkStage.MICRO_TASK,
+    )
+    await first.work_store.save(work)
+    await first.memory.close()
+    await first.tasks.close()
+    await first.receipt_store.close()
+    await first.context_store.close()
+    await first.work_store.close()
+    await first.commitment_store.close()
+    await first.portfolio_store.close()
+
+    second_identity = IdentityManager(IdentityStore(config.state_dir / "identity"))
+    second_identity.load()
+    second = await initialize_runtime_stores(
+        config,
+        identity=second_identity,
+        tracer=tracer,
+        stage=lambda name, _meta=None: stages.append(name),
+    )
+
+    assert second.executive.queue_metadata()
+    assert second.executive.active_goals == [
+        "Advance promoted work: Repair bootstrap active-goal restore from ready work"
+    ]
+    assert second_identity.self_model.current_goals == second.executive.active_goals
 
     await second.memory.close()
     await second.tasks.close()

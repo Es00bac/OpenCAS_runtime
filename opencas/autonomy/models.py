@@ -17,6 +17,15 @@ class ApprovalLevel(str, Enum):
     MUST_ESCALATE = "must_escalate"
 
 
+class ApprovalMode(str, Enum):
+    """Approval routing mode for the self-approval ladder."""
+
+    DEFAULT = "default"
+    AUTO_REVIEW = "auto_review"
+    FULLY_AUTONOMOUS = "fully_autonomous"
+    TRUST_BASED = "trust_based"
+
+
 class ActionRiskTier(str, Enum):
     """Taxonomy of action risk tiers."""
 

@@ -1,5 +1,6 @@
 """Tools module for OpenCAS: registry, filesystem, and shell tools."""
 
+from .adapters.cli import CliDiscoveryToolAdapter
 from .adapters.fs import FileSystemToolAdapter
 from .adapters.shell import ShellToolAdapter
 from .context import ToolUseContext, ToolUseResult, UserInputRequired
@@ -21,6 +22,7 @@ from .validation import (
 
 __all__ = [
     "build_tool_schemas",
+    "CliDiscoveryToolAdapter",
     "CommandSafetyValidator",
     "ContentSizeValidator",
     "create_default_tool_validation_pipeline",

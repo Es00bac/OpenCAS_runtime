@@ -1,6 +1,7 @@
 """Tests for the tool registry and adapters."""
 
 import asyncio
+import json
 from pathlib import Path
 import pytest
 
@@ -13,6 +14,7 @@ from opencas.tools import (
 )
 from opencas.planning import PlanStore
 from opencas.tools.adapters.plan import PlanToolAdapter
+from opencas.tools.adapters.search import SearchToolAdapter
 from opencas.tools.validation import create_default_tool_validation_pipeline
 
 
@@ -44,6 +46,52 @@ def test_execute_unknown_tool(registry: ToolRegistry) -> None:
     assert "not found" in result.output
 
 
+@pytest.mark.asyncio
+async def test_execute_async_passes_audit_only_to_adapter_args() -> None:
+    seen = {}
+
+    async def adapter(name: str, args: dict) -> ToolResult:
+        seen.update(args)
+        return ToolResult(success=True, output="ok", metadata={})
+
+    registry = ToolRegistry()
+    registry.register("audit_tool", "Audit tool", adapter, ActionRiskTier.READONLY)
+
+    result = await registry.execute_async("audit_tool", {}, audit_only=True)
+
+    assert result.success is True
+    assert seen["_audit_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_async_traces_safe_argument_signature() -> None:
+    class Tracer:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def log(self, kind, message, payload):
+            self.calls.append((kind, message, payload))
+
+    async def adapter(name: str, args: dict) -> ToolResult:
+        return ToolResult(success=True, output="ok", metadata={})
+
+    tracer = Tracer()
+    registry = ToolRegistry(tracer=tracer)
+    registry.register("demo", "Demo", adapter, ActionRiskTier.READONLY)
+
+    result = await registry.execute_async(
+        "demo",
+        {"file_path": "/tmp/example.txt", "token": "secret-token"},
+    )
+
+    assert result.success is True
+    executing = next(call for call in tracer.calls if call[1] == "ToolRegistry: tool_executing")
+    payload = executing[2]
+    assert payload["args_keys"] == ["file_path", "token"]
+    assert len(payload["args_hash"]) == 64
+    assert "secret-token" not in json.dumps(payload)
+
+
 def test_fs_read_file(tmp_dir: Path) -> None:
     adapter = FileSystemToolAdapter(allowed_roots=[str(tmp_dir)])
     test_file = tmp_dir / "hello.txt"
@@ -54,6 +102,38 @@ def test_fs_read_file(tmp_dir: Path) -> None:
     assert result.output == "world"
 
 
+def test_fs_read_file_paginates_with_concept_metadata(tmp_dir: Path) -> None:
+    adapter = FileSystemToolAdapter(allowed_roots=[str(tmp_dir)])
+    test_file = tmp_dir / "novel.txt"
+    test_file.write_text("abcdef" * 500, encoding="utf-8")
+
+    result = adapter(
+        "fs_read_file",
+        {
+            "file_path": str(test_file),
+            "offset": 0,
+            "limit": 10,
+            "read_session_id": "story-session-1",
+            "concept_scope": "chapter",
+            "concept_label": "opening",
+        },
+    )
+
+    assert result.success is True
+    payload = json.loads(result.output)
+    assert payload["ok"] is True
+    assert payload["read_session_id"] == "story-session-1"
+    assert payload["concept_scope"] == "chapter"
+    assert payload["concept_label"] == "opening"
+    assert payload["offset"] == 0
+    assert payload["limit"] == 10
+    assert payload["returned_count"] == 10
+    assert payload["truncated"] is True
+    assert payload["next_offset"] == 10
+    assert result.metadata["total_chars"] == len("abcdef" * 500)
+    assert result.metadata["next_offset"] == 10
+
+
 def test_fs_list_dir(tmp_dir: Path) -> None:
     adapter = FileSystemToolAdapter(allowed_roots=[str(tmp_dir)])
     (tmp_dir / "a.txt").write_text("a", encoding="utf-8")
@@ -61,8 +141,75 @@ def test_fs_list_dir(tmp_dir: Path) -> None:
 
     result = adapter("fs_list_dir", {"dir_path": str(tmp_dir)})
     assert result.success is True
-    assert "a.txt" in result.output
-    assert "b_dir" in result.output
+    payload = json.loads(result.output)
+    assert [entry["name"] for entry in payload["entries"]] == ["a.txt", "b_dir"]
+    assert payload["total_count"] == 2
+    assert payload["returned_count"] == 2
+    assert payload["truncated"] is False
+    assert payload["next_offset"] is None
+    assert result.metadata["total_count"] == 2
+    assert result.metadata["truncated"] is False
+
+
+def test_fs_list_dir_paginates_without_absence_ambiguity(tmp_dir: Path) -> None:
+    adapter = FileSystemToolAdapter(allowed_roots=[str(tmp_dir)])
+    for idx in range(5):
+        (tmp_dir / f"chapter_{idx}.md").write_text(str(idx), encoding="utf-8")
+
+    result = adapter("fs_list_dir", {"dir_path": str(tmp_dir), "offset": 1, "limit": 2})
+
+    assert result.success is True
+    payload = json.loads(result.output)
+    assert [entry["name"] for entry in payload["entries"]] == ["chapter_1.md", "chapter_2.md"]
+    assert payload["total_count"] == 5
+    assert payload["returned_count"] == 2
+    assert payload["truncated"] is True
+    assert payload["next_offset"] == 3
+    assert result.metadata["total_count"] == 5
+    assert result.metadata["returned_count"] == 2
+    assert result.metadata["truncated"] is True
+
+
+def test_glob_search_reports_total_and_truncation(tmp_dir: Path) -> None:
+    adapter = SearchToolAdapter(allowed_roots=[str(tmp_dir)])
+    for idx in range(5):
+        (tmp_dir / f"chapter_{idx}.md").write_text(str(idx), encoding="utf-8")
+
+    result = adapter(
+        "glob_search",
+        {"path": str(tmp_dir), "pattern": "*.md", "offset": 1, "limit": 2},
+    )
+
+    assert result.success is True
+    payload = json.loads(result.output)
+    assert [Path(path).name for path in payload["files"]] == ["chapter_1.md", "chapter_2.md"]
+    assert payload["total_count"] == 5
+    assert payload["returned_count"] == 2
+    assert payload["truncated"] is True
+    assert payload["next_offset"] == 3
+    assert result.metadata["total_count"] == 5
+    assert result.metadata["truncated"] is True
+
+
+def test_grep_search_reports_total_and_truncation(tmp_dir: Path) -> None:
+    adapter = SearchToolAdapter(allowed_roots=[str(tmp_dir)])
+    for idx in range(3):
+        (tmp_dir / f"note_{idx}.txt").write_text("needle\n", encoding="utf-8")
+
+    result = adapter(
+        "grep_search",
+        {"path": str(tmp_dir), "pattern": "needle", "offset": 0, "limit": 1},
+    )
+
+    assert result.success is True
+    payload = json.loads(result.output)
+    assert len(payload["matches"]) == 1
+    assert payload["total_count"] == 3
+    assert payload["returned_count"] == 1
+    assert payload["truncated"] is True
+    assert payload["next_offset"] == 1
+    assert result.metadata["total_count"] == 3
+    assert result.metadata["truncated"] is True
 
 
 def test_fs_write_file(tmp_dir: Path) -> None:

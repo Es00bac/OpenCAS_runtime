@@ -12,7 +12,7 @@ This module provides a robust async HTTP client with:
 
 import asyncio
 import logging
-from typing import Any, Dict, Optional, Union, Callable
+from typing import Any, Dict, Optional, Union
 from dataclasses import dataclass
 from enum import Enum
 import random

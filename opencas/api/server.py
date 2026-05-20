@@ -20,6 +20,10 @@ from .websocket_bridge import WebSocketBridge
 class ChatRequest(BaseModel):
     session_id: Optional[str] = None
     message: str
+    actor_type: Optional[str] = "api_client"
+    actor_label: Optional[str] = "API client"
+    actor_note: Optional[str] = "Legacy direct chat API call; not assumed to be the owner/operator."
+    suppress_body_double_voice: bool = True
 
 
 class ChatResponse(BaseModel):
@@ -48,6 +52,13 @@ def create_app(runtime: Any) -> FastAPI:
                 runtime,
                 session_id=body.session_id,
                 message=body.message,
+                actor_type=body.actor_type,
+                actor_label=body.actor_label,
+                actor_note=body.actor_note,
+                suppress_body_double_voice=body.suppress_body_double_voice,
+                body_double_voice_suppression_explicit=(
+                    "suppress_body_double_voice" in getattr(body, "model_fields_set", set())
+                ),
             )
             return ChatResponse(response=result.response)
         except Exception as exc:
@@ -84,6 +95,14 @@ def create_app(runtime: Any) -> FastAPI:
                             runtime,
                             session_id=sid,
                             message=payload,
+                            actor_type=msg.get("actor_type") or "api_client",
+                            actor_label=msg.get("actor_label") or "API client",
+                            actor_note=(
+                                msg.get("actor_note")
+                                or "WebSocket chat API call; not assumed to be the owner/operator."
+                            ),
+                            suppress_body_double_voice=bool(msg.get("suppress_body_double_voice", True)),
+                            body_double_voice_suppression_explicit="suppress_body_double_voice" in msg,
                         )
                         response = result.response
                     except Exception as exc:
@@ -110,36 +129,52 @@ def create_app(runtime: Any) -> FastAPI:
 
     # Dashboard routers
     from .routes.chat import build_chat_router
+    from .routes.cognition import build_cognition_router
     from .routes.config import build_config_router
+    from .routes.context import build_context_router
     from .routes.daydream import build_daydream_router
+    from .routes.desktop_context import build_desktop_context_router
     from .routes.executive import build_executive_router
     from .routes.identity import build_identity_router
+    from .routes.inner_life import build_inner_life_router
     from .routes.memory import build_memory_router
     from .routes.monitor import build_monitor_router
+    from .routes.mobile import build_mobile_router
     from .routes.operations import build_operations_router
     from .routes.phone import build_phone_router
     from .routes.platform import build_platform_router
+    from .routes.proof import build_proof_router
     from .routes.schedule import build_schedule_router
     from .routes.telegram import build_telegram_router
     from .routes.telemetry import build_telemetry_router
+    from .routes.thread_registry import build_thread_registry_router
+    from .routes.tui_playwright import build_tui_playwright_router
     from .routes.usage import build_usage_router
     from .routes.wellbeing import build_wellbeing_router
 
     app.include_router(build_config_router(runtime))
     app.include_router(build_monitor_router(runtime))
+    app.include_router(build_cognition_router(runtime))
     app.include_router(build_platform_router(runtime))
     app.include_router(build_chat_router(runtime))
+    app.include_router(build_context_router(runtime))
     app.include_router(build_daydream_router(runtime))
+    app.include_router(build_desktop_context_router(runtime))
     app.include_router(build_memory_router(runtime))
+    app.include_router(build_mobile_router(runtime))
     app.include_router(build_operations_router(runtime))
     app.include_router(build_usage_router(runtime))
     app.include_router(build_wellbeing_router(runtime))
+    app.include_router(build_proof_router(runtime))
+    app.include_router(build_inner_life_router(runtime))
+    app.include_router(build_thread_registry_router(runtime))
     app.include_router(build_identity_router(runtime))
     app.include_router(build_executive_router(runtime))
     app.include_router(build_phone_router(runtime))
     app.include_router(build_telegram_router(runtime))
     app.include_router(build_schedule_router(runtime))
     app.include_router(build_telemetry_router(runtime))
+    app.include_router(build_tui_playwright_router(runtime))
 
     # Static dashboard SPA
     dashboard_dir = Path(__file__).parent.parent / "dashboard" / "static"

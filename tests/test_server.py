@@ -2,7 +2,6 @@
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock
 import pytest
 import pytest_asyncio
 
@@ -86,7 +85,7 @@ def test_websocket_receives_baa_events(tmp_path: Path) -> None:
     client = TestClient(app)
 
     with client.websocket_connect("/ws") as websocket:
-        from opencas.execution.models import RepairTask, ExecutionStage, RepairResult
+        from opencas.execution.models import ExecutionStage
         from opencas.infra import BaaCompletedEvent
 
         # Emit a completed event on the bus

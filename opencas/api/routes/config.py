@@ -15,6 +15,8 @@ from opencas.api.config_mutations import (
     delete_provider_model as delete_provider_model_impl,
     delete_web_trust_policy as delete_web_trust_policy_impl,
     save_plugin_trust_policy as save_plugin_trust_policy_impl,
+    save_generation_policy as save_generation_policy_impl,
+    save_learned_generation_preset as save_learned_generation_preset_impl,
     save_guided_provider_setup as save_guided_provider_setup_impl,
     save_model_routing as save_model_routing_impl,
     save_web_trust_policy as save_web_trust_policy_impl,
@@ -25,6 +27,7 @@ from opencas.api.config_overview import (
     build_config_overview_payload,
     redact_secrets,
 )
+from opencas.generation.policy import GenerationPolicyConfig, LearnedGenerationPreset
 from opencas.governance import PluginTrustLevel, PluginTrustScope, WebTrustLevel
 from opencas.model_routing import ModelRoutingConfig
 
@@ -46,6 +49,14 @@ class ConfigOverviewResponse(BaseModel):
 class ModelRoutingUpdateRequest(BaseModel):
     default_llm_model: Optional[str] = None
     model_routing: ModelRoutingConfig
+
+
+class GenerationPolicyUpdateRequest(GenerationPolicyConfig):
+    pass
+
+
+class LearnedGenerationPresetRequest(LearnedGenerationPreset):
+    pass
 
 
 class GuidedProviderSetupRequest(BaseModel):
@@ -137,6 +148,18 @@ def build_config_router(runtime: Any) -> APIRouter:
         payload: ModelRoutingUpdateRequest,
     ) -> Dict[str, Any]:
         return await save_model_routing_impl(runtime, payload)
+
+    @r.post("/generation-policy")
+    async def save_generation_policy(
+        payload: GenerationPolicyUpdateRequest,
+    ) -> Dict[str, Any]:
+        return await save_generation_policy_impl(runtime, payload)
+
+    @r.post("/generation-policy/learned-presets")
+    async def save_learned_generation_preset(
+        payload: LearnedGenerationPresetRequest,
+    ) -> Dict[str, Any]:
+        return await save_learned_generation_preset_impl(runtime, payload)
 
     @r.post("/provider-setups")
     async def save_guided_provider_setup(

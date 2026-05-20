@@ -18,6 +18,7 @@ class ScheduleKind(str, Enum):
 class ScheduleAction(str, Enum):
     SUBMIT_BAA = "submit_baa"
     REMINDER_ONLY = "reminder_only"
+    GMAIL_ALERT = "gmail_alert"
 
 
 class ScheduleStatus(str, Enum):
@@ -36,6 +37,7 @@ class ScheduleRecurrence(str, Enum):
 
 
 class ScheduleRunStatus(str, Enum):
+    CLAIMED = "claimed"
     SUBMITTED = "submitted"
     RECORDED = "recorded"
     SKIPPED = "skipped"

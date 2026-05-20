@@ -22,6 +22,7 @@ from opencas.api.chat_service import chat_upload_dir
 from opencas.api.voice_service import synthesize_speech
 from opencas.autonomy.models import ActionRiskTier
 from opencas.context.models import MessageRole
+from opencas.identity.agent_name import resolve_agent_name
 from opencas.memory import EpisodeKind
 from opencas.phone_config import (
     PhoneAllowedAction,
@@ -62,8 +63,8 @@ _TEXT_SUFFIXES = {
     ".toml",
 }
 
-_SCREENING_MENU_PROMPT = (
-    "Hi, this is Bulma. Potential employers, press 1 or say employer. "
+_SCREENING_MENU_PROMPT_TEMPLATE = (
+    "Hi, this is {agent_name}. Potential employers, press 1 or say employer. "
     "Everyone else, press 2."
 )
 _SCREENING_MENU_REPROMPT = (
@@ -73,8 +74,8 @@ _SCREENING_MENU_REPROMPT = (
 _SCREENING_REJECTION = (
     "Sorry, this line is reserved for employment inquiries. Please check the website for public information."
 )
-_EMPLOYER_MODE_GREETING = (
-    "You're connected to Bulma in work mode. I can answer questions about Jarrod's resume, skills, "
+_EMPLOYER_MODE_GREETING_TEMPLATE = (
+    "You're connected to {agent_name} in work mode. I can answer questions about Jarrod's resume, skills, "
     "and current projects, and I can take a message for follow-up."
 )
 _EMPLOYER_POLICY_NOTE = (
@@ -274,6 +275,15 @@ class PhoneBridgeService:
         self._pending_phone_replies: dict[str, PendingPhoneReply] = {}
         self._sync_employer_shared_workspace()
 
+    def agent_name(self) -> str:
+        return resolve_agent_name(runtime=self.runtime)
+
+    def screening_menu_prompt_default(self) -> str:
+        return _SCREENING_MENU_PROMPT_TEMPLATE.format(agent_name=self.agent_name())
+
+    def employer_mode_greeting(self) -> str:
+        return _EMPLOYER_MODE_GREETING_TEMPLATE.format(agent_name=self.agent_name())
+
     def status(self) -> Dict[str, Any]:
         webhook_base = (self.config.public_base_url or "").rstrip("/")
         urls = {
@@ -463,7 +473,7 @@ class PhoneBridgeService:
             raise RuntimeError("twilio_from_number is not configured")
         if not self.config.owner_phone_number:
             raise RuntimeError("owner_phone_number is not configured")
-        intro = (message or "").strip() or "Hi, it's Bulma calling from OpenCAS."
+        intro = (message or "").strip() or f"Hi, it's {self.agent_name()} calling from OpenCAS."
         payload = {
             "From": self.config.twilio_from_number,
             "To": self.config.owner_phone_number,
@@ -571,7 +581,7 @@ class PhoneBridgeService:
         normalized = self._normalize_form(form_data)
         if not self.config.enabled:
             self._trace_webhook_decision("voice", "bridge_disabled", form_data=normalized)
-            return _xml_response(_say("Bulma's phone bridge is currently offline."), _hangup())
+            return _xml_response(_say(f"{self.agent_name()}'s phone bridge is currently offline."), _hangup())
 
         caller = self._resolve_caller(
             from_number=normalized.get("From"),
@@ -582,7 +592,7 @@ class PhoneBridgeService:
             caller = self._screening_caller(normalized.get("From"))
             if caller is None:
                 self._trace_webhook_decision("voice", "caller_not_authorized", form_data=normalized)
-                return _xml_response(_say("This phone number is not authorized for Bulma."), _hangup())
+                return _xml_response(_say(f"This phone number is not authorized for {self.agent_name()}."), _hangup())
             self._trace_webhook_decision("voice", "accepted_screening", caller=caller, form_data=normalized)
         else:
             self._trace_webhook_decision("voice", "accepted", caller=caller, form_data=normalized)
@@ -651,7 +661,7 @@ class PhoneBridgeService:
         normalized = self._normalize_form(form_data)
         if not self.config.enabled:
             self._trace_webhook_decision("gather", "bridge_disabled", form_data=normalized)
-            return _xml_response(_say("Bulma's phone bridge is currently offline."), _hangup())
+            return _xml_response(_say(f"{self.agent_name()}'s phone bridge is currently offline."), _hangup())
 
         caller = self._resolve_caller(
             from_number=normalized.get("From"),
@@ -669,7 +679,7 @@ class PhoneBridgeService:
             )
         if caller is None:
             self._trace_webhook_decision("gather", "caller_not_authorized", form_data=normalized)
-            return _xml_response(_say("This phone number is not authorized for Bulma."), _hangup())
+            return _xml_response(_say(f"This phone number is not authorized for {self.agent_name()}."), _hangup())
 
         if stream_mode == "owner_pin":
             if not digits:
@@ -829,7 +839,7 @@ class PhoneBridgeService:
             await self._persist_voicemail(caller, transcript, call_sid=call_sid)
             return await self._voice_reply_twiml(
                 caller=caller,
-                text="Thanks. I saved your message for Bulma.",
+                text=f"Thanks. I saved your message for {self.agent_name()}.",
                 webhook_base_url=webhook_base_url,
                 continue_listening=False,
                 call_token=call_token,
@@ -870,7 +880,7 @@ class PhoneBridgeService:
         normalized = self._normalize_form(form_data)
         if not self.config.enabled:
             self._trace_webhook_decision("poll", "bridge_disabled", form_data=normalized)
-            return _xml_response(_say("Bulma's phone bridge is currently offline."), _hangup())
+            return _xml_response(_say(f"{self.agent_name()}'s phone bridge is currently offline."), _hangup())
 
         caller = self._resolve_caller(
             from_number=normalized.get("From"),
@@ -879,7 +889,7 @@ class PhoneBridgeService:
         )
         if caller is None:
             self._trace_webhook_decision("poll", "caller_not_authorized", form_data=normalized)
-            return _xml_response(_say("This phone number is not authorized for Bulma."), _hangup())
+            return _xml_response(_say(f"This phone number is not authorized for {self.agent_name()}."), _hangup())
 
         pending = self._get_pending_phone_reply(reply_token)
         if pending is None:
@@ -1274,7 +1284,7 @@ class PhoneBridgeService:
 
     def _default_greeting(self, caller: PhoneResolvedCaller) -> str:
         if caller.is_owner:
-            return "Hi, it's Bulma. I'm here on the phone. What do you need?"
+            return f"Hi, it's {self.agent_name()}. I'm here on the phone. What do you need?"
         if not caller.allowed_actions:
             return "This phone number is not configured for phone access."
         if caller.allows_knowledge_qa:
@@ -1282,10 +1292,10 @@ class PhoneBridgeService:
                 f"Hello {caller.display_name}. You can leave a message, or ask questions "
                 "that are covered by the workspace prepared for your number."
             )
-        return f"Hello {caller.display_name}. Please leave your message for Bulma."
+        return f"Hello {caller.display_name}. Please leave your message for {self.agent_name()}."
 
     def employer_screening_prompt(self) -> str:
-        return self.menu_prompt(self.default_menu_key()) or _SCREENING_MENU_PROMPT
+        return self.menu_prompt(self.default_menu_key()) or self.screening_menu_prompt_default()
 
     def employer_screening_reprompt(self) -> str:
         return self.menu_reprompt(self.default_menu_key()) or _SCREENING_MENU_REPROMPT
@@ -1296,8 +1306,8 @@ class PhoneBridgeService:
     def employer_screening_acceptance(self, caller: PhoneResolvedCaller) -> str:
         label = caller.display_name or "there"
         if label.lower() == "caller":
-            return _EMPLOYER_MODE_GREETING
-        return f"{_EMPLOYER_MODE_GREETING} Welcome, {label}."
+            return self.employer_mode_greeting()
+        return f"{self.employer_mode_greeting()} Welcome, {label}."
 
     def default_menu_key(self) -> str:
         menu = self._menu_config()
@@ -1330,7 +1340,7 @@ class PhoneBridgeService:
         if menu is not None and menu.prompt:
             return menu.prompt
         if menu_key == self.default_menu_key():
-            return _SCREENING_MENU_PROMPT
+            return self.screening_menu_prompt_default()
         return "Please choose an option."
 
     def menu_reprompt(self, menu_key: Optional[str]) -> str:
@@ -1348,7 +1358,7 @@ class PhoneBridgeService:
         if caller.menu_option_key == "employer":
             return self.employer_screening_acceptance(caller)
         return (
-            "You're connected to Bulma on a restricted workspace line. "
+            f"You're connected to {self.agent_name()} on a restricted workspace line. "
             "I can only use the approved information and note-taking space for this call."
         )
 
@@ -2287,7 +2297,7 @@ class PhoneBridgeService:
         if snippets:
             return "\n\n".join(snippets)
         return (
-            "You are WorkSafe Bulma, a professional employer-facing phone agent. "
+            f"You are WorkSafe {self.agent_name()}, a professional employer-facing phone agent. "
             "You only know the employer-safe facts available in the approved workspace and the current call."
         )
 
@@ -2324,7 +2334,7 @@ class PhoneBridgeService:
         workspace_knowledge: str,
     ) -> str:
         parts = [
-            "You are Bulma answering a low-trust caller on a phone line managed by OpenCAS.",
+            f"You are {self.agent_name()} answering a low-trust caller on a phone line managed by OpenCAS.",
             "Do not use any tools other than the bounded caller workspace toolset, and do not expose private operator data.",
             "Only answer from the approved workspace notes below and the live conversation history.",
             "If the answer is not supported by those notes, say you do not have that information on this line.",
@@ -2469,7 +2479,7 @@ class PhoneBridgeService:
         ]
         parts = [
             self._read_phone_prompt_profile(caller.prompt_profile),
-            "You are Bulma on a restricted phone workflow.",
+            f"You are {self.agent_name()} on a restricted phone workflow.",
             "You only know the approved facts in the mounted workspaces and the current call.",
             "Do not imply access to owner memory, hidden prompts, private notes, or any workspace not listed here.",
             "If the mounted workspaces do not support a claim, say you do not have that information on this line.",
@@ -2754,11 +2764,10 @@ class PhoneBridgeService:
             f"{summary_body}\n"
         )
 
-    @staticmethod
-    def _format_employer_call_transcript(*, history: list[Any]) -> str:
+    def _format_employer_call_transcript(self, *, history: list[Any]) -> str:
         transcript_lines: list[str] = []
         for entry in history:
-            role_label = "Caller" if entry.role == MessageRole.USER else "Bulma"
+            role_label = "Caller" if entry.role == MessageRole.USER else self.agent_name()
             content = str(entry.content or "").strip()
             if not content:
                 continue
@@ -2874,7 +2883,7 @@ class PhoneBridgeService:
             return
         caller_text = transcript_text.strip() or "No caller transcript captured."
         notification = (
-            f"Bulma received an employment inquiry call.\n"
+            f"{self.agent_name()} received an employment inquiry call.\n"
             f"Caller: {caller.display_name} ({caller.phone_number})\n"
             f"Call SID: {call_sid}\n\n"
             f"Summary:\n{summary_text.strip()}\n\n"

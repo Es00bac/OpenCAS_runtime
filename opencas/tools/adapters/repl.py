@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import io
-import json
 import sys
 import traceback
 from code import InteractiveInterpreter
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 from ..models import ToolResult
 

@@ -1,8 +1,7 @@
 """Tests for the skill loader."""
 
-import pytest
 from pathlib import Path
-from opencas.plugins import SkillEntry, SkillRegistry, load_builtin_skills, load_skill_from_path
+from opencas.plugins import SkillRegistry, load_builtin_skills, load_skill_from_path
 
 
 def test_load_skill_from_path_with_skill_entry(tmp_path: Path) -> None:

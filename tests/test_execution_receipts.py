@@ -49,6 +49,31 @@ async def test_receipt_store_round_trip(receipt_store: ExecutionReceiptStore) ->
 
 
 @pytest.mark.asyncio
+async def test_receipt_store_carries_task_claim_id(receipt_store: ExecutionReceiptStore) -> None:
+    task = RepairTask(
+        objective="claim id receipt",
+        meta={
+            "claim_id": "claim-123",
+            "schedule_id": "schedule-123",
+        },
+    )
+    result = RepairResult(
+        task_id=task.task_id,
+        success=True,
+        stage=ExecutionStage.DONE,
+        output="done",
+    )
+
+    receipt = await receipt_store.save(task, result)
+    fetched = await receipt_store.get(str(receipt.receipt_id))
+
+    assert receipt.meta["claim_id"] == "claim-123"
+    assert receipt.meta["schedule_id"] == "schedule-123"
+    assert fetched is not None
+    assert fetched.meta["claim_id"] == "claim-123"
+
+
+@pytest.mark.asyncio
 async def test_receipt_store_list_by_task(receipt_store: ExecutionReceiptStore) -> None:
     task = RepairTask(objective="list test")
     result = RepairResult(

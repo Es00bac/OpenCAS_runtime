@@ -1,5 +1,7 @@
 """Tests for the executive state tracker."""
 
+import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +10,7 @@ import pytest
 from opencas.autonomy import WorkObject, WorkStage
 from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.autonomy.executive import ExecutiveState
+from opencas.autonomy.work_store import WorkStore
 from opencas.identity import IdentityManager, IdentityStore
 from opencas.somatic import SomaticManager
 from opencas.telemetry import TelemetryStore, Tracer
@@ -66,6 +69,21 @@ def test_intention_set_preserves_explicit_identity_intention(
     assert identity.self_model.current_intention == "protect an explicitly chosen intention"
 
 
+def test_tasklist_live_objective_replaces_stale_identity_intention(
+    executive: ExecutiveState,
+    identity: IdentityManager,
+) -> None:
+    identity.self_model.current_intention = "Convert the Writing Project truth-repair lens."
+    identity.save()
+
+    executive.set_intention(
+        "Whole-system standards conformance pass",
+        source="tasklist_live_objective",
+    )
+
+    assert identity.self_model.current_intention == "Whole-system standards conformance pass"
+
+
 def test_set_intention_from_work_preserves_explicit_objective(executive: ExecutiveState) -> None:
     executive.set_intention("Continuity surface reconciliation decision bead")
 
@@ -113,6 +131,61 @@ def test_load_snapshot_syncs_placeholder_identity_intention(
     assert executive.intention_source == "active_work"
 
 
+def test_load_snapshot_rejects_loaded_self_referential_suppression_metadata(
+    identity: IdentityManager,
+    somatic: SomaticManager,
+    tracer: Tracer,
+    tmp_path: Path,
+) -> None:
+    recursive_goal = (
+        "The browser_click blocked memory is in soft focus; do not lose it, "
+        "but do not activate it now."
+    )
+    user_goal = "verify tsconfig"
+    snapshot_path = tmp_path / "executive.json"
+    snapshot_path.write_text(
+        json.dumps(
+            {
+                "updated_at": "2026-05-06T00:00:00+00:00",
+                "intention": "repair parked goal hygiene",
+                "intention_source": "explicit",
+                "active_goals": [],
+                "parked_goals": [user_goal, recursive_goal],
+                "parked_goal_reasons": {
+                    user_goal: "evidence_deferred",
+                    recursive_goal: "low_divergence_reframe",
+                },
+                "parked_goal_metadata": {
+                    user_goal: {
+                        "reason": "evidence_deferred",
+                        "source_artifact": "tsconfig",
+                    },
+                    recursive_goal: {
+                        "reason": "low_divergence_reframe",
+                        "source_artifact": recursive_goal,
+                        "failed_framings": [recursive_goal],
+                        "duplicate_of_task_id": "task-1",
+                    },
+                },
+                "queue_metadata": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    executive = ExecutiveState(identity=identity, somatic=somatic, tracer=tracer)
+
+    executive.load_snapshot(snapshot_path)
+
+    assert user_goal in executive.parked_goals
+    assert recursive_goal not in executive.parked_goals
+    assert recursive_goal not in executive.parked_goal_metadata
+    rejected = executive.consume_suppressed_parked_goal_rejections()
+    assert len(rejected) == 1
+    assert rejected[0]["goal"] == recursive_goal
+    assert rejected[0]["metadata"]["duplicate_of_task_id"] == "task-1"
+    assert executive.consume_suppressed_parked_goal_rejections() == []
+
+
 def test_goals_sync_to_identity(executive: ExecutiveState, identity: IdentityManager) -> None:
     executive.add_goal("learn rust")
     assert "learn rust" in identity.self_model.current_goals
@@ -147,30 +220,93 @@ def test_park_goal_moves_active_goal_to_parked_with_wake_condition(
 
 def test_park_goal_merges_reframe_details_into_metadata(executive: ExecutiveState) -> None:
     changed = executive.park_goal(
-        "continue chronicle",
+        "continue creative_writing",
         reason="low_divergence_reframe",
         details={
-            "reframe_hint": "Resume from workspace/Chronicles/4246/chronicle_4246.md with one narrow edit.",
+            "reframe_hint": "Resume from workspace/writing/4246/story_4246.md with one narrow edit.",
             "failed_framings": [
-                "Continue Chronicle 4246 from the existing manuscript.",
+                "Continue writing project 4246 from the existing manuscript.",
             ],
             "reframe_rule": "Do not retry this line with cosmetic rewording.",
         },
     )
 
     assert changed is True
-    metadata = executive.parked_goal_metadata["continue chronicle"]
+    metadata = executive.parked_goal_metadata["continue creative_writing"]
     assert metadata["reason"] == "low_divergence_reframe"
     assert metadata["wake_trigger"] == (
         "fresh evidence, relevant artifact change, materially different framing, or direct user request"
     )
     assert metadata["reframe_hint"] == (
-        "Resume from workspace/Chronicles/4246/chronicle_4246.md with one narrow edit."
+        "Resume from workspace/writing/4246/story_4246.md with one narrow edit."
     )
     assert metadata["failed_framings"] == [
-        "Continue Chronicle 4246 from the existing manuscript.",
+        "Continue writing project 4246 from the existing manuscript.",
     ]
     assert metadata["reframe_rule"] == "Do not retry this line with cosmetic rewording."
+
+
+def test_park_goal_rejects_self_referential_suppression_metadata(
+    executive: ExecutiveState,
+) -> None:
+    goal = "browser_click: Click at x=1590, y=890 to click lightsaber"
+    executive.add_goal(goal)
+
+    changed = executive.park_goal(
+        goal,
+        reason="low_divergence_reframe",
+        source_artifact=goal,
+        details={
+            "failed_framings": [goal],
+            "duplicate_of_task_id": "task-1",
+            "last_result_stage": "failed",
+        },
+    )
+
+    assert changed is False
+    assert goal in executive.active_goals
+    assert goal not in executive.parked_goals
+    assert goal not in executive.parked_goal_metadata
+
+
+def test_park_goal_rejects_duplicate_low_divergence_objective_self_reference(
+    executive: ExecutiveState,
+) -> None:
+    goal = "browser_click blocked memory should not be retried as a goal"
+
+    changed = executive.park_goal(
+        goal,
+        reason="duplicate_low_divergence_objective",
+        source_artifact=goal,
+        details={
+            "failed_framings": [goal],
+            "duplicate_of_task_id": "task-2",
+        },
+    )
+
+    assert changed is False
+    assert goal not in executive.parked_goals
+    assert goal not in executive.parked_goal_metadata
+
+
+def test_park_goal_archives_extra_low_divergence_reframes(executive: ExecutiveState) -> None:
+    for index in range(3):
+        executive.park_goal(
+            f"duplicate reframe {index}",
+            reason="low_divergence_reframe",
+            details={
+                "reframe_hint": f"Use materially different evidence path {index}.",
+                "failed_framings": [f"duplicate reframe {index}"],
+            },
+        )
+
+    assert executive.parked_goals == ["duplicate reframe 2"]
+    assert "duplicate reframe 0" in executive.archived_parked_goals
+    assert "duplicate reframe 1" in executive.archived_parked_goals
+    archived = executive.archived_parked_goal_metadata["duplicate reframe 0"]
+    assert archived["reason"] == "low_divergence_reframe"
+    assert archived["archive_reason"] == "low_divergence_reframe_limit"
+    assert archived["reframe_hint"] == "Use materially different evidence path 0."
 
 
 def test_refresh_structural_load_applies_parked_pressure_after_somatic_attach(
@@ -246,6 +382,16 @@ def test_recommend_pause_fatigue(executive: ExecutiveState, somatic: SomaticMana
     assert executive.recommend_pause() is True
 
 
+def test_recommend_pause_operator_rest_window(
+    executive: ExecutiveState,
+    somatic: SomaticManager,
+) -> None:
+    somatic.set_fatigue(0.2)
+    somatic.set_rest_until(datetime.now(timezone.utc) + timedelta(minutes=10))
+    assert executive.pause_reason() == "operator_rest"
+    assert executive.recommend_pause() is True
+
+
 def test_snapshot(executive: ExecutiveState) -> None:
     executive.add_goal("test goal")
     executive.add_goal("repair /package")
@@ -255,15 +401,108 @@ def test_snapshot(executive: ExecutiveState) -> None:
     assert snap["intention"] == "plan the day"
     assert snap["intention_source"] == "explicit"
     assert snap["active_goals"] == ["test goal"]
-    assert snap["parked_goals"] == ["repair /package"]
-    assert snap["parked_goal_count"] == 1
+    assert snap["parked_goals"] == []
+    assert snap["parked_goal_count"] == 0
     assert snap["archived_parked_goal_count"] == 0
-    assert snap["parked_goal_metadata"]["repair /package"]["reason"] == "machine_fragment_goal"
-    assert "parked_at" in snap["parked_goal_metadata"]["repair /package"]
     assert snap["capacity_remaining"] == 4
     assert snap["queue_size"] == 1
     assert snap["queue_stages"] == ["spark"]
     assert "timestamp" in snap
+
+
+def test_enqueue_promoted_work_populates_active_goal(executive: ExecutiveState) -> None:
+    work = WorkObject(
+        content="Build a bounded provenance consumer validation note.",
+        stage=WorkStage.MICRO_TASK,
+    )
+
+    accepted = executive.enqueue(work)
+
+    assert accepted is True
+    assert executive.active_goals == [
+        "Advance promoted work: Build a bounded provenance consumer validation note."
+    ]
+
+
+def test_reconcile_work_update_removes_demoted_work_from_live_focus(
+    executive: ExecutiveState,
+    identity: IdentityManager,
+) -> None:
+    work = WorkObject(
+        content="Build a bounded provenance consumer validation note.",
+        stage=WorkStage.MICRO_TASK,
+    )
+    assert executive.enqueue(work) is True
+    assert executive.snapshot()["queue_size"] == 1
+
+    work.stage = WorkStage.NOTE
+    changed = executive.reconcile_work_update(work)
+
+    assert changed is True
+    assert executive.snapshot()["queue_size"] == 0
+    assert executive.active_goals == []
+    assert identity.self_model.current_goals == []
+
+
+def test_enqueue_rejects_stale_promoted_project_fragment(executive: ExecutiveState) -> None:
+    work = WorkObject(
+        content="Return to project: from individual chapters",
+        stage=WorkStage.MICRO_TASK,
+    )
+
+    accepted = executive.enqueue(work)
+
+    assert accepted is False
+    assert executive.active_goals == []
+    assert executive.snapshot()["queue_size"] == 0
+    assert work.blocked_by == ["goal_hygiene:stale_promoted_work_fragment"]
+    assert work.meta["goal_hygiene_rejected_reason"] == "stale_promoted_work_fragment"
+
+
+@pytest.mark.asyncio
+async def test_restore_queue_populates_active_goal(tmp_path: Path, identity: IdentityManager) -> None:
+    store = WorkStore(tmp_path / "work.db")
+    await store.connect()
+    work = WorkObject(
+        content="Write the live stabilization validation report.",
+        stage=WorkStage.MICRO_TASK,
+    )
+    await store.save(work)
+    executive = ExecutiveState(identity=identity, work_store=store)
+
+    restored = await executive.restore_queue()
+
+    assert restored == 1
+    assert executive.active_goals == [
+        "Advance promoted work: Write the live stabilization validation report."
+    ]
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_restore_queue_blocks_stale_promoted_project_fragment(
+    tmp_path: Path,
+    identity: IdentityManager,
+) -> None:
+    store = WorkStore(tmp_path / "work.db")
+    await store.connect()
+    work = WorkObject(
+        content="Return to project: output showing its contents",
+        stage=WorkStage.MICRO_TASK,
+    )
+    await store.save(work)
+    executive = ExecutiveState(identity=identity, work_store=store)
+
+    restored = await executive.restore_queue()
+    refreshed = await store.get(str(work.work_id))
+
+    assert restored == 0
+    assert executive.active_goals == []
+    assert executive.snapshot()["queue_size"] == 0
+    assert refreshed is not None
+    assert refreshed.blocked_by == ["goal_hygiene:stale_promoted_work_fragment"]
+    assert refreshed.meta["goal_hygiene_rejected_source"] == "restore_queue"
+    await store.close()
 
 
 def test_structural_load_updates_somatic_from_queue_pressure(
@@ -475,6 +714,11 @@ async def test_resume_deferred_work_only_unblocks_auto_resumable_commitments(
             "blocked_reason": "executive_fatigue",
         },
     )
+    resumable_operator_rest_without_policy = Commitment(
+        content="Resume after operator rest without explicit policy",
+        status=CommitmentStatus.BLOCKED,
+        meta={"blocked_reason": "executive_operator_rest"},
+    )
     manual_hold = Commitment(
         content="Do not resume automatically",
         status=CommitmentStatus.BLOCKED,
@@ -485,27 +729,45 @@ async def test_resume_deferred_work_only_unblocks_auto_resumable_commitments(
         stage=WorkStage.MICRO_TASK,
         commitment_id=str(resumable.commitment_id),
     )
+    resumable_operator_rest_work = WorkObject(
+        content="legacy resume work",
+        stage=WorkStage.MICRO_TASK,
+        commitment_id=str(resumable_operator_rest_without_policy.commitment_id),
+    )
     manual_hold_work = WorkObject(
         content="manual hold work",
         stage=WorkStage.MICRO_TASK,
         commitment_id=str(manual_hold.commitment_id),
     )
     resumable.linked_work_ids.append(str(resumable_work.work_id))
+    resumable_operator_rest_without_policy.linked_work_ids.append(
+        str(resumable_operator_rest_work.work_id)
+    )
     manual_hold.linked_work_ids.append(str(manual_hold_work.work_id))
-    executive.commitment_store = FakeCommitmentStore([resumable, manual_hold])
-    executive.work_store = FakeWorkStore([resumable_work, manual_hold_work])
+    executive.commitment_store = FakeCommitmentStore(
+        [resumable, resumable_operator_rest_without_policy, manual_hold]
+    )
+    executive.work_store = FakeWorkStore(
+        [resumable_work, resumable_operator_rest_work, manual_hold_work]
+    )
 
     result = await executive.resume_deferred_work()
     await __import__("asyncio").sleep(0)
     queued_ids = {str(item.work_id) for item in executive.task_queue}
     resumed = await executive.commitment_store.get(str(resumable.commitment_id))
     held = await executive.commitment_store.get(str(manual_hold.commitment_id))
+    resumed_without_policy = await executive.commitment_store.get(
+        str(resumable_operator_rest_without_policy.commitment_id)
+    )
 
-    assert result["unblocked_commitments"] == 1
+    assert result["unblocked_commitments"] == 2
     assert resumed is not None
     assert resumed.status == CommitmentStatus.ACTIVE
     assert resumed.meta["resume_reason"] == "executive_recovery"
     assert held is not None
     assert held.status == CommitmentStatus.BLOCKED
+    assert resumed_without_policy is not None
+    assert resumed_without_policy.status == CommitmentStatus.ACTIVE
     assert str(resumable_work.work_id) in queued_ids
+    assert str(resumable_operator_rest_work.work_id) in queued_ids
     assert str(manual_hold_work.work_id) not in queued_ids

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 
@@ -20,8 +20,13 @@ async def rerank_mmr(
     """Rerank results using Maximal Marginal Relevance."""
     if not results:
         return results
+    candidate_pool_limit = max(limit, min(len(results), max(limit * 2, limit + 64)))
+    if len(results) > candidate_pool_limit:
+        results = results[:candidate_pool_limit]
 
     vectors: List[Optional[np.ndarray]] = []
+    missing_embedding_ids: list[str] = []
+    missing_by_index: dict[int, str] = {}
     for result in results:
         vector = None
         if result.embedding is not None:
@@ -35,10 +40,22 @@ async def rerank_mmr(
             elif memory is not None:
                 embedding_id = getattr(memory, "embedding_id", None)
             if embedding_id is not None:
-                record = await embeddings.cache.get(embedding_id)
-                if record is not None and record.vector:
-                    vector = np.array(record.vector, dtype=np.float32)
+                embedding_id = str(embedding_id)
+                missing_by_index[len(vectors)] = embedding_id
+                missing_embedding_ids.append(embedding_id)
         vectors.append(vector)
+
+    if missing_embedding_ids:
+        records: Dict[str, object] = {}
+        get_many = getattr(embeddings.cache, "get_many", None)
+        if callable(get_many):
+            records = await get_many(missing_embedding_ids)
+        for index, embedding_id in missing_by_index.items():
+            record = records.get(embedding_id)
+            if record is None:
+                record = await embeddings.cache.get(embedding_id)
+            if record is not None and getattr(record, "vector", None):
+                vectors[index] = np.array(record.vector, dtype=np.float32)
 
     def similarity(i: int, j: int) -> float:
         left = vectors[i]

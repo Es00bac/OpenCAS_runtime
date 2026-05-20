@@ -8,6 +8,7 @@ import shlex
 import subprocess
 from typing import Any, Dict, Optional
 
+from ..environment import build_tool_execution_env
 from ..models import ToolResult
 
 
@@ -72,6 +73,7 @@ class ShellToolAdapter:
                     },
                 )
             prepared_command, use_shell = _prepare_subprocess_command(command)
+            env = build_tool_execution_env()
             result = subprocess.run(
                 prepared_command,
                 cwd=self.cwd,
@@ -79,6 +81,7 @@ class ShellToolAdapter:
                 capture_output=True,
                 text=True,
                 timeout=self.timeout,
+                env=env,
             )
             return ToolResult(
                 success=result.returncode == 0,
@@ -94,6 +97,28 @@ class ShellToolAdapter:
                     "command": command,
                     "returncode": result.returncode,
                     "used_shell": use_shell,
+                },
+            )
+        except FileNotFoundError as exc:
+            missing_command = _missing_command_name(command)
+            env = build_tool_execution_env()
+            return ToolResult(
+                success=False,
+                output=json.dumps(
+                    {
+                        "ok": False,
+                        "code": 127,
+                        "stdout": "",
+                        "stderr": f"{missing_command}: command not found",
+                        "missing_command": missing_command,
+                        "path": env.get("PATH", ""),
+                    }
+                ),
+                metadata={
+                    "command": command,
+                    "missing_command": True,
+                    "error_type": type(exc).__name__,
+                    "path": env.get("PATH", ""),
                 },
             )
         except subprocess.TimeoutExpired:
@@ -126,3 +151,13 @@ def _prepare_subprocess_command(command: str) -> tuple[str | list[str], bool]:
         return shlex.split(command), False
     except ValueError:
         return command, True
+
+
+def _missing_command_name(command: str) -> str:
+    try:
+        parts = shlex.split(command)
+    except ValueError:
+        parts = []
+    if parts:
+        return parts[0]
+    return command.strip().split()[0] if command.strip() else "<empty>"

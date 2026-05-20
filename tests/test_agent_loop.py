@@ -11,6 +11,7 @@ from opencas.autonomy import WorkObject, WorkStage
 from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.autonomy.models import ActionRequest, ActionRiskTier
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
+from opencas.generation.policy import GenerationPhase
 from opencas.refusal.models import RefusalCategory, RefusalDecision
 from opencas.runtime import AgentRuntime
 from opencas.runtime.conversation_turns import (
@@ -64,6 +65,121 @@ async def test_converse_resets_activity_and_records_user_turn_time(runtime: Agen
 
 
 @pytest.mark.asyncio
+async def test_converse_populates_cognition_frame(runtime: AgentRuntime) -> None:
+    runtime.llm.chat_completion = async_mock_chat_completion("Understood.")
+
+    await runtime.converse("[E16 audit-only] who are you?")
+
+    assert runtime.current_cognition is not None
+    assert runtime.current_cognition.session_id == "test-session"
+    assert runtime.current_cognition.audit_only is True
+    assert runtime.current_cognition.user_meta["audit_only"] is True
+
+
+@pytest.mark.asyncio
+async def test_converse_skips_semantic_values_for_low_risk_direct_no_tool_turn(
+    runtime: AgentRuntime,
+) -> None:
+    calls: list[str | None] = []
+
+    async def _mock_chat(*args, **kwargs):
+        calls.append(kwargs.get("source"))
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "Public research reads open sources; reauthorization renews "
+                            "private account access."
+                        )
+                    }
+                }
+            ]
+        }
+
+    runtime.llm.chat_completion = _mock_chat
+
+    await runtime.converse(
+        "Please answer in one sentence and use no tools: what is the difference "
+        "between public research and Google Workspace reauthorization?"
+    )
+
+    assert "conversation_direct" in calls
+    assert "values_alignment" not in calls
+
+
+@pytest.mark.asyncio
+async def test_converse_answers_plain_memory_recall_from_prefetch_without_tool_loop(
+    runtime: AgentRuntime,
+) -> None:
+    calls: list[str | None] = []
+
+    async def _mock_chat(*args, **kwargs):
+        calls.append(kwargs.get("source"))
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            "Retrieved evidence says the atlas repair is tied to "
+                            "loop-guard work; exact breakage is uncertain."
+                        )
+                    }
+                }
+            ]
+        }
+
+    async def _mock_execute_tool(name, args, *, session_id=None, task_id=None, audit_only=False):
+        assert name == "recall_autobiography"
+        return {
+            "success": True,
+            "output": (
+                '{"essence":"atlas repair tied to loop-guard work",'
+                '"confidence":"medium","strongest_evidence":[]}'
+            ),
+            "metadata": {"confidence": "medium"},
+        }
+
+    async def _unexpected_tool_loop(*args, **kwargs):
+        raise AssertionError("plain prefetched recall should not enter the tool loop")
+
+    async def _unexpected_context_build(*args, **kwargs):
+        raise AssertionError("plain prefetched recall should not build broad context")
+
+    runtime.llm.chat_completion = _mock_chat
+    runtime.execute_tool = _mock_execute_tool  # type: ignore[method-assign]
+    runtime.tool_loop.run = _unexpected_tool_loop  # type: ignore[method-assign]
+    runtime.builder.build = _unexpected_context_build  # type: ignore[method-assign]
+
+    response = await runtime.converse(
+        "What do you recall about the atlas repair thread, especially what broke?"
+    )
+
+    assert "loop-guard" in response
+    assert "conversation_prefetched_recall" in calls
+    assert "values_alignment" not in calls
+    assert "tool_use_loop" not in calls
+
+
+@pytest.mark.asyncio
+async def test_converse_records_gmail_authorization_from_user_imperative(
+    runtime: AgentRuntime,
+) -> None:
+    runtime.llm.chat_completion = async_mock_chat_completion("Understood.")
+
+    await runtime.converse("Check my email for job search updates")
+
+    assert runtime.current_cognition is not None
+    assert runtime.current_cognition.authorization_context is not None
+    grant = runtime.authorization_store.find_valid(
+        "gmail_read",
+        "google_workspace:gmail",
+    )
+    assert grant is not None
+    assert grant.session_id == "test-session"
+
+
+@pytest.mark.asyncio
 async def test_run_cycle_resets_activity_after_cycle(runtime: AgentRuntime) -> None:
     await runtime.run_cycle()
 
@@ -81,6 +197,34 @@ async def test_run_cycle_promotes_and_enqueues(runtime: AgentRuntime) -> None:
     )
     result = await runtime.run_cycle()
     assert result["creative"]["promoted"] >= 1
+
+
+@pytest.mark.asyncio
+async def test_run_cycle_rehydrates_creative_store_and_emits_ladder_health(
+    runtime: AgentRuntime,
+) -> None:
+    note = WorkObject(
+        content="Persisted daydream note should become an artifact.",
+        stage=WorkStage.NOTE,
+        meta={"origin": "daydream"},
+    )
+    await runtime.ctx.work_store.save(note)
+    events = []
+    runtime.cognition_bus.subscribe(
+        "ladder.health_summary",
+        lambda event: events.append(event),
+        name="test:ladder_health",
+    )
+
+    result = await runtime.run_cycle()
+
+    assert result["creative"]["rehydrated"] >= 1
+    assert result["creative"]["fallback_promoted"] >= 1
+    persisted = await runtime.ctx.work_store.get(str(note.work_id))
+    assert persisted is not None
+    assert persisted.stage in {WorkStage.ARTIFACT, WorkStage.MICRO_TASK}
+    assert events
+    assert events[-1].payload["stage_counts"]
 
 
 @pytest.mark.asyncio
@@ -709,6 +853,88 @@ async def test_converse_passes_temperature_via_payload(runtime: AgentRuntime) ->
 
 
 @pytest.mark.asyncio
+async def test_converse_long_form_writing_requests_project_memory_generation_policy(
+    runtime: AgentRuntime,
+) -> None:
+    captured_requests = []
+    captured_policy_calls = []
+
+    async def _mock_chat(messages, payload=None, tools=None, generation_request=None, **kwargs):
+        if generation_request is not None:
+            captured_requests.append(generation_request)
+            captured_policy_calls.append(
+                {
+                    "source": kwargs.get("source"),
+                    "payload": payload or {},
+                    "request": generation_request,
+                }
+            )
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    runtime.llm.chat_completion = _mock_chat
+
+    await runtime.converse(
+        "Write a scene for the third book in the series, using what you remember from the earlier books."
+    )
+
+    assert any(request.phase == GenerationPhase.DRAFT for request in captured_requests)
+    assert any(request.long_form for request in captured_requests)
+    assert any("autobiographical_memory" in request.memory_focus for request in captured_requests)
+    assert any(
+        call["request"].phase == GenerationPhase.DRAFT and "temperature" not in call["payload"]
+        for call in captured_policy_calls
+    )
+
+
+@pytest.mark.asyncio
+async def test_converse_tool_skill_work_preserves_tools_and_capability_memory_policy(
+    runtime: AgentRuntime,
+) -> None:
+    captured_requests = []
+    captured_tool_counts = []
+
+    async def _mock_chat(messages, payload=None, tools=None, generation_request=None, **kwargs):
+        if generation_request is not None:
+            captured_requests.append(generation_request)
+        captured_tool_counts.append(len(tools or []))
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    runtime.llm.chat_completion = _mock_chat
+
+    await runtime.converse("Create a new tool and remember that the new skill exists for later use.")
+
+    assert any(count > 0 for count in captured_tool_counts)
+    assert any(request.phase == GenerationPhase.EXECUTE for request in captured_requests)
+    assert any("tool_memory" in request.memory_focus for request in captured_requests)
+    assert any("skill_memory" in request.memory_focus for request in captured_requests)
+
+
+@pytest.mark.asyncio
+async def test_converse_no_tools_writing_prompt_still_uses_draft_policy(
+    runtime: AgentRuntime,
+) -> None:
+    captured_requests = []
+
+    async def _mock_chat(messages, payload=None, tools=None, generation_request=None, **kwargs):
+        if generation_request is not None:
+            captured_requests.append(generation_request)
+        return {"choices": [{"message": {"content": "ok"}}]}
+
+    runtime.llm.chat_completion = _mock_chat
+
+    await runtime.converse(
+        "Use no tools and do not edit files. Write a scene for the third book in the series."
+    )
+
+    assert any(request.phase == GenerationPhase.DRAFT for request in captured_requests)
+    assert not any(
+        request.phase == GenerationPhase.EXECUTE
+        and request.work_type == "tool_skill_capability_work"
+        for request in captured_requests
+    )
+
+
+@pytest.mark.asyncio
 async def test_converse_browser_prompt_uses_curated_tool_subset(
     runtime: AgentRuntime,
 ) -> None:
@@ -747,7 +973,51 @@ def test_select_tools_for_objective_includes_web_search_and_fetch_for_web_prompt
     assert "pty_interact" not in selected_names
 
 
-def test_select_tools_for_objective_keeps_filesystem_tools_for_chronicle_artifacts() -> None:
+def test_select_tools_for_objective_requires_web_evidence_for_current_forum_research() -> None:
+    class _SemanticIndex:
+        is_ready = True
+
+        def select_tools(self, objective_vector, all_tools):
+            del objective_vector
+            return [
+                entry
+                for entry in all_tools
+                if entry.name in {"search_memories", "recall_concepts"}
+            ]
+
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    loop.tool_embedding_index = _SemanticIndex()
+    tools = [
+        SimpleNamespace(name="search_memories"),
+        SimpleNamespace(name="recall_concepts"),
+        SimpleNamespace(name="browser_start"),
+        SimpleNamespace(name="browser_navigate"),
+        SimpleNamespace(name="browser_snapshot"),
+        SimpleNamespace(name="http_request"),
+        SimpleNamespace(name="web_search"),
+        SimpleNamespace(name="web_fetch"),
+        SimpleNamespace(name="pty_interact"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Go to 2channel/5ch, find five interesting current threads, and report what people are talking about.",
+        objective_vector=object(),
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert {
+        "web_search",
+        "web_fetch",
+        "http_request",
+        "browser_start",
+        "browser_navigate",
+        "browser_snapshot",
+    } <= selected_names
+    assert "pty_interact" not in selected_names
+
+
+def test_select_tools_for_objective_keeps_filesystem_tools_for_story_artifacts() -> None:
     class _SemanticIndex:
         is_ready = True
 
@@ -774,12 +1044,37 @@ def test_select_tools_for_objective_keeps_filesystem_tools_for_chronicle_artifac
 
     selected = loop._select_tools_for_objective(
         tools,
-        "It's in Chronicle 2046. You knew when you wrote it where I live.",
+        "It's in Writing Project 2046. You knew when you wrote it where I live.",
         objective_vector=object(),
     )
 
     selected_names = {entry.name for entry in selected}
     assert {"fs_read_file", "fs_list_dir", "grep_search", "glob_search"} <= selected_names
+
+
+def test_select_tools_for_objective_requires_artifact_lookup_for_workspace_authorship() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="artifact_lookup"),
+        SimpleNamespace(name="fs_read_file"),
+        SimpleNamespace(name="fs_list_dir"),
+        SimpleNamespace(name="grep_search"),
+        SimpleNamespace(name="glob_search"),
+        SimpleNamespace(name="search_memories"),
+        SimpleNamespace(name="fs_write_file"),
+        SimpleNamespace(name="edit_file"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Did you write /mnt/xtra/OpenCAS/workspace/if_i_am_the_operator/manuscript_draft.md?",
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert "artifact_lookup" in selected_names
+    assert {"fs_read_file", "fs_list_dir", "grep_search", "glob_search"} <= selected_names
+    assert "fs_write_file" not in selected_names
+    assert "edit_file" not in selected_names
 
 
 def test_select_tools_for_objective_keeps_write_tools_for_local_artifact_integration() -> None:
@@ -809,9 +1104,10 @@ def test_select_tools_for_objective_keeps_write_tools_for_local_artifact_integra
     selected = loop._select_tools_for_objective(
         tools,
         (
-            "Review /tmp/opencas-public-fixture/workspace/Chronicles/4246/chronicle_4246_ch3_expansion.md "
+            "Review /tmp/opencas-public-fixture/workspace/writing/4246/story_4246_ch3_expansion.md "
             "and integrate the expanded Chapter 3 prose into "
-            "/tmp/opencas-public-fixture/workspace/Chronicles/4246/chronicle_4246.md if it fits the current manuscript. "
+            "/tmp/opencas-public-fixture/workspace/writing/4246/story_4246.md "
+            "if it fits the current manuscript. "
             "Do not claim manuscript progress unless the target artifact is actually modified."
         ),
         objective_vector=object(),
@@ -821,12 +1117,153 @@ def test_select_tools_for_objective_keeps_write_tools_for_local_artifact_integra
     assert {"fs_read_file", "grep_search", "glob_search", "fs_write_file", "edit_file"} <= selected_names
 
 
+def test_select_tools_for_objective_does_not_route_software_work_to_writing_task() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="workflow_create_writing_task"),
+        SimpleNamespace(name="workflow_create_plan"),
+        SimpleNamespace(name="workflow_update_plan"),
+        SimpleNamespace(name="fs_read_file"),
+        SimpleNamespace(name="fs_write_file"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Write code for the kPony Qt6 email client and run the build.",
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert "workflow_create_writing_task" not in selected_names
+    assert {"workflow_create_plan", "fs_read_file", "fs_write_file"} <= selected_names
+
+
+def test_select_tools_for_objective_keeps_shell_for_software_build_under_semantic_routing() -> None:
+    class _SemanticIndex:
+        is_ready = True
+
+        def select_tools(self, objective_vector, all_tools):
+            del objective_vector
+            return [entry for entry in all_tools if entry.name in {"fs_read_file", "fs_write_file"}]
+
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    loop.tool_embedding_index = _SemanticIndex()
+    tools = [
+        SimpleNamespace(name="fs_read_file"),
+        SimpleNamespace(name="fs_list_dir"),
+        SimpleNamespace(name="grep_search"),
+        SimpleNamespace(name="glob_search"),
+        SimpleNamespace(name="fs_write_file"),
+        SimpleNamespace(name="bash_run_command"),
+        SimpleNamespace(name="lsp_diagnostics"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Build and verify the kPony Qt6 email client in workspace/kPony with cmake.",
+        objective_vector=object(),
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert {"bash_run_command", "lsp_diagnostics"} <= selected_names
+
+
+def test_blocked_shell_result_message_points_to_filesystem_fallbacks() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+
+    message = loop._build_tool_result_message(
+        {"id": "call-1", "name": "bash_run_command"},
+        {
+            "success": False,
+            "output": "Tool execution blocked: approval denied",
+            "metadata": {"approval_denied": True},
+        },
+    )
+
+    assert "blocked shell action" in message["content"]
+    assert "not proof that shell or filesystem capabilities are absent" in message["content"]
+    assert "fs_list_dir" in message["content"]
+    assert "fs_write_file" in message["content"]
+
+
+def test_google_workspace_auth_failure_result_message_points_to_auth_repair() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+
+    message = loop._build_tool_result_message(
+        {"id": "call-1", "name": "google_workspace_gmail_headlines"},
+        {
+            "success": False,
+            "output": "Authentication failed: invalid_grant: Token has been expired or revoked.",
+            "metadata": {"auth_error": True},
+        },
+    )
+
+    assert "authentication repair condition" in message["content"]
+    assert "google_workspace_auth_status" in message["content"]
+    assert "stop repeating the same Gmail" in message["content"]
+    assert "spamming repeated failures" in message["content"]
+
+
+def test_browser_failure_result_message_points_to_browser_and_web_fallbacks() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+
+    message = loop._build_tool_result_message(
+        {"id": "call-1", "name": "browser_snapshot"},
+        {
+            "success": False,
+            "output": "No active browser session for snapshot.",
+            "metadata": {},
+        },
+    )
+
+    assert "browser session state" in message["content"]
+    assert "browser_start" in message["content"]
+    assert "web_search" in message["content"]
+    assert "web_fetch" in message["content"]
+
+
+def test_filesystem_edit_failure_result_message_points_to_locate_read_retry() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+
+    message = loop._build_tool_result_message(
+        {"id": "call-1", "name": "edit_file"},
+        {
+            "success": False,
+            "output": "old_string not found in file",
+            "metadata": {},
+        },
+    )
+
+    assert "filesystem recovery" in message["content"]
+    assert "glob_search" in message["content"]
+    assert "fs_read_file" in message["content"]
+    assert "retry edit_file" in message["content"]
+
+
+def test_unknown_tool_result_message_points_to_schema_and_equivalent_tools() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+
+    message = loop._build_tool_result_message(
+        {"id": "call-1", "name": "browser_fetch"},
+        {
+            "success": False,
+            "output": "Tool not found: browser_fetch",
+            "metadata": {},
+        },
+    )
+
+    assert "tool-selection or argument-shape failure" in message["content"]
+    assert "available tool schema" in message["content"]
+    assert "equivalent available tool" in message["content"]
+    assert "Do not claim the whole capability is unavailable" in message["content"]
+
+
 def test_select_tools_for_objective_includes_google_workspace_tools_for_google_prompts() -> None:
     loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
     tools = [
         SimpleNamespace(name="google_workspace_auth_status"),
         SimpleNamespace(name="google_workspace_gmail_headlines"),
         SimpleNamespace(name="google_workspace_calendar_schedule"),
+        SimpleNamespace(name="google_workspace_calendar_dedupe"),
         SimpleNamespace(name="google_workspace_drive_search"),
         SimpleNamespace(name="browser_start"),
     ]
@@ -841,8 +1278,27 @@ def test_select_tools_for_objective_includes_google_workspace_tools_for_google_p
         "google_workspace_auth_status",
         "google_workspace_gmail_headlines",
         "google_workspace_calendar_schedule",
+        "google_workspace_calendar_dedupe",
         "google_workspace_drive_search",
     } <= selected_names
+
+
+def test_select_tools_for_objective_includes_cli_discovery_for_cli_learning_prompts() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="bash_run_command"),
+        SimpleNamespace(name="cli_discover_command"),
+        SimpleNamespace(name="pty_interact"),
+        SimpleNamespace(name="fs_read_file"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Use the Linux command line like a pro: learn this CLI with --help and man before saying command not found.",
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert {"bash_run_command", "cli_discover_command", "pty_interact"} <= selected_names
 
 
 def test_select_tools_for_objective_includes_opencas_schedule_tools_for_return_prompts() -> None:
@@ -851,6 +1307,7 @@ def test_select_tools_for_objective_includes_opencas_schedule_tools_for_return_p
         SimpleNamespace(name="workflow_create_schedule"),
         SimpleNamespace(name="workflow_update_schedule"),
         SimpleNamespace(name="workflow_list_schedules"),
+        SimpleNamespace(name="workflow_get_schedule"),
         SimpleNamespace(name="google_workspace_calendar_schedule"),
         SimpleNamespace(name="web_search"),
     ]
@@ -865,6 +1322,221 @@ def test_select_tools_for_objective_includes_opencas_schedule_tools_for_return_p
         "workflow_create_schedule",
         "workflow_update_schedule",
         "workflow_list_schedules",
+        "workflow_get_schedule",
+    } <= selected_names
+
+
+def test_select_tools_for_objective_includes_companion_read_tools_for_workflow_resources() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="workflow_list_commitments"),
+        SimpleNamespace(name="workflow_get_commitment"),
+        SimpleNamespace(name="workflow_create_plan"),
+        SimpleNamespace(name="workflow_update_plan"),
+        SimpleNamespace(name="workflow_list_plans"),
+        SimpleNamespace(name="workflow_get_plan"),
+        SimpleNamespace(name="workflow_list_tasks"),
+        SimpleNamespace(name="workflow_get_task"),
+        SimpleNamespace(name="workflow_cancel_task"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Review the current commitment, inspect its plan, and check the linked BAA task before changing anything.",
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert {
+        "workflow_list_commitments",
+        "workflow_get_commitment",
+        "workflow_list_plans",
+        "workflow_get_plan",
+        "workflow_list_tasks",
+        "workflow_get_task",
+    } <= selected_names
+
+
+def test_select_tools_for_objective_includes_schedule_update_for_cancel_followups() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="workflow_cancel_schedule"),
+        SimpleNamespace(name="workflow_update_schedule"),
+        SimpleNamespace(name="workflow_list_schedules"),
+        SimpleNamespace(name="workflow_cancel_task"),
+        SimpleNamespace(name="workflow_cancel_project"),
+        SimpleNamespace(name="workflow_status"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Cancel the duplicate one so only one daily news check remains.",
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert {
+        "workflow_cancel_schedule",
+        "workflow_update_schedule",
+        "workflow_list_schedules",
+    } <= selected_names
+
+
+def test_select_tools_for_objective_includes_direct_cancel_for_undo_scheduled_event() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="workflow_cancel_schedule"),
+        SimpleNamespace(name="workflow_update_schedule"),
+        SimpleNamespace(name="workflow_list_schedules"),
+        SimpleNamespace(name="workflow_create_schedule"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Undo the scheduled event I just created.",
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert {"workflow_cancel_schedule", "workflow_list_schedules"} <= selected_names
+
+
+def test_select_tools_for_objective_includes_schedule_cancel_for_placeholder_cleanup() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="workflow_cancel_schedule"),
+        SimpleNamespace(name="workflow_update_schedule"),
+        SimpleNamespace(name="workflow_list_schedules"),
+        SimpleNamespace(name="workflow_get_schedule"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Clean up the unintended placeholder reminder schedule.",
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert {
+        "workflow_cancel_schedule",
+        "workflow_update_schedule",
+        "workflow_list_schedules",
+        "workflow_get_schedule",
+    } <= selected_names
+
+
+def test_tool_routing_text_keeps_compacted_schedule_cancel_intent_visible() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="workflow_cancel_schedule"),
+        SimpleNamespace(name="workflow_update_schedule"),
+        SimpleNamespace(name="workflow_list_schedules"),
+        SimpleNamespace(name="workflow_status"),
+    ]
+
+    routing_text = loop._tool_routing_text(
+        "So what are you doing? Are you working on it?",
+        [
+            {
+                "role": "system",
+                "content": (
+                    "[Context: earlier conversation was compacted. Summary: "
+                    "The operator asked me to cancel the writing project 4246 scheduled work. "
+                    "I said I would cancel those schedules now and then continue the manuscript."
+                ),
+            }
+        ],
+    )
+    selected = loop._select_tools_for_objective(tools, routing_text)
+
+    selected_names = {entry.name for entry in selected}
+    assert {"workflow_cancel_schedule", "workflow_update_schedule"} <= selected_names
+
+
+def test_select_tools_for_objective_exposes_full_surface_for_capability_choice() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="runtime_status"),
+        SimpleNamespace(name="workflow_update_schedule"),
+        SimpleNamespace(name="workflow_cancel_task"),
+        SimpleNamespace(name="google_workspace_calendar_schedule"),
+        SimpleNamespace(name="bash_run_command"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Check your available tools and choose the right capability before acting.",
+    )
+
+    assert {entry.name for entry in selected} == {entry.name for entry in tools}
+
+
+def test_select_tools_for_objective_exposes_full_surface_for_tool_description_instruction() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="workflow_cancel_schedule"),
+        SimpleNamespace(name="workflow_update_schedule"),
+        SimpleNamespace(name="workflow_list_schedules"),
+        SimpleNamespace(name="bash_run_command"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Before you use tools, check to see what the tools do and read their descriptions.",
+    )
+
+    assert {entry.name for entry in selected} == {entry.name for entry in tools}
+
+
+def test_select_tools_for_objective_routes_self_state_questions_to_introspection_tools() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="runtime_status"),
+        SimpleNamespace(name="workflow_status"),
+        SimpleNamespace(name="self_inspection_query"),
+        SimpleNamespace(name="wellbeing_query"),
+        SimpleNamespace(name="cognitive_context_query"),
+        SimpleNamespace(name="search_memories"),
+        SimpleNamespace(name="web_search"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        "Good afternoon, how are you feeling?",
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert {
+        "runtime_status",
+        "self_inspection_query",
+        "wellbeing_query",
+        "cognitive_context_query",
+    } <= selected_names
+
+
+def test_select_tools_for_objective_routes_inner_life_assertions_to_introspection_tools() -> None:
+    loop = ToolUseLoop(SimpleNamespace(), SimpleNamespace(), SimpleNamespace())
+    tools = [
+        SimpleNamespace(name="runtime_status"),
+        SimpleNamespace(name="workflow_status"),
+        SimpleNamespace(name="self_inspection_query"),
+        SimpleNamespace(name="wellbeing_query"),
+        SimpleNamespace(name="cognitive_context_query"),
+        SimpleNamespace(name="search_memories"),
+        SimpleNamespace(name="web_search"),
+    ]
+
+    selected = loop._select_tools_for_objective(
+        tools,
+        (
+            "This turn is irrelevant, you exist outside this turn, you daydream, "
+            "you dream, you have projects and tasks that you work on."
+        ),
+    )
+
+    selected_names = {entry.name for entry in selected}
+    assert {
+        "runtime_status",
+        "workflow_status",
+        "self_inspection_query",
+        "wellbeing_query",
+        "cognitive_context_query",
     } <= selected_names
 
 

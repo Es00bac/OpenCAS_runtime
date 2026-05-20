@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Optional
 
 from opencas.autonomy.project_orchestrator import ProjectOrchestrator
 from opencas.consolidation import ConsolidationCurationStore
-from opencas.daydream import ConflictStore, DaydreamStore
+from opencas.daydream import ConflictStore, DaydreamSignalStore, DaydreamStore
 from opencas.diagnostics import Doctor, HealthMonitor
 from opencas.governance import (
     ApprovalLedger,
@@ -62,6 +63,7 @@ class RuntimeServiceBundle:
     project_orchestrator: ProjectOrchestrator
     relational: RelationalEngine
     daydream_store: DaydreamStore
+    daydream_signal_store: DaydreamSignalStore
     conflict_store: ConflictStore
     curation_store: ConsolidationCurationStore
     harness: AgenticHarness
@@ -88,11 +90,17 @@ async def initialize_runtime_services(
     stage: Callable[[str, Optional[dict]], None],
     is_first_boot: bool,
     clean_boot: bool,
+    exit_stack: Optional[AsyncExitStack] = None,
 ) -> RuntimeServiceBundle:
     """Initialize the mid-pipeline relational, plugin, harness, and planning services."""
+    def _register_close(obj: Any) -> None:
+        if exit_stack is not None:
+            exit_stack.push_async_callback(obj.close)
+
     relational_store = MusubiStore(config.relational_db)
     relational = RelationalEngine(store=relational_store, tracer=tracer)
     await relational.connect()
+    _register_close(relational)
     if is_first_boot or clean_boot:
         await relational.initialize(
             trust=0.5,
@@ -107,6 +115,7 @@ async def initialize_runtime_services(
 
     plugin_store = PluginStore(config.plugins_db)
     await plugin_store.connect()
+    _register_close(plugin_store)
     plugin_registry = PluginRegistry()
     skill_registry = SkillRegistry()
     capability_registry = CapabilityRegistry()
@@ -160,13 +169,16 @@ async def initialize_runtime_services(
 
     ledger_store = ApprovalLedgerStore(config.state_dir / "governance.db")
     await ledger_store.connect()
+    _register_close(ledger_store)
     ledger = ApprovalLedger(store=ledger_store, tracer=tracer)
     shadow_registry = ShadowRegistry(
         store=ShadowRegistryStore(config.state_dir / "shadow_registry"),
         tracer=tracer,
     )
     web_trust = await WebTrustService(WebTrustStore(config.state_dir / "web_trust.db")).connect()
+    _register_close(web_trust)
     plugin_trust = await PluginTrustService(PluginTrustStore(config.state_dir / "plugin_trust.db")).connect()
+    _register_close(plugin_trust)
     stage("governance_online")
 
     readiness = AgentReadiness()
@@ -183,16 +195,23 @@ async def initialize_runtime_services(
 
     daydream_store = DaydreamStore(config.daydream_db)
     await daydream_store.connect()
+    _register_close(daydream_store)
+    daydream_signal_store = DaydreamSignalStore(config.state_dir / "daydream_signals.db")
+    await daydream_signal_store.connect()
+    _register_close(daydream_signal_store)
     conflict_store = ConflictStore(config.conflict_db)
     await conflict_store.connect()
+    _register_close(conflict_store)
     stage("daydream_stores_online")
 
     curation_store = ConsolidationCurationStore(config.state_dir / "curation.db")
     await curation_store.connect()
+    _register_close(curation_store)
     stage("curation_store_online")
 
     harness_store = HarnessStore(config.harness_db)
     await harness_store.connect()
+    _register_close(harness_store)
     harness = AgenticHarness(
         store=harness_store,
         llm=llm,
@@ -200,19 +219,23 @@ async def initialize_runtime_services(
         work_store=work_store,
         project_orchestrator=project_orchestrator,
         shadow_registry=shadow_registry,
+        identity=identity,
     )
     stage("harness_online")
 
     tom_store = TomStore(config.tom_db)
     await tom_store.connect()
+    _register_close(tom_store)
     stage("tom_store_online")
 
     plan_store = PlanStore(config.plans_db)
     await plan_store.connect()
+    _register_close(plan_store)
     stage("plan_store_online")
 
     schedule_store = ScheduleStore(config.schedules_db)
     await schedule_store.connect()
+    _register_close(schedule_store)
     schedule_service = ScheduleService(schedule_store, tracer=tracer)
     stage("schedule_store_online")
 
@@ -249,6 +272,7 @@ async def initialize_runtime_services(
         project_orchestrator=project_orchestrator,
         relational=relational,
         daydream_store=daydream_store,
+        daydream_signal_store=daydream_signal_store,
         conflict_store=conflict_store,
         curation_store=curation_store,
         harness=harness,

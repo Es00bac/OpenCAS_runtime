@@ -13,7 +13,8 @@ import re
 import shutil
 import subprocess
 import tempfile
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 from urllib.parse import parse_qs, urlparse
@@ -30,6 +31,10 @@ from .capture import DesktopCapture, capture_desktop_image, run_tesseract_ocr
 from .media import MprisMediaController
 
 
+BODY_DOUBLE_AUDIO_CLIENT_NAME = "OpenCAS Body Double"
+BODY_DOUBLE_AUDIO_VOLUME_PERCENT = 100
+
+
 class DesktopContextConfig(BaseModel):
     """Operator-controlled settings for desktop observation."""
 
@@ -38,6 +43,8 @@ class DesktopContextConfig(BaseModel):
     min_speech_interval_seconds: int = Field(default=60, ge=0)
     tts_enabled: bool = True
     play_audio: bool = True
+    audio_output_sink: Optional[str] = None
+    pause_media_while_speaking: bool = True
     vision_enabled: bool = True
     ocr_enabled: bool = True
     capture_backend: str = "auto"
@@ -76,12 +83,16 @@ class DesktopContextConfig(BaseModel):
     media_commentary_request: Optional[str] = None
     media_commentary_request_source: Optional[str] = None
     media_commentary_request_text: Optional[str] = None
+    media_commentary_cadence: str = "normal"
+    media_commentary_response_style: str = "balanced"
+    media_commentary_detail: str = "normal"
     livestream_resume_catchup_enabled: bool = True
     livestream_resume_catchup_rate: float = Field(default=1.5, ge=1.0, le=2.0)
     livestream_resume_catchup_max_seconds: float = Field(default=90.0, ge=0.0, le=600.0)
     max_spoken_chars: int = Field(default=360, ge=80, le=1000)
     max_ocr_chars: int = Field(default=4000, ge=0, le=24000)
     max_image_bytes: int = Field(default=5_000_000, ge=1)
+    screenshot_storage_limit_bytes: int = Field(default=1_000_000_000, ge=1)
     vision_max_dimension: int = Field(default=1600, ge=320, le=4096)
     vision_jpeg_quality: int = Field(default=82, ge=30, le=95)
 
@@ -97,6 +108,7 @@ class DesktopContextConfig(BaseModel):
         "declared_task",
         "declared_task_source",
         "declared_task_updated_at",
+        "audio_output_sink",
         "yt_dlp_path",
         "live_transcription_whisper_model",
         "live_transcription_audio_input",
@@ -116,9 +128,65 @@ class DesktopContextConfig(BaseModel):
         cleaned = str(value).strip()
         return cleaned or None
 
+    @field_validator("media_commentary_cadence", mode="before")
+    @classmethod
+    def _normalize_media_commentary_cadence(cls, value: Any) -> str:
+        cleaned = str(value or "normal").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "fast": "frequent",
+            "faster": "frequent",
+            "more": "frequent",
+            "more_often": "frequent",
+            "frequently": "frequent",
+            "quiet": "sparse",
+            "quieter": "sparse",
+            "slow": "sparse",
+            "slower": "sparse",
+            "less": "sparse",
+            "less_often": "sparse",
+        }
+        cleaned = aliases.get(cleaned, cleaned)
+        return cleaned if cleaned in {"sparse", "normal", "frequent"} else "normal"
+
+    @field_validator("media_commentary_response_style", mode="before")
+    @classmethod
+    def _normalize_media_commentary_response_style(cls, value: Any) -> str:
+        cleaned = str(value or "balanced").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "facts": "grounded",
+            "factual": "grounded",
+            "factually_grounded": "grounded",
+            "evidence": "grounded",
+            "evidence_based": "grounded",
+            "opinion": "opinionated",
+            "opinions": "opinionated",
+            "hot_take": "opinionated",
+        }
+        cleaned = aliases.get(cleaned, cleaned)
+        return cleaned if cleaned in {"balanced", "opinionated", "grounded"} else "balanced"
+
+    @field_validator("media_commentary_detail", mode="before")
+    @classmethod
+    def _normalize_media_commentary_detail(cls, value: Any) -> str:
+        cleaned = str(value or "normal").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "short": "concise",
+            "shorter": "concise",
+            "brief": "concise",
+            "long": "detailed",
+            "longer": "detailed",
+            "deep": "detailed",
+            "deeper": "detailed",
+        }
+        cleaned = aliases.get(cleaned, cleaned)
+        return cleaned if cleaned in {"concise", "normal", "detailed"} else "normal"
+
 
 class DesktopContextService:
     """Capture the active desktop and turn it into durable collaboration context."""
+
+    _PROVIDER_RATE_LIMIT_BACKOFF_SECONDS = 120.0
+    _PROVIDER_CIRCUIT_BACKOFF_SECONDS = 70.0
 
     def __init__(
         self,
@@ -141,7 +209,7 @@ class DesktopContextService:
         self._capture_provider = capture_provider
         self._ocr_provider = ocr_provider
         self._speech_synthesizer = speech_synthesizer
-        self._audio_player = audio_player or play_audio_file
+        self._audio_player = audio_player
         self._media_controller = media_controller or MprisMediaController()
         self._youtube_transcript_provider = youtube_transcript_provider
         self._live_transcript_provider = live_transcript_provider
@@ -149,15 +217,29 @@ class DesktopContextService:
         self._project_relevance_cache: Optional[list[dict[str, str]]] = None
         self._last_live_transcript_at_by_media: dict[str, datetime] = {}
         self._last_live_transcript_payload_by_media: dict[str, dict[str, Any]] = {}
+        self._live_transcription_processes: set[subprocess.Popen[Any]] = set()
+        self._live_transcription_process_lock = threading.Lock()
         self._livestream_rate_restore_tasks: set[asyncio.Task[Any]] = set()
+        self._llm_backoff_until: Optional[datetime] = None
+        self._llm_backoff_reason: str = ""
+        self._speech_lock = asyncio.Lock()
+        self._active_audio_process: Optional[subprocess.Popen[Any]] = None
+        self._active_audio_process_lock = threading.Lock()
         self.config = config or self._load_config()
+        self._prune_screenshot_storage()
 
     def status(self) -> dict[str, Any]:
         """Return a dashboard/tool-friendly status snapshot."""
 
         events = self._list_events(limit=50)
+        latest_screenshot = self._latest_screenshot_snapshot()
+        capture_schedule = self._capture_schedule_snapshot(
+            latest_screenshot.get("captured_at") if latest_screenshot else None
+        )
+        llm_backoff = self._llm_backoff_status()
         return {
             "config": self.config.model_dump(),
+            "audio_output": self._audio_output_status(),
             "paths": {
                 "root": str(self.root),
                 "screenshots": str(self._screenshots_dir()),
@@ -173,7 +255,92 @@ class DesktopContextService:
             "last_event": events[-1] if events else None,
             "last_observed_at": self._last_event_at("observed"),
             "last_spoken_at": self._last_event_at("spoken"),
+            "last_captured_at": latest_screenshot.get("captured_at") if latest_screenshot else None,
+            "latest_screenshot": latest_screenshot,
+            "capture_schedule": capture_schedule,
+            "next_capture_at": capture_schedule.get("next_capture_at"),
+            "next_capture_in_seconds": capture_schedule.get("seconds_remaining"),
+            "llm_backoff": llm_backoff,
         }
+
+    def _llm_backoff_status(self) -> Optional[dict[str, Any]]:
+        until = self._llm_backoff_until
+        if until is None:
+            return None
+        now = self._now()
+        if until <= now:
+            self._llm_backoff_until = None
+            self._llm_backoff_reason = ""
+            return None
+        return {
+            "active": True,
+            "reason": self._llm_backoff_reason or "provider_backoff",
+            "until": until.isoformat(),
+            "remaining_seconds": round((until - now).total_seconds(), 3),
+        }
+
+    def _provider_pressure_backoff_seconds(self, exc: Exception) -> Optional[float]:
+        detail = str(exc or "")
+        lowered = detail.lower()
+        exc_name = type(exc).__name__
+        if exc_name == "ProviderCircuitOpen" or "circuit open" in lowered:
+            return self._PROVIDER_CIRCUIT_BACKOFF_SECONDS
+        response = getattr(exc, "response", None)
+        status = getattr(response, "status_code", None)
+        try:
+            parsed_status = int(status)
+        except (TypeError, ValueError):
+            parsed_status = None
+        if parsed_status == 429 or "too many requests" in lowered:
+            retry_after = self._retry_after_seconds(response)
+            return retry_after if retry_after is not None else self._PROVIDER_RATE_LIMIT_BACKOFF_SECONDS
+        return None
+
+    def _retry_after_seconds(self, response: Any) -> Optional[float]:
+        headers = getattr(response, "headers", None)
+        if headers is None:
+            return None
+        try:
+            value = headers.get("retry-after")
+        except Exception:
+            return None
+        if value is None:
+            return None
+        try:
+            seconds = float(value)
+        except (TypeError, ValueError):
+            return None
+        return max(0.0, min(600.0, seconds))
+
+    def _provider_pressure_reason(self, exc: Exception) -> str:
+        detail = str(exc or "").lower()
+        if type(exc).__name__ == "ProviderCircuitOpen" or "circuit open" in detail:
+            return "provider_circuit_open"
+        return "provider_rate_limited"
+
+    def _record_provider_backoff(self, exc: Exception, *, source: str) -> bool:
+        seconds = self._provider_pressure_backoff_seconds(exc)
+        if seconds is None:
+            return False
+        reason = self._provider_pressure_reason(exc)
+        until = self._now() + timedelta(seconds=seconds)
+        if self._llm_backoff_until is None or until > self._llm_backoff_until:
+            self._llm_backoff_until = until
+            self._llm_backoff_reason = reason
+        payload = {
+            "source": source,
+            "reason": reason,
+            "backoff_seconds": round(seconds, 3),
+            "until": self._llm_backoff_until.isoformat(),
+        }
+        self._event("llm_provider_backoff", payload)
+        tracer = getattr(self.runtime, "_trace", None)
+        if callable(tracer):
+            try:
+                tracer("desktop_context_llm_provider_backoff", payload)
+            except Exception:
+                pass
+        return True
 
     def configure(self, **updates: Any) -> dict[str, Any]:
         """Update persisted desktop-context settings."""
@@ -184,9 +351,15 @@ class DesktopContextService:
             "declared_task",
             "declared_task_source",
             "declared_task_updated_at",
+            "audio_output_sink",
             "live_transcription_audio_input",
             "live_transcription_ffmpeg_path",
             "live_transcription_whisper_path",
+            "media_commentary_requested_at",
+            "media_commentary_source",
+            "media_commentary_request",
+            "media_commentary_request_source",
+            "media_commentary_request_text",
         }
         for key, value in updates.items():
             if key not in allowed:
@@ -194,6 +367,33 @@ class DesktopContextService:
             if value is None and key not in nullable_fields:
                 continue
             clean_updates[key] = value
+        if clean_updates.get("enabled") is False:
+            clean_updates.update(
+                {
+                    "media_commentary_mode_enabled": False,
+                    "proactive_video_commentary_enabled": False,
+                    "live_transcription_enabled": False,
+                    "tts_enabled": False,
+                    "play_audio": False,
+                    "media_commentary_requested_at": None,
+                    "media_commentary_source": None,
+                    "media_commentary_request": None,
+                    "media_commentary_request_source": None,
+                    "media_commentary_request_text": None,
+                    "media_commentary_cadence": "normal",
+                    "media_commentary_response_style": "balanced",
+                    "media_commentary_detail": "normal",
+                }
+            )
+        natural_language_request = str(
+            clean_updates.get("media_commentary_request")
+            or clean_updates.get("media_commentary_request_text")
+            or ""
+        ).strip()
+        if natural_language_request:
+            clean_updates.update(self._media_commentary_preference_updates(natural_language_request))
+        if clean_updates.get("enabled") is False or clean_updates.get("live_transcription_enabled") is False:
+            self._stop_live_transcription_processes()
         if "declared_task" in clean_updates:
             task_text = str(clean_updates.get("declared_task") or "").strip()
             if task_text:
@@ -209,9 +409,13 @@ class DesktopContextService:
                 clean_updates["declared_task_updated_at"] = None
         payload = {**self.config.model_dump(), **clean_updates}
         self.config = DesktopContextConfig(**payload)
+        quota = self._prune_screenshot_storage()
         self._save_config()
-        event = self._event("configured", {"updates": clean_updates})
-        return {"config": self.config.model_dump(), "event": event}
+        event_payload: dict[str, Any] = {"updates": clean_updates}
+        if quota["deleted_count"]:
+            event_payload["screenshot_storage"] = quota
+        event = self._event("configured", event_payload)
+        return {"config": self.config.model_dump(), "event": event, "screenshot_storage": quota}
 
     async def capture_once(self, *, force: bool = False) -> dict[str, Any]:
         """Capture one screenshot and optional OCR payload."""
@@ -240,25 +444,31 @@ class DesktopContextService:
         ocr_text = ""
         if self.config.ocr_enabled:
             try:
-                ocr_text = await self._call_maybe_async(self._ocr_provider or run_tesseract_ocr, capture.path)
+                ocr_text = await self._call_maybe_async(
+                    self._ocr_provider or run_tesseract_ocr,
+                    capture.path,
+                    offload_sync=True,
+                )
             except Exception:
                 ocr_text = ""
             if self.config.max_ocr_chars and len(ocr_text) > self.config.max_ocr_chars:
                 ocr_text = ocr_text[: self.config.max_ocr_chars].rstrip()
 
+        quota = self._prune_screenshot_storage()
         payload = {
             "status": "captured",
             "capture": self._capture_to_dict(capture),
             "ocr_text": ocr_text,
+            "screenshot_storage": quota,
         }
-        payload["event"] = self._event(
-            "captured",
-            {
-                "path": str(capture.path),
-                "backend": capture.backend,
-                "ocr_chars": len(ocr_text),
-            },
-        )
+        event_payload = {
+            "path": str(capture.path),
+            "backend": capture.backend,
+            "ocr_chars": len(ocr_text),
+        }
+        if quota["deleted_count"]:
+            event_payload["screenshot_storage"] = quota
+        payload["event"] = self._event("captured", event_payload)
         return payload
 
     async def observe_once(
@@ -271,7 +481,8 @@ class DesktopContextService:
     ) -> dict[str, Any]:
         """Capture, analyze, persist context, and optionally speak a short nudge."""
 
-        if not self.config.enabled and not force:
+        started_enabled = bool(self.config.enabled)
+        if not started_enabled and not force:
             return {"status": "skipped", "reason": "disabled"}
         if not force and not self._observation_due():
             return {"status": "skipped", "reason": "not_due"}
@@ -279,76 +490,100 @@ class DesktopContextService:
         capture_result = await self.capture_once(force=True)
         if capture_result.get("status") != "captured":
             return capture_result
+        if started_enabled and not self.config.enabled:
+            return {"status": "skipped", "reason": "disabled_during_observation"}
         await self._enrich_capture_context(capture_result)
+        if started_enabled and not self.config.enabled:
+            return {"status": "skipped", "reason": "disabled_during_observation"}
 
-        analysis = await self._analyze_capture(capture_result, reason=reason)
-        ambiguity = self._media_ambiguity(capture_result)
-        if ambiguity is not None and self.config.media_commentary_mode_enabled:
-            analysis = self._media_ambiguity_analysis(ambiguity, reason=reason)
-            followup = None
-        else:
-            followup = await self._maybe_self_interest_followup(
+        commentary_pause = await self._pause_media_for_commentary_observation(reason=reason)
+        if commentary_pause is not None:
+            capture_result["commentary_observation_media_pause"] = commentary_pause
+        try:
+            analysis = await self._analyze_capture(capture_result, reason=reason)
+            if started_enabled and not self.config.enabled:
+                return {"status": "skipped", "reason": "disabled_during_observation"}
+            ambiguity = self._media_ambiguity(capture_result)
+            if ambiguity is not None and self.config.media_commentary_mode_enabled:
+                analysis = self._media_ambiguity_analysis(ambiguity, reason=reason)
+                followup = None
+            else:
+                followup = await self._maybe_self_interest_followup(
+                    capture_result,
+                    analysis,
+                    reason=reason,
+                    session_id=session_id,
+                )
+            if followup:
+                analysis["self_interest_followup"] = followup
+                if followup.get("should_speak"):
+                    analysis["should_speak"] = True
+                    analysis["speech_intent"] = "screen_relevant"
+                    analysis["speech_relevance_score"] = max(
+                        self._coerce_float(analysis.get("speech_relevance_score"), default=0.0),
+                        self._coerce_float(followup.get("salience"), default=0.0),
+                    )
+                    if followup.get("spoken_text"):
+                        analysis["spoken_text"] = str(followup.get("spoken_text") or "")
+                    analysis["reason"] = "observed media intersects with durable self-interest evidence"
+                    if followup.get("connection_summary"):
+                        analysis["note"] = str(followup.get("connection_summary") or "")
+            if self._analysis_speech_is_media_summary(capture_result, analysis):
+                self._suppress_media_summary_speech(analysis)
+            analysis = self._apply_speech_policy(analysis, reason=reason)
+            analysis = self._apply_media_playback_speech_policy(analysis, capture_result, reason=reason)
+            context_text = self._build_context_text(capture_result, analysis, reason=reason)
+            await self._persist_context(
+                context_text,
                 capture_result,
                 analysis,
                 reason=reason,
                 session_id=session_id,
             )
-        if followup:
-            analysis["self_interest_followup"] = followup
-            if followup.get("should_speak"):
-                analysis["should_speak"] = True
-                analysis["speech_intent"] = "screen_relevant"
-                analysis["speech_relevance_score"] = max(
-                    self._coerce_float(analysis.get("speech_relevance_score"), default=0.0),
-                    self._coerce_float(followup.get("salience"), default=0.0),
+
+            speech: Optional[dict[str, Any]] = None
+            should_speak = bool(analysis.get("should_speak"))
+            speech_requested = self.config.tts_enabled if speak is None else bool(speak)
+            if should_speak and speech_requested:
+                speech = await self._speak_analysis(
+                    analysis,
+                    capture_result,
+                    reason=reason,
+                    force=bool(analysis.get("force_speech")),
                 )
-                if followup.get("spoken_text"):
-                    analysis["spoken_text"] = str(followup.get("spoken_text") or "")
-                analysis["reason"] = "observed media intersects with durable self-interest evidence"
-                if followup.get("connection_summary"):
-                    analysis["note"] = str(followup.get("connection_summary") or "")
-        if self._analysis_speech_is_media_summary(capture_result, analysis):
-            self._suppress_media_summary_speech(analysis)
-        analysis = self._apply_speech_policy(analysis, reason=reason)
-        analysis = self._apply_media_playback_speech_policy(analysis, capture_result, reason=reason)
-        context_text = self._build_context_text(capture_result, analysis, reason=reason)
-        await self._persist_context(
-            context_text,
-            capture_result,
-            analysis,
-            reason=reason,
-            session_id=session_id,
-        )
 
-        speech: Optional[dict[str, Any]] = None
-        should_speak = bool(analysis.get("should_speak"))
-        speech_requested = self.config.tts_enabled if speak is None else bool(speak)
-        if should_speak and speech_requested:
-            speech = await self._speak_analysis(analysis, capture_result, reason=reason)
-
-        payload = {
-            "status": "observed",
-            "reason": reason,
-            "capture": capture_result.get("capture"),
-            "media_context": capture_result.get("media_context") or [],
-            "media_state_changes": capture_result.get("media_state_changes") or [],
-            "youtube_transcript": capture_result.get("youtube_transcript"),
-            "live_transcript": capture_result.get("live_transcript"),
-            "ocr_chars": len(str(capture_result.get("ocr_text") or "")),
-            "analysis": analysis,
-            "speech": speech,
-        }
-        payload["event"] = self._event(
-            "observed",
-            {
+            payload = {
+                "status": "observed",
                 "reason": reason,
-                "capture_path": (capture_result.get("capture") or {}).get("path"),
-                "should_speak": should_speak,
-                "speech_status": speech.get("status") if isinstance(speech, dict) else None,
-                "activity_summary": str(analysis.get("activity_summary") or "")[:240],
-            },
-        )
-        return payload
+                "capture": capture_result.get("capture"),
+                "media_context": capture_result.get("media_context") or [],
+                "media_state_changes": capture_result.get("media_state_changes") or [],
+                "youtube_transcript": capture_result.get("youtube_transcript"),
+                "live_transcript": capture_result.get("live_transcript"),
+                "ocr_chars": len(str(capture_result.get("ocr_text") or "")),
+                "analysis": analysis,
+                "speech": speech,
+            }
+            if commentary_pause is not None:
+                payload["commentary_observation_media_pause"] = commentary_pause
+            payload["event"] = self._event(
+                "observed",
+                {
+                    "reason": reason,
+                    "capture_path": (capture_result.get("capture") or {}).get("path"),
+                    "should_speak": should_speak,
+                    "speech_status": speech.get("status") if isinstance(speech, dict) else None,
+                    "speech_intent": analysis.get("speech_intent"),
+                    "attention_channel": analysis.get("attention_channel"),
+                    "interrupt_priority": self._speech_interrupt_priority(analysis),
+                    "focus_transition": self._coerce_bool(analysis.get("focus_transition")),
+                    "activity_summary": str(analysis.get("activity_summary") or "")[:240],
+                },
+            )
+            return payload
+        finally:
+            if commentary_pause is not None:
+                commentary_pause["resume"] = await self._resume_media_for_commentary_observation(commentary_pause)
 
     async def observe_for_conversation(
         self,
@@ -361,8 +596,34 @@ class DesktopContextService:
 
         if not self.config.enabled:
             return None
+        if self._looks_like_media_commentary_control_request(user_input):
+            self._activate_media_commentary_mode(request=user_input, source=source)
+            note = "\n".join(
+                [
+                    "Body-double desktop context control for this turn:",
+                    "- Media commentary mode was activated directly from the operator request.",
+                    "- Live transcription is enabled for current playing media.",
+                    *self._media_commentary_control_prompt_lines(),
+                    "- No screenshot or LLM-backed observation was needed to process this control command.",
+                ]
+            )
+            return {
+                "status": "configured",
+                "reason": f"media_commentary_control:{source}",
+                "conversation_prompt_note": note,
+                "analysis": {
+                    "should_speak": False,
+                    "activity_summary": "Media commentary mode activated.",
+                    "reason": "media_commentary_control",
+                    "speech_intent": "none",
+                    "speech_relevance_score": 0.0,
+                },
+                "capture": {},
+            }
         if self._looks_like_media_commentary_request(user_input):
             self._activate_media_commentary_mode(request=user_input, source=source)
+        elif self.config.media_commentary_mode_enabled and self._looks_like_media_commentary_tuning_request(user_input):
+            self._tune_media_commentary_mode(request=user_input, source=source)
         result = await self.observe_once(
             force=True,
             reason=f"conversation_context:{source}",
@@ -393,7 +654,7 @@ class DesktopContextService:
                 "path": str(path),
             }
         media_type = mimetypes.guess_type(path.name)[0] or "image/png"
-        width, height = self._image_dimensions(path)
+        width, height = await asyncio.to_thread(self._image_dimensions, path)
         capture = DesktopCapture(
             success=True,
             path=path,
@@ -405,7 +666,11 @@ class DesktopContextService:
         ocr_text = ""
         if self.config.ocr_enabled:
             try:
-                ocr_text = await self._call_maybe_async(self._ocr_provider or run_tesseract_ocr, path)
+                ocr_text = await self._call_maybe_async(
+                    self._ocr_provider or run_tesseract_ocr,
+                    path,
+                    offload_sync=True,
+                )
             except Exception:
                 ocr_text = ""
             if self.config.max_ocr_chars and len(ocr_text) > self.config.max_ocr_chars:
@@ -566,11 +831,12 @@ class DesktopContextService:
     async def _capture(self, target: Path) -> DesktopCapture:
         provider = self._capture_provider
         if provider is not None:
-            return await self._call_maybe_async(provider, target)
+            return await self._call_maybe_async(provider, target, offload_sync=True)
         return await self._call_maybe_async(
             capture_desktop_image,
             target,
             backend=self.config.capture_backend,
+            offload_sync=True,
         )
 
     async def _enrich_capture_context(self, capture_result: dict[str, Any]) -> None:
@@ -584,7 +850,7 @@ class DesktopContextService:
         if ambiguity is not None:
             capture_result["media_ambiguity"] = ambiguity
         transcript: Optional[dict[str, Any]] = None
-        if self.config.youtube_transcripts_enabled and ambiguity is None:
+        if self.config.enabled and self.config.youtube_transcripts_enabled and ambiguity is None:
             youtube_url = self._extract_youtube_url(capture_result, media_context)
             if youtube_url:
                 transcript = await self._retrieve_youtube_transcript(
@@ -593,7 +859,7 @@ class DesktopContextService:
                 )
                 capture_result["youtube_transcript"] = transcript
                 self._apply_youtube_transcript_timing_to_media_context(capture_result, transcript)
-        if self.config.live_transcription_enabled:
+        if self.config.enabled and self.config.live_transcription_enabled:
             live_transcript = await self._retrieve_live_media_transcript(
                 media_context=media_context,
                 youtube_transcript=transcript or capture_result.get("youtube_transcript"),
@@ -606,7 +872,7 @@ class DesktopContextService:
         if not callable(current):
             return []
         try:
-            value = await self._call_maybe_async(current)
+            value = await self._call_maybe_async(current, offload_sync=True)
         except Exception:
             return []
         if not isinstance(value, list):
@@ -617,22 +883,24 @@ class DesktopContextService:
                 continue
             position_us = self._coerce_int(item.get("position_us"))
             length_us = self._coerce_int(item.get("length_us"))
-            cleaned.append(
-                {
-                    "player": str(item.get("player") or ""),
-                    "status": str(item.get("status") or ""),
-                    "title": str(item.get("title") or ""),
-                    "artist": str(item.get("artist") or ""),
-                    "album": str(item.get("album") or ""),
-                    "url": str(item.get("url") or ""),
-                    "length_us": length_us,
-                    "position_us": position_us,
-                    "position_label": self._format_media_position(position_us, length_us),
-                    "progress_percent": self._media_progress_percent(position_us, length_us),
-                    "is_live": item.get("is_live"),
-                    "live_status": str(item.get("live_status") or ""),
-                }
-            )
+            cleaned_item = {
+                "player": str(item.get("player") or ""),
+                "status": str(item.get("status") or ""),
+                "title": str(item.get("title") or ""),
+                "artist": str(item.get("artist") or ""),
+                "album": str(item.get("album") or ""),
+                "url": str(item.get("url") or ""),
+                "length_us": length_us,
+                "position_us": position_us,
+                "position_label": self._format_media_position(position_us, length_us),
+                "progress_percent": self._media_progress_percent(position_us, length_us),
+                "duration_seconds": self._media_item_duration_seconds(item),
+                "duration_label": self._media_item_duration_label(item),
+                "is_live": item.get("is_live"),
+                "live_status": str(item.get("live_status") or ""),
+            }
+            cleaned_item["media_kind"] = self._media_item_playback_kind(cleaned_item)
+            cleaned.append(cleaned_item)
         return cleaned
 
     def _extract_youtube_url(
@@ -713,6 +981,13 @@ class DesktopContextService:
                 "source": "whisper",
                 "mode": "local",
             }
+        if not self.config.enabled or not self.config.live_transcription_enabled:
+            return self._live_transcript_status_payload(
+                "skipped",
+                reason="disabled_during_live_transcription",
+                media_item=media_item,
+                youtube_transcript=youtube_transcript,
+            )
         payload = self._live_transcript_payload(
             raw,
             media_item,
@@ -830,6 +1105,13 @@ class DesktopContextService:
         return payload
 
     def _live_transcript_media_fields(self, media_item: dict[str, Any]) -> dict[str, Any]:
+        media_kind = self._media_item_playback_kind(media_item)
+        progress = media_item.get("progress_percent")
+        if not isinstance(progress, (int, float)):
+            progress = self._media_progress_percent(
+                self._coerce_int(media_item.get("position_us")),
+                self._coerce_int(media_item.get("length_us")),
+            )
         return {
             "media_key": self._media_item_key(media_item),
             "media_identity": self._media_identity_for_item(media_item),
@@ -841,6 +1123,11 @@ class DesktopContextService:
             "media_position_label": str(media_item.get("position_label") or ""),
             "media_position_us": self._coerce_int(media_item.get("position_us")),
             "media_length_us": self._coerce_int(media_item.get("length_us")),
+            "media_duration_seconds": self._media_item_duration_seconds(media_item),
+            "media_duration_label": self._media_item_duration_label(media_item),
+            "media_progress_percent": float(progress) if isinstance(progress, (int, float)) else None,
+            "media_kind": media_kind,
+            "media_is_live": media_kind == "live",
         }
 
     def _prefetched_transcript_status(self, transcript: Any) -> str:
@@ -854,6 +1141,64 @@ class DesktopContextService:
         video_id = str(transcript.get("video_id") or "").strip()
         url = str(transcript.get("url") or "").strip()
         return video_id or self._youtube_video_id(url) or ""
+
+    async def _run_live_transcription_command(
+        self,
+        command: list[str],
+        *,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        return await asyncio.to_thread(
+            self._run_tracked_live_transcription_process,
+            command,
+            timeout=timeout,
+        )
+
+    def _run_tracked_live_transcription_process(
+        self,
+        command: list[str],
+        *,
+        timeout: float,
+    ) -> subprocess.CompletedProcess[str]:
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        with self._live_transcription_process_lock:
+            self._live_transcription_processes.add(process)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            self._terminate_live_transcription_process(process)
+            stdout, stderr = process.communicate()
+            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr) from exc
+        finally:
+            with self._live_transcription_process_lock:
+                self._live_transcription_processes.discard(process)
+        return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+    def _stop_live_transcription_processes(self) -> None:
+        with self._live_transcription_process_lock:
+            processes = list(self._live_transcription_processes)
+        for process in processes:
+            self._terminate_live_transcription_process(process)
+
+    def _terminate_live_transcription_process(self, process: Any) -> None:
+        try:
+            if process.poll() is not None:
+                return
+        except Exception:
+            return
+        try:
+            process.terminate()
+            process.wait(timeout=1.0)
+        except Exception:
+            try:
+                process.kill()
+            except Exception:
+                pass
 
     async def _capture_and_transcribe_live_audio(self, media_item: dict[str, Any]) -> dict[str, Any]:
         ffmpeg = self.config.live_transcription_ffmpeg_path or shutil.which("ffmpeg")
@@ -870,7 +1215,9 @@ class DesktopContextService:
                 reason="whisper_cli_not_available",
                 media_item=media_item,
             )
-        audio_input = self.config.live_transcription_audio_input or self._default_pulse_monitor_source()
+        audio_input = self.config.live_transcription_audio_input
+        if not audio_input:
+            audio_input = await asyncio.to_thread(self._default_pulse_monitor_source)
         if not audio_input:
             return self._live_transcript_status_payload(
                 "unavailable",
@@ -888,12 +1235,8 @@ class DesktopContextService:
                 capture_seconds=capture_seconds,
             )
             try:
-                record = await asyncio.to_thread(
-                    subprocess.run,
+                record = await self._run_live_transcription_command(
                     record_cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
                     timeout=capture_seconds + 8.0,
                 )
             except subprocess.TimeoutExpired:
@@ -925,12 +1268,8 @@ class DesktopContextService:
                 "False",
             ]
             try:
-                transcript = await asyncio.to_thread(
-                    subprocess.run,
+                transcript = await self._run_live_transcription_command(
                     whisper_cmd,
-                    check=False,
-                    capture_output=True,
-                    text=True,
                     timeout=float(self.config.live_transcription_timeout_seconds),
                 )
             except subprocess.TimeoutExpired:
@@ -1055,7 +1394,12 @@ class DesktopContextService:
         provider = self._youtube_transcript_provider
         if callable(provider):
             try:
-                provided = await self._call_maybe_async(provider, url, transcript_media_context)
+                provided = await self._call_maybe_async(
+                    provider,
+                    url,
+                    transcript_media_context,
+                    offload_sync=True,
+                )
                 if isinstance(provided, dict):
                     return self._store_transcript_result(video_id, url, provided, media_context=transcript_media_context)
             except Exception as exc:
@@ -1976,10 +2320,20 @@ class DesktopContextService:
         llm = getattr(self.runtime, "llm", None)
         if llm is None or not hasattr(llm, "chat_completion"):
             return self._fallback_analysis(capture_result, reason=reason, fallback_reason="llm_unavailable")
+        backoff = self._llm_backoff_status()
+        if backoff is not None:
+            return self._fallback_analysis(
+                capture_result,
+                reason=reason,
+                fallback_reason=str(backoff.get("reason") or "provider_backoff"),
+            )
 
         content_text = self._analysis_prompt(capture_result, reason=reason)
         content: Any = content_text
-        image_uri = self._image_data_uri((capture_result.get("capture") or {}).get("path"))
+        image_uri = await asyncio.to_thread(
+            self._image_data_uri,
+            (capture_result.get("capture") or {}).get("path"),
+        )
         if self.config.vision_enabled and image_uri:
             content = [
                 {"type": "text", "text": content_text},
@@ -2000,9 +2354,13 @@ class DesktopContextService:
                     "say a concise grounded viewpoint, critique, implication, or useful synthesis. "
                     "Return strict JSON with keys: should_speak boolean, activity_summary string, "
                     "reason string, spoken_text string, note string, speech_intent string, "
-                    "speech_relevance_score number. Use speech_intent one of none, task_coaching, "
-                    "screen_relevant, system_issue, safety_privacy. Only use task_coaching when the "
-                    "prompt includes an explicit declared operator task."
+                    "speech_relevance_score number, attention_channel string, interrupt_priority string, "
+                    "focus_transition boolean, focus_transition_summary string, observed_focus string, "
+                    "desktop_relevance_basis string, media_relevance_basis string. Use speech_intent one "
+                    "of none, task_coaching, screen_relevant, system_issue, safety_privacy. Use "
+                    "attention_channel one of none, media, desktop, mixed, system, security_privacy. Use "
+                    "interrupt_priority one of low, normal, high, critical. Only use task_coaching when "
+                    "the prompt includes an explicit declared operator task."
                 ),
             },
             {"role": "user", "content": content},
@@ -2020,6 +2378,12 @@ class DesktopContextService:
             if isinstance(parsed, dict):
                 return self._normalize_analysis(parsed)
         except Exception as exc:
+            if self._record_provider_backoff(exc, source="desktop_context_observation"):
+                return self._fallback_analysis(
+                    capture_result,
+                    reason=reason,
+                    fallback_reason=self._provider_pressure_reason(exc),
+                )
             if content is not content_text:
                 try:
                     response = await llm.chat_completion(
@@ -2042,8 +2406,16 @@ class DesktopContextService:
                     parsed = self._parse_response_json(response)
                     if isinstance(parsed, dict):
                         return self._normalize_analysis(parsed)
-                except Exception:
-                    pass
+                except Exception as fallback_exc:
+                    if self._record_provider_backoff(
+                        fallback_exc,
+                        source="desktop_context_observation_fallback",
+                    ):
+                        return self._fallback_analysis(
+                            capture_result,
+                            reason=reason,
+                            fallback_reason=self._provider_pressure_reason(fallback_exc),
+                        )
             return self._fallback_analysis(capture_result, reason=reason, fallback_reason=str(exc))
         return self._fallback_analysis(capture_result, reason=reason, fallback_reason="unparseable_llm_response")
 
@@ -2062,6 +2434,16 @@ class DesktopContextService:
                 "confidence": 0.0,
                 "salience": 0.0,
                 "reason": "llm_unavailable",
+            }
+        backoff = self._llm_backoff_status()
+        if backoff is not None:
+            return {
+                "matches_observed_context": False,
+                "matches_self_interest": False,
+                "matches_shared_work": False,
+                "confidence": 0.0,
+                "salience": 0.0,
+                "reason": str(backoff.get("reason") or "provider_backoff"),
             }
         prompt = self._self_interest_overlap_prompt(capture_result, analysis, interests=interests, reason=reason)
         agent_name = resolve_agent_name(runtime=self.runtime)
@@ -2103,11 +2485,16 @@ class DesktopContextService:
             if isinstance(parsed, dict):
                 return self._normalize_self_interest_followup(parsed)
         except Exception as exc:
+            self._record_provider_backoff(exc, source="desktop_context_self_interest_overlap")
             return {
+                "matches_observed_context": False,
                 "matches_self_interest": False,
+                "matches_shared_work": False,
                 "confidence": 0.0,
                 "salience": 0.0,
-                "reason": f"{type(exc).__name__}: {exc}",
+                "reason": self._provider_pressure_reason(exc)
+                if self._provider_pressure_backoff_seconds(exc) is not None
+                else f"{type(exc).__name__}: {exc}",
             }
         return {
             "matches_self_interest": False,
@@ -2167,7 +2554,7 @@ class DesktopContextService:
                 "the observed segment, supplied relevance evidence, or active work context. "
                 "The transcript excerpt is centered near the current playback position when possible; "
                 "do not speak about unreached future transcript content as if the operator has already "
-                "seen it. If a useful comment belongs later in the video, set interruption false and "
+                "seen it. If a useful comment belongs later in the media, set interruption false and "
                 "include the intended timecode_or_position for later reconsideration. "
                 "Only set operator_interruption_warranted when the comment is concrete, timely, concise, "
                 "and anchored in this observed moment. Leave spoken_text empty for generic principles.",
@@ -2586,7 +2973,10 @@ class DesktopContextService:
 
         content_text = self._region_prompt_analysis_prompt(capture_result, prompt=prompt, source=source)
         content: Any = content_text
-        image_uri = self._image_data_uri((capture_result.get("capture") or {}).get("path"))
+        image_uri = await asyncio.to_thread(
+            self._image_data_uri,
+            (capture_result.get("capture") or {}).get("path"),
+        )
         if self.config.vision_enabled and image_uri:
             content = [
                 {"type": "text", "text": content_text},
@@ -2688,6 +3078,18 @@ class DesktopContextService:
                     "Classify speech_intent as task_coaching only for declared-task focus support; "
                     "use screen_relevant, system_issue, or safety_privacy when the visible desktop, "
                     "current media, or current transcript segment itself gives a concrete reason to interrupt."
+                ),
+                (
+                    "Track parallel attention channels. Media and desktop attention are both active: "
+                    "current media and visible desktop/window text can both be relevant in the same observation."
+                ),
+                (
+                    "If the useful comment shifts from media to email, browser, code, chat, or another desktop focus, "
+                    "set focus_transition true and ease into the focus transition in spoken_text instead of sounding abrupt."
+                ),
+                (
+                    "Do not talk over yourself. Mark ordinary desktop observations as low or normal priority so they can wait; "
+                    "only a critical safety/privacy risk can preempt current speech."
                 ),
                 *media_lines,
                 *self._media_ambiguity_prompt_lines(capture_result),
@@ -2809,13 +3211,31 @@ class DesktopContextService:
             player = str(item.get("player") or "").strip()
             status = str(item.get("status") or "").strip()
             position = str(item.get("position_label") or "").strip()
-            progress = item.get("progress_percent")
-            progress_label = f"{progress:.1f}% elapsed" if isinstance(progress, (int, float)) else ""
+            progress_label = self._media_item_progress_label(item)
+            media_kind = self._media_item_playback_kind(item)
+            kind_label = {
+                "live": "live media",
+                "recorded": "recorded media",
+                "unknown": "media type unknown",
+            }.get(media_kind, media_kind)
+            duration = self._media_item_duration_label(item)
+            duration_label = f"duration {duration}" if duration else ""
             timing_warning = str(item.get("media_timing_warning") or "").strip()
             warning_label = f"timing warning: {timing_warning[:260]}" if timing_warning else ""
             parts = [
                 part
-                for part in [title, artist, url, player, status, position, progress_label, warning_label]
+                for part in [
+                    title,
+                    artist,
+                    url,
+                    player,
+                    status,
+                    kind_label,
+                    position,
+                    progress_label,
+                    duration_label,
+                    warning_label,
+                ]
                 if part
             ]
             if parts:
@@ -2834,7 +3254,7 @@ class DesktopContextService:
         return [
             "Media ambiguity: multiple media sources are playing.",
             f"- playing sources: {'; '.join(labels[:4]) or '(unknown)'}",
-            "- Do not guess which video the operator wants commentary on. Say that the current media target is ambiguous.",
+            "- Do not guess which media source the operator wants commentary on. Say that the current media target is ambiguous.",
         ]
 
     def _media_ambiguity(self, capture_result: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -2891,19 +3311,19 @@ class DesktopContextService:
         ]
         joined = "; ".join(labels[:3])
         spoken = (
-            "I see more than one media source playing, so I am not sure which video to comment on."
+            "I see more than one media source playing, so I am not sure which one to comment on."
             if not joined
             else self._shorten_for_speech(
-                f"I see more than one media source playing, so I am not sure which video to comment on: {joined}.",
+                f"I see more than one media source playing, so I am not sure which one to comment on: {joined}.",
                 self.config.max_spoken_chars,
             )
         )
         return {
             "should_speak": True,
-            "activity_summary": "Multiple playing media sources make the current video target ambiguous.",
+            "activity_summary": "Multiple playing media sources make the current media target ambiguous.",
             "reason": f"media_ambiguity:{reason}",
             "spoken_text": spoken,
-            "note": "Commentary was withheld from specific video content because more than one media source was playing.",
+            "note": "Commentary was withheld from specific media content because more than one media source was playing.",
             "speech_intent": "screen_relevant",
             "speech_relevance_score": 1.0,
             "speech_policy": "allowed_media_ambiguity_notice",
@@ -3050,6 +3470,22 @@ class DesktopContextService:
         source = str(live_transcript.get("source") or "whisper").strip() or "whisper"
         mode = str(live_transcript.get("mode") or "local").strip() or "local"
         model = str(live_transcript.get("model") or "").strip()
+        media_kind = str(live_transcript.get("media_kind") or "").strip().lower()
+        if not media_kind:
+            media_kind = "live" if bool(live_transcript.get("media_is_live")) else ""
+        if not media_kind and self._coerce_int(live_transcript.get("media_length_us")):
+            media_kind = "recorded"
+        media_kind = media_kind or "unknown"
+        media_kind_label = {
+            "live": "live media",
+            "recorded": "recorded media",
+            "unknown": "media type unknown",
+        }.get(media_kind, media_kind)
+        progress = live_transcript.get("media_progress_percent")
+        progress_label = f"{float(progress):.1f}% elapsed" if isinstance(progress, (int, float)) else ""
+        duration_label = str(live_transcript.get("media_duration_label") or "").strip()
+        if duration_label:
+            duration_label = f"duration {duration_label}"
         header = (
             "Live transcript context (local Whisper):"
             if source == "whisper" and mode == "local"
@@ -3060,7 +3496,10 @@ class DesktopContextService:
             str(live_transcript.get("media_artist") or "").strip(),
             str(live_transcript.get("media_url") or "").strip(),
             str(live_transcript.get("media_status") or "").strip(),
+            media_kind_label,
             str(live_transcript.get("media_position_label") or "").strip(),
+            progress_label,
+            duration_label,
         ]
         seconds = self._coerce_float(live_transcript.get("capture_seconds"), default=0.0)
         source_parts = [
@@ -3078,10 +3517,17 @@ class DesktopContextService:
                 "Trust the live transcript for what is being heard now if it conflicts with cached transcript timing."
             )
         else:
-            fusion_rule = (
-                "- Live-stream rule: no usable retrieved transcript is available; this live Whisper excerpt is "
-                "the current heard segment for following along."
-            )
+            if media_kind == "live":
+                fusion_rule = (
+                    "- Live media rule: no usable retrieved transcript is available; this local Whisper excerpt is "
+                    "the current heard segment for following along."
+                )
+            else:
+                fusion_rule = (
+                    "- Current-audio rule: no usable retrieved transcript is available; this local Whisper excerpt is "
+                    "the current heard segment for the playing media, whether it is a movie, show, podcast, stream, "
+                    "or local file."
+                )
         return [
             header,
             f"- capture: {' | '.join(part for part in source_parts if part) or '(unknown)'}",
@@ -3169,6 +3615,7 @@ class DesktopContextService:
                 "- Media commentary mode: active; the operator asked OpenCAS to keep reacting to current "
                 "and autoplayed media as shared room context without another prompt."
             )
+            lines.extend(self._media_commentary_control_prompt_lines())
         if isinstance(media_state_changes, list) and media_state_changes:
             lines.append("- media state changes:")
             for change in media_state_changes[:4]:
@@ -3255,21 +3702,45 @@ class DesktopContextService:
             "note": f"Observation created from screenshot; reason={reason}.",
             "speech_intent": "none",
             "speech_relevance_score": 0.0,
+            "attention_channel": "none",
+            "interrupt_priority": "low",
+            "focus_transition": False,
+            "focus_transition_summary": "",
+            "observed_focus": "",
+            "desktop_relevance_basis": "",
+            "media_relevance_basis": "",
             "fallback": True,
         }
 
     def _normalize_analysis(self, raw: dict[str, Any]) -> dict[str, Any]:
+        speech_intent = self._normalize_speech_intent(raw.get("speech_intent") or raw.get("intent"))
+        attention_channel = self._normalize_attention_channel(
+            raw.get("attention_channel") or raw.get("channel"),
+            speech_intent=speech_intent,
+        )
         return {
             "should_speak": bool(raw.get("should_speak")),
             "activity_summary": str(raw.get("activity_summary") or raw.get("summary") or "").strip(),
             "reason": str(raw.get("reason") or "").strip(),
             "spoken_text": str(raw.get("spoken_text") or raw.get("message") or "").strip(),
             "note": str(raw.get("note") or "").strip(),
-            "speech_intent": self._normalize_speech_intent(raw.get("speech_intent") or raw.get("intent")),
+            "speech_intent": speech_intent,
             "speech_relevance_score": self._coerce_float(
                 raw.get("speech_relevance_score") or raw.get("relevance_score"),
                 default=0.0,
             ),
+            "attention_channel": attention_channel,
+            "interrupt_priority": self._normalize_interrupt_priority(
+                raw.get("interrupt_priority") or raw.get("priority"),
+                speech_intent=speech_intent,
+                attention_channel=attention_channel,
+                should_speak=bool(raw.get("should_speak")),
+            ),
+            "focus_transition": self._coerce_bool(raw.get("focus_transition")),
+            "focus_transition_summary": str(raw.get("focus_transition_summary") or "").strip(),
+            "observed_focus": str(raw.get("observed_focus") or raw.get("focus") or "").strip(),
+            "desktop_relevance_basis": str(raw.get("desktop_relevance_basis") or "").strip(),
+            "media_relevance_basis": str(raw.get("media_relevance_basis") or "").strip(),
             "raw": raw,
         }
 
@@ -3306,6 +3777,8 @@ class DesktopContextService:
                 continue
             url = str(item.get("url") or "").lower()
             title = str(item.get("title") or "").lower()
+            if self._media_item_is_playing(item) and str(item.get("title") or item.get("url") or "").strip():
+                return True
             if "youtube.com" in url or "youtu.be" in url or "video" in title:
                 return True
         return False
@@ -3691,6 +4164,7 @@ class DesktopContextService:
                 "agent_viewpoint": followup.get("agent_viewpoint"),
                 "implications": followup.get("implications") or [],
                 "open_questions": followup.get("open_questions") or [],
+                "self_directed_next_step": followup.get("self_directed_next_step"),
                 "artifact_title": followup.get("artifact_title"),
                 "artifact_kind": followup.get("artifact_kind"),
                 "salience": followup.get("salience"),
@@ -3860,7 +4334,16 @@ class DesktopContextService:
             "video",
             "youtube",
             "media",
+            "movie",
+            "show",
+            "stream",
+            "streaming",
+            "livestream",
+            "live stream",
+            "podcast",
+            "audio",
             "watching",
+            "listening",
             "playback",
             "transcript",
         )
@@ -3881,6 +4364,167 @@ class DesktopContextService:
             term in lowered for term in commentary_terms
         )
 
+    def _looks_like_media_commentary_control_request(self, text: str) -> bool:
+        lowered = " ".join(str(text or "").lower().split())
+        if not lowered:
+            return False
+        control_markers = (
+            "media commentary on",
+            "turn media commentary on",
+            "enable media commentary",
+            "media-commentary on",
+        )
+        return any(marker in lowered for marker in control_markers)
+
+    def _looks_like_media_commentary_tuning_request(self, text: str) -> bool:
+        lowered = " ".join(str(text or "").lower().split())
+        if not lowered:
+            return False
+        tuning_terms = (
+            "speed up",
+            "faster",
+            "more often",
+            "more frequently",
+            "comment more",
+            "chime in more",
+            "talk more",
+            "slow down",
+            "slower",
+            "less often",
+            "less frequently",
+            "quieter",
+            "fewer comments",
+            "more opinionated",
+            "give opinions",
+            "stronger opinions",
+            "hot take",
+            "more factual",
+            "factually grounded",
+            "more grounded",
+            "evidence based",
+            "more concise",
+            "shorter",
+            "more detailed",
+            "deeper",
+        )
+        return any(term in lowered for term in tuning_terms)
+
+    def _media_commentary_preference_updates(self, request: str) -> dict[str, Any]:
+        lowered = " ".join(str(request or "").lower().split())
+        updates: dict[str, Any] = {}
+        if not lowered:
+            return updates
+
+        if any(
+            phrase in lowered
+            for phrase in (
+                "speed up",
+                "faster",
+                "more proactive",
+                "more often",
+                "more frequently",
+                "comment more",
+                "chime in more",
+                "chime in whenever",
+                "talk more",
+                "offer more",
+                "say more",
+                "whenever you feel like",
+            )
+        ):
+            updates.update(
+                {
+                    "media_commentary_cadence": "frequent",
+                    "capture_interval_seconds": 20,
+                    "min_speech_interval_seconds": 20,
+                    "live_transcription_min_interval_seconds": 6.0,
+                    "speech_relevance_threshold": 0.25,
+                }
+            )
+        if any(
+            phrase in lowered
+            for phrase in (
+                "slow down",
+                "slower",
+                "less often",
+                "less frequently",
+                "quieter",
+                "fewer comments",
+                "comment less",
+                "talk less",
+            )
+        ):
+            updates.update(
+                {
+                    "media_commentary_cadence": "sparse",
+                    "capture_interval_seconds": 60,
+                    "min_speech_interval_seconds": 90,
+                    "live_transcription_min_interval_seconds": 20.0,
+                    "speech_relevance_threshold": 0.72,
+                }
+            )
+        if any(
+            phrase in lowered
+            for phrase in (
+                "normal pace",
+                "normal cadence",
+                "regular pace",
+                "back to normal",
+            )
+        ):
+            updates.update(
+                {
+                    "media_commentary_cadence": "normal",
+                    "capture_interval_seconds": 30,
+                    "min_speech_interval_seconds": 45,
+                    "live_transcription_min_interval_seconds": 10.0,
+                    "speech_relevance_threshold": 0.5,
+                }
+            )
+
+        if any(
+            phrase in lowered
+            for phrase in (
+                "more opinionated",
+                "give opinions",
+                "stronger opinions",
+                "take a stance",
+                "hot take",
+                "be opinionated",
+            )
+        ):
+            updates["media_commentary_response_style"] = "opinionated"
+        if any(
+            phrase in lowered
+            for phrase in (
+                "more factual",
+                "factually grounded",
+                "more grounded",
+                "evidence based",
+                "evidence-backed",
+                "stick to facts",
+                "less opinion",
+            )
+        ):
+            updates["media_commentary_response_style"] = "grounded"
+        if any(
+            phrase in lowered
+            for phrase in (
+                "balanced",
+                "both opinion and facts",
+                "facts and opinions",
+            )
+        ):
+            updates["media_commentary_response_style"] = "balanced"
+
+        if any(phrase in lowered for phrase in ("more concise", "shorter", "brief", "keep it short")):
+            updates.update({"media_commentary_detail": "concise", "max_spoken_chars": 240})
+        if any(phrase in lowered for phrase in ("more detailed", "deeper", "go deeper", "longer")):
+            updates.update({"media_commentary_detail": "detailed", "max_spoken_chars": 560})
+        if any(phrase in lowered for phrase in ("normal length", "normal detail", "back to normal length")):
+            updates.update({"media_commentary_detail": "normal", "max_spoken_chars": 360})
+        return updates
+
     def _activate_media_commentary_mode(self, *, request: str, source: str) -> None:
         updates = self.config.model_dump()
         updates.update(
@@ -3894,6 +4538,7 @@ class DesktopContextService:
                 "live_transcription_enabled": True,
             }
         )
+        updates.update(self._media_commentary_preference_updates(request))
         self.config = DesktopContextConfig(**updates)
         self._save_config()
         self._event(
@@ -3901,6 +4546,42 @@ class DesktopContextService:
             {
                 "source": source,
                 "request": str(request or "").strip()[:240],
+                "preferences": {
+                    "cadence": self.config.media_commentary_cadence,
+                    "response_style": self.config.media_commentary_response_style,
+                    "detail": self.config.media_commentary_detail,
+                },
+            },
+        )
+
+    def _tune_media_commentary_mode(self, *, request: str, source: str) -> None:
+        updates = self._media_commentary_preference_updates(request)
+        if not updates:
+            return
+        payload = self.config.model_dump()
+        payload.update(
+            {
+                **updates,
+                "media_commentary_requested_at": self._now().isoformat(),
+                "media_commentary_source": source,
+                "media_commentary_request": str(request or "").strip()[:1000],
+                "media_commentary_request_source": source,
+                "media_commentary_request_text": str(request or "").strip()[:1000],
+            }
+        )
+        self.config = DesktopContextConfig(**payload)
+        self._save_config()
+        self._event(
+            "media_commentary_tuned",
+            {
+                "source": source,
+                "request": str(request or "").strip()[:240],
+                "updates": updates,
+                "preferences": {
+                    "cadence": self.config.media_commentary_cadence,
+                    "response_style": self.config.media_commentary_response_style,
+                    "detail": self.config.media_commentary_detail,
+                },
             },
         )
 
@@ -3917,6 +4598,40 @@ class DesktopContextService:
             if event in {"media_started", "media_resumed", "media_seeked"} and to_status == "playing":
                 return f"media_commentary_mode:{event}"
         return None
+
+    def _media_commentary_control_prompt_lines(self) -> list[str]:
+        cadence = str(self.config.media_commentary_cadence or "normal")
+        style = str(self.config.media_commentary_response_style or "balanced")
+        detail = str(self.config.media_commentary_detail or "normal")
+        cadence_guidance = {
+            "frequent": (
+                "frequent; look for more Q&A turns, strong claims, disagreements, examples, "
+                "and OpenCAS-relevant implications instead of waiting for only exceptional moments"
+            ),
+            "sparse": "sparse; speak only for high-salience claims, clear disagreements, or direct operator relevance",
+            "normal": "normal; comment when the current segment earns a concise useful reaction",
+        }.get(cadence, "normal; comment when the current segment earns a concise useful reaction")
+        style_guidance = {
+            "opinionated": (
+                "opinionated; give a clear take, critique, or implication while staying grounded "
+                "in the heard transcript or visible evidence"
+            ),
+            "grounded": (
+                "factually grounded; distinguish what the transcript says from your inference and "
+                "avoid unsupported leaps"
+            ),
+            "balanced": "balanced; combine concise evidence with a useful viewpoint",
+        }.get(style, "balanced; combine concise evidence with a useful viewpoint")
+        detail_guidance = {
+            "concise": "concise; use a short one-idea comment",
+            "detailed": "detailed; allow a fuller but still spoken-length synthesis when the point warrants it",
+            "normal": "normal; keep comments short but complete",
+        }.get(detail, "normal; keep comments short but complete")
+        return [
+            f"- Commentary cadence preference: {cadence_guidance}.",
+            f"- Commentary response style preference: {style_guidance}.",
+            f"- Commentary detail preference: {detail_guidance}.",
+        ]
 
     def _media_commentary_mode_prompt_lines(self, changes: Any = None) -> list[str]:
         if not self.config.media_commentary_mode_enabled:
@@ -3935,9 +4650,14 @@ class DesktopContextService:
         lines = [
             "Media commentary mode: active.",
             "- Operator intent: keep reacting to current and autoplayed media as shared room context without another prompt.",
+            "- Media and desktop attention are both active; current media and visible desktop/window text can both be relevant.",
+            "- Keep tracking the media while also noticing relevant email, browser, chat, code, document, or system context on the desktop.",
+            "- If the comment is about a newly relevant desktop focus, ease into the focus transition before giving the point.",
+            "- Do not talk over yourself: ordinary desktop observations should wait behind current speech; a critical safety/privacy risk can preempt current speech.",
             "- New media, resumes, seeks, and the current transcript segment are concrete reasons to consider speaking even when the subject is not OpenCAS.",
             "- Do not summarize what the operator can already see or hear; give a viewpoint, critique, implication, connection, or question.",
-            "- If this observation was triggered by a new video and transcript context is available, speak with a concise first reaction.",
+            "- If this observation was triggered by a new media item and transcript context is available, speak with a concise first reaction.",
+            *self._media_commentary_control_prompt_lines(),
         ]
         if request:
             lines.append(f"- Original media-commentary request: {request[:500]}")
@@ -3989,6 +4709,7 @@ class DesktopContextService:
                 "position_us": self._coerce_int(item.get("position_us")),
                 "position_label": str(item.get("position_label") or ""),
                 "progress_percent": item.get("progress_percent"),
+                "media_kind": self._media_item_playback_kind(item),
             }
         return items
 
@@ -4158,6 +4879,16 @@ class DesktopContextService:
         normalized["declared_task"] = declared_task
         normalized["task_coaching_allowed"] = bool(declared_task)
         normalized["speech_intent"] = self._normalize_speech_intent(normalized.get("speech_intent"))
+        normalized["attention_channel"] = self._normalize_attention_channel(
+            normalized.get("attention_channel"),
+            speech_intent=normalized["speech_intent"],
+        )
+        normalized["interrupt_priority"] = self._normalize_interrupt_priority(
+            normalized.get("interrupt_priority"),
+            speech_intent=normalized["speech_intent"],
+            attention_channel=normalized["attention_channel"],
+            should_speak=bool(normalized.get("should_speak")),
+        )
         normalized["speech_relevance_score"] = self._coerce_float(
             normalized.get("speech_relevance_score"),
             default=0.0,
@@ -4168,6 +4899,14 @@ class DesktopContextService:
 
         speech_text = str(normalized.get("spoken_text") or "")
         reason_text = str(normalized.get("reason") or reason or "")
+        if self._speech_interrupt_priority(normalized) == "critical" and (
+            normalized["speech_intent"] in {"safety_privacy", "system_issue"}
+            or normalized["attention_channel"] in {"security_privacy", "system"}
+        ):
+            normalized["speech_policy"] = "allowed_critical_interrupt"
+            normalized["force_speech"] = True
+            return normalized
+
         is_task_coaching = (
             normalized["speech_intent"] == "task_coaching"
             or self._looks_like_task_coaching(speech_text)
@@ -4204,6 +4943,8 @@ class DesktopContextService:
         normalized = dict(analysis)
         if not normalized.get("should_speak"):
             return normalized
+        if self._speech_interrupt_priority(normalized) == "critical":
+            return normalized
         if self._media_playback_speech_allowed(capture_result):
             return normalized
         speech_intent = str(normalized.get("speech_intent") or "none")
@@ -4236,6 +4977,102 @@ class DesktopContextService:
             for item in self._ordered_media_context(media_context)
             if isinstance(item, dict)
         )
+
+    def _should_pause_media_for_commentary_observation(self, *, reason: str) -> bool:
+        if not str(reason or "").startswith("media_commentary_mode:"):
+            return False
+        return bool(
+            self.config.enabled
+            and self.config.media_commentary_mode_enabled
+            and self.config.tts_enabled
+            and self.config.play_audio
+            and self.config.pause_media_while_speaking
+        )
+
+    async def _pause_media_for_commentary_observation(self, *, reason: str) -> Optional[dict[str, Any]]:
+        if not self._should_pause_media_for_commentary_observation(reason=reason):
+            return None
+        pause = getattr(self._media_controller, "pause_playing", None)
+        if not callable(pause):
+            return {
+                "status": "skipped",
+                "reason": "media_controller_pause_unavailable",
+                "paused_players": [],
+                "errors": [],
+            }
+        try:
+            raw = await self._call_maybe_async(pause, offload_sync=True)
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "reason": f"pause_failed:{type(exc).__name__}",
+                "paused_players": [],
+                "errors": [{"action": "pause", "error": str(exc)}],
+            }
+        payload = raw if isinstance(raw, dict) else {}
+        paused_players = [
+            str(player or "").strip()
+            for player in payload.get("paused_players", [])
+            if str(player or "").strip()
+        ]
+        result = {
+            "status": "paused" if paused_players else "skipped",
+            "reason": reason if paused_players else "no_playing_players",
+            "paused_players": paused_players,
+            "errors": payload.get("errors") if isinstance(payload.get("errors"), list) else [],
+        }
+        self._event(
+            "commentary_observation_media_pause",
+            {
+                "reason": reason,
+                "status": result["status"],
+                "paused_players": paused_players,
+                "errors": result["errors"],
+            },
+        )
+        return result
+
+    async def _resume_media_for_commentary_observation(self, pause_payload: dict[str, Any]) -> dict[str, Any]:
+        players = [
+            str(player or "").strip()
+            for player in pause_payload.get("paused_players", [])
+            if str(player or "").strip()
+        ]
+        if not players:
+            return {"status": "skipped", "reason": "no_paused_players", "resumed_players": []}
+        resume = getattr(self._media_controller, "resume_players", None)
+        if not callable(resume):
+            return {"status": "failed", "reason": "media_controller_resume_unavailable", "resumed_players": []}
+        try:
+            raw = await self._call_maybe_async(resume, players, offload_sync=True)
+        except Exception as exc:
+            return {
+                "status": "failed",
+                "reason": f"resume_failed:{type(exc).__name__}",
+                "resumed_players": [],
+                "errors": [{"action": "resume", "error": str(exc)}],
+            }
+        payload = raw if isinstance(raw, dict) else {}
+        resumed_players = [
+            str(player or "").strip()
+            for player in payload.get("resumed_players", [])
+            if str(player or "").strip()
+        ]
+        result = {
+            "status": "resumed" if resumed_players else "skipped",
+            "reason": "commentary_observation_complete" if resumed_players else "no_players_resumed",
+            "resumed_players": resumed_players,
+            "errors": payload.get("errors") if isinstance(payload.get("errors"), list) else [],
+        }
+        self._event(
+            "commentary_observation_media_resume",
+            {
+                "status": result["status"],
+                "resumed_players": resumed_players,
+                "errors": result["errors"],
+            },
+        )
+        return result
 
     def _has_playback_sensitive_media_context(self, capture_result: dict[str, Any]) -> bool:
         transcript = capture_result.get("youtube_transcript")
@@ -4292,7 +5129,12 @@ class DesktopContextService:
         set_rate = getattr(self._media_controller, "set_players_rate", None)
         if callable(set_rate):
             try:
-                raw = await self._call_maybe_async(set_rate, livestream_players, rate)
+                raw = await self._call_maybe_async(
+                    set_rate,
+                    livestream_players,
+                    rate,
+                    offload_sync=True,
+                )
                 if isinstance(raw, dict):
                     rate_result.update(raw)
             except Exception as exc:
@@ -4379,13 +5221,18 @@ class DesktopContextService:
         return payload
 
     def _media_item_is_probable_livestream(self, item: dict[str, Any]) -> bool:
+        declared = str(item.get("media_kind") or item.get("playback_kind") or "").strip().lower()
+        if declared in {"live", "livestream", "live_stream", "live-stream"}:
+            return True
+        if declared in {"recorded", "regular", "on_demand", "on-demand", "file"}:
+            return False
         length_us = self._coerce_int(item.get("length_us"))
         if length_us is not None and length_us > 0:
             return False
         if bool(item.get("is_live")):
             return True
         live_status = str(item.get("live_status") or "").strip().lower()
-        if live_status in {"is_live", "live", "live_stream", "livestream", "currently_live"}:
+        if live_status in {"is_live", "live", "live_stream", "livestream", "currently_live", "true", "yes"}:
             return True
         url = str(item.get("url") or "").strip().lower()
         title = str(item.get("title") or "").strip().lower()
@@ -4401,8 +5248,8 @@ class DesktopContextService:
         media_item: dict[str, Any],
     ) -> Any:
         if self._callable_accepts_keyword(fallback, "media_item"):
-            return await self._call_maybe_async(fallback, rate, media_item=media_item)
-        return await self._call_maybe_async(fallback, rate)
+            return await self._call_maybe_async(fallback, rate, media_item=media_item, offload_sync=True)
+        return await self._call_maybe_async(fallback, rate, offload_sync=True)
 
     def _callable_accepts_keyword(self, fn: Callable[..., Any], keyword: str) -> bool:
         try:
@@ -4420,6 +5267,45 @@ class DesktopContextService:
         url = str(item.get("url") or "").strip()
         title = str(item.get("title") or "").strip()
         return bool(self._youtube_video_id(url) or self._first_youtube_url(title))
+
+    def _media_item_playback_kind(self, item: dict[str, Any]) -> str:
+        declared = str(item.get("media_kind") or item.get("playback_kind") or "").strip().lower()
+        if declared in {"live", "livestream", "live_stream", "live-stream"}:
+            return "live"
+        if declared in {"recorded", "regular", "on_demand", "on-demand", "file"}:
+            return "recorded"
+        if self._media_item_is_probable_livestream(item):
+            return "live"
+        length_us = self._coerce_int(item.get("length_us"))
+        if length_us is not None and length_us > 0:
+            return "recorded"
+        return "unknown"
+
+    def _media_item_duration_seconds(self, item: dict[str, Any]) -> Optional[float]:
+        length_us = self._coerce_int(item.get("length_us"))
+        if length_us is None or length_us <= 0:
+            return None
+        return round(float(length_us) / 1_000_000.0, 3)
+
+    def _media_item_duration_label(self, item: dict[str, Any]) -> str:
+        length_us = self._coerce_int(item.get("length_us"))
+        if length_us is None or length_us <= 0:
+            return ""
+        return self._format_microseconds(length_us)
+
+    def _media_item_progress_label(self, item: dict[str, Any]) -> str:
+        if str(item.get("duration_source") or "").strip() == "unreliable_media_backend":
+            return ""
+        progress = item.get("progress_percent")
+        if isinstance(progress, (int, float)):
+            return f"{float(progress):.1f}% elapsed"
+        computed = self._media_progress_percent(
+            self._coerce_int(item.get("position_us")),
+            self._coerce_int(item.get("length_us")),
+        )
+        if computed is not None:
+            return f"{computed:.1f}% elapsed"
+        return ""
 
     def _livestream_catchup_restore_after_seconds(
         self,
@@ -4488,7 +5374,7 @@ class DesktopContextService:
             else:
                 set_rate = getattr(self._media_controller, "set_players_rate", None)
                 if callable(set_rate):
-                    raw = await self._call_maybe_async(set_rate, players, 1.0)
+                    raw = await self._call_maybe_async(set_rate, players, 1.0, offload_sync=True)
                     result = raw if isinstance(raw, dict) else {"ok": bool(raw)}
                 else:
                     result = {"ok": False, "error": "mpris_rate_unavailable"}
@@ -4564,6 +5450,95 @@ class DesktopContextService:
         normalized = aliases.get(raw, raw)
         allowed = {"none", "task_coaching", "screen_relevant", "system_issue", "safety_privacy"}
         return normalized if normalized in allowed else "none"
+
+    def _normalize_attention_channel(self, value: Any, *, speech_intent: str = "none") -> str:
+        raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "screen": "desktop",
+            "window": "desktop",
+            "browser": "desktop",
+            "email": "desktop",
+            "chat": "desktop",
+            "video": "media",
+            "youtube": "media",
+            "livestream": "media",
+            "audio": "media",
+            "both": "mixed",
+            "multi": "mixed",
+            "multimodal": "mixed",
+            "security": "security_privacy",
+            "privacy": "security_privacy",
+            "safety": "security_privacy",
+            "secret": "security_privacy",
+            "credential": "security_privacy",
+        }
+        normalized = aliases.get(raw, raw)
+        if not normalized:
+            if speech_intent == "safety_privacy":
+                normalized = "security_privacy"
+            elif speech_intent == "system_issue":
+                normalized = "system"
+            elif speech_intent == "screen_relevant":
+                normalized = "mixed"
+            else:
+                normalized = "none"
+        allowed = {"none", "media", "desktop", "mixed", "system", "security_privacy"}
+        return normalized if normalized in allowed else "none"
+
+    def _normalize_interrupt_priority(
+        self,
+        value: Any,
+        *,
+        speech_intent: str = "none",
+        attention_channel: str = "none",
+        should_speak: bool = False,
+    ) -> str:
+        raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+        aliases = {
+            "none": "low",
+            "silent": "low",
+            "background": "low",
+            "ordinary": "normal",
+            "standard": "normal",
+            "important": "high",
+            "urgent": "critical",
+            "emergency": "critical",
+            "preempt": "critical",
+            "interrupt": "critical",
+            "interrupting": "critical",
+        }
+        normalized = aliases.get(raw, raw)
+        if not normalized:
+            if speech_intent == "safety_privacy" or attention_channel == "security_privacy":
+                normalized = "high"
+            elif should_speak:
+                normalized = "normal"
+            else:
+                normalized = "low"
+        allowed = {"low", "normal", "high", "critical"}
+        return normalized if normalized in allowed else "normal"
+
+    def _coerce_bool(self, value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if value is None:
+            return False
+        if isinstance(value, (int, float)):
+            return bool(value)
+        return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    def _speech_interrupt_priority(self, analysis: dict[str, Any]) -> str:
+        speech_intent = self._normalize_speech_intent(analysis.get("speech_intent"))
+        attention_channel = self._normalize_attention_channel(
+            analysis.get("attention_channel"),
+            speech_intent=speech_intent,
+        )
+        return self._normalize_interrupt_priority(
+            analysis.get("interrupt_priority"),
+            speech_intent=speech_intent,
+            attention_channel=attention_channel,
+            should_speak=bool(analysis.get("should_speak")),
+        )
 
     def _coerce_float(self, value: Any, *, default: float) -> float:
         try:
@@ -4703,20 +5678,124 @@ class DesktopContextService:
         memory = Memory(
             content=self._build_observation_memory_text(capture_result, analysis, payload=payload),
             source_episode_ids=[str(episode_id)],
-            tags=[
-                "desktop_context",
-                "body_double",
-                "observed_user_activity",
-                "learning_from_observation",
-                "live_observation",
-            ],
-            salience=2.4,
+            tags=self._observation_memory_tags(payload),
+            salience=self._observation_memory_salience(payload),
             confidence_score=float(payload.get("confidence_score") or 0.72),
         )
         try:
             await self._call_maybe_async(save_memory, memory)
         except Exception:
             pass
+
+    def _observation_memory_tags(self, payload: dict[str, Any]) -> list[str]:
+        tags = [
+            "desktop_context",
+            "body_double",
+            "observed_user_activity",
+            "learning_from_observation",
+            "live_observation",
+        ]
+        primary_media = payload.get("primary_media") if isinstance(payload.get("primary_media"), dict) else {}
+        if primary_media:
+            tags.extend(["media_observation", "learning_from_media"])
+            media_kind = str(primary_media.get("media_kind") or "").strip()
+            if media_kind:
+                tags.append(f"{media_kind}_media")
+        transcript = payload.get("youtube_transcript")
+        if isinstance(transcript, dict) and transcript.get("status") == "available":
+            tags.extend(["prefetched_media_transcript", "youtube_transcript"])
+        live_transcript = payload.get("live_transcript")
+        if isinstance(live_transcript, dict) and live_transcript.get("status") == "available":
+            tags.extend(["live_whisper_transcript", "media_audio_transcript"])
+        if payload.get("media_transcript_available"):
+            tags.append("media_transcript_available")
+        attention_channel = str(payload.get("attention_channel") or "").strip()
+        if attention_channel and attention_channel != "none":
+            tags.append(f"{attention_channel}_attention")
+        if str(payload.get("interrupt_priority") or "") == "critical":
+            tags.append("critical_interrupt")
+        if payload.get("focus_transition"):
+            tags.append("focus_transition")
+        return list(dict.fromkeys(tags))
+
+    def _observation_memory_salience(self, payload: dict[str, Any]) -> float:
+        salience = 2.4
+        if isinstance(payload.get("primary_media"), dict) and payload.get("primary_media"):
+            salience = 2.55
+        if payload.get("media_transcript_available"):
+            salience = 2.75
+        followup = payload.get("self_interest_followup")
+        if isinstance(followup, dict) and (
+            followup.get("matches_observed_context") or followup.get("matches_self_interest")
+        ):
+            salience = max(salience, 3.0)
+        return salience
+
+    def _primary_media_payload(self, capture_result: dict[str, Any]) -> Optional[dict[str, Any]]:
+        media_context = capture_result.get("media_context")
+        media_item: Optional[dict[str, Any]] = None
+        for item in self._ordered_media_context(media_context):
+            if not isinstance(item, dict):
+                continue
+            if self._media_item_is_playing(item):
+                media_item = item
+                break
+            if media_item is None:
+                media_item = item
+        if media_item is None:
+            live_transcript = capture_result.get("live_transcript")
+            if isinstance(live_transcript, dict) and live_transcript.get("status") == "available":
+                media_kind = str(live_transcript.get("media_kind") or "").strip() or (
+                    "live" if live_transcript.get("media_is_live") else "unknown"
+                )
+                return {
+                    "identity": str(live_transcript.get("media_identity") or ""),
+                    "player": str(live_transcript.get("media_player") or ""),
+                    "status": str(live_transcript.get("media_status") or ""),
+                    "title": str(live_transcript.get("media_title") or ""),
+                    "artist": str(live_transcript.get("media_artist") or ""),
+                    "url": str(live_transcript.get("media_url") or ""),
+                    "position_label": str(live_transcript.get("media_position_label") or ""),
+                    "position_us": self._coerce_int(live_transcript.get("media_position_us")),
+                    "length_us": self._coerce_int(live_transcript.get("media_length_us")),
+                    "duration_seconds": live_transcript.get("media_duration_seconds"),
+                    "duration_label": str(live_transcript.get("media_duration_label") or ""),
+                    "progress_percent": live_transcript.get("media_progress_percent"),
+                    "media_kind": media_kind,
+                    "is_live": media_kind == "live",
+                }
+            return None
+        media_kind = self._media_item_playback_kind(media_item)
+        progress = media_item.get("progress_percent")
+        if not isinstance(progress, (int, float)):
+            progress = self._media_progress_percent(
+                self._coerce_int(media_item.get("position_us")),
+                self._coerce_int(media_item.get("length_us")),
+            )
+        return {
+            "identity": self._media_identity_for_item(media_item),
+            "player": str(media_item.get("player") or ""),
+            "status": str(media_item.get("status") or ""),
+            "title": str(media_item.get("title") or ""),
+            "artist": str(media_item.get("artist") or ""),
+            "album": str(media_item.get("album") or ""),
+            "url": str(media_item.get("url") or ""),
+            "position_label": str(media_item.get("position_label") or ""),
+            "position_us": self._coerce_int(media_item.get("position_us")),
+            "length_us": self._coerce_int(media_item.get("length_us")),
+            "duration_seconds": self._media_item_duration_seconds(media_item),
+            "duration_label": self._media_item_duration_label(media_item),
+            "progress_percent": float(progress) if isinstance(progress, (int, float)) else None,
+            "media_kind": media_kind,
+            "is_live": media_kind == "live",
+        }
+
+    def _media_transcript_available(self, capture_result: dict[str, Any]) -> bool:
+        transcript = capture_result.get("youtube_transcript")
+        if isinstance(transcript, dict) and transcript.get("status") == "available":
+            return True
+        live_transcript = capture_result.get("live_transcript")
+        return isinstance(live_transcript, dict) and live_transcript.get("status") == "available"
 
     def _observation_payload(
         self,
@@ -4750,9 +5829,21 @@ class DesktopContextService:
             "speech_intent": str(analysis.get("speech_intent") or "none"),
             "speech_relevance_score": float(analysis.get("speech_relevance_score") or 0.0),
             "speech_policy": str(analysis.get("speech_policy") or ""),
+            "attention_channel": self._normalize_attention_channel(
+                analysis.get("attention_channel"),
+                speech_intent=str(analysis.get("speech_intent") or "none"),
+            ),
+            "interrupt_priority": self._speech_interrupt_priority(analysis),
+            "focus_transition": self._coerce_bool(analysis.get("focus_transition")),
+            "focus_transition_summary": str(analysis.get("focus_transition_summary") or ""),
+            "observed_focus": str(analysis.get("observed_focus") or ""),
+            "desktop_relevance_basis": str(analysis.get("desktop_relevance_basis") or ""),
+            "media_relevance_basis": str(analysis.get("media_relevance_basis") or ""),
             "confidence_score": 0.78 if activity_summary else 0.62,
             "media_context": capture_result.get("media_context") or [],
             "media_state_changes": capture_result.get("media_state_changes") or [],
+            "primary_media": self._primary_media_payload(capture_result),
+            "media_transcript_available": self._media_transcript_available(capture_result),
             "youtube_transcript": capture_result.get("youtube_transcript"),
             "live_transcript": capture_result.get("live_transcript"),
             "self_interest_followup": {
@@ -4792,6 +5883,7 @@ class DesktopContextService:
         ocr_excerpt = str(evidence.get("ocr_excerpt") or "").strip()
         transcript = payload.get("youtube_transcript") if isinstance(payload.get("youtube_transcript"), dict) else {}
         live_transcript = payload.get("live_transcript") if isinstance(payload.get("live_transcript"), dict) else {}
+        primary_media = payload.get("primary_media") if isinstance(payload.get("primary_media"), dict) else {}
         media_context = payload.get("media_context") if isinstance(payload.get("media_context"), list) else []
         media_state_changes = (
             payload.get("media_state_changes")
@@ -4805,8 +5897,40 @@ class DesktopContextService:
             f"Observed user activity: {activity}",
             f"Screenshot evidence: {evidence.get('screenshot_path') or ''}",
             f"Reason: {payload.get('reason') or ''}",
+            f"Attention channel: {payload.get('attention_channel') or 'none'}",
+            f"Interrupt priority: {payload.get('interrupt_priority') or 'low'}",
         ]
-        if media_context:
+        if payload.get("focus_transition"):
+            lines.append(f"Focus transition: {payload.get('focus_transition_summary') or 'yes'}")
+        if payload.get("desktop_relevance_basis"):
+            lines.append(f"Desktop relevance basis: {payload.get('desktop_relevance_basis')}")
+        if payload.get("media_relevance_basis"):
+            lines.append(f"Media relevance basis: {payload.get('media_relevance_basis')}")
+        if primary_media:
+            progress = primary_media.get("progress_percent")
+            progress_label = f"{float(progress):.1f}% elapsed" if isinstance(progress, (int, float)) else ""
+            duration = str(primary_media.get("duration_label") or "").strip()
+            duration_label = f"duration {duration}" if duration else ""
+            media_parts = [
+                str(primary_media.get("title") or "").strip(),
+                str(primary_media.get("artist") or "").strip(),
+                str(primary_media.get("url") or "").strip(),
+                str(primary_media.get("status") or "").strip(),
+                str(primary_media.get("media_kind") or "").strip(),
+                str(primary_media.get("position_label") or "").strip(),
+                progress_label,
+                duration_label,
+            ]
+            lines.append(f"Primary media observed: {' | '.join(part for part in media_parts if part)}")
+            legacy_media_parts = [
+                str(primary_media.get("title") or "").strip(),
+                str(primary_media.get("artist") or "").strip(),
+                str(primary_media.get("url") or "").strip(),
+                str(primary_media.get("status") or "").strip(),
+                str(primary_media.get("position_label") or "").strip(),
+            ]
+            lines.append(f"Media observed: {' | '.join(part for part in legacy_media_parts if part)}")
+        elif media_context:
             item = media_context[0] if isinstance(media_context[0], dict) else {}
             media_parts = [
                 str(item.get("title") or "").strip(),
@@ -4832,7 +5956,7 @@ class DesktopContextService:
                 lines.append(excerpt[:2500])
         if live_transcript and live_transcript.get("status") == "available":
             excerpt = str(live_transcript.get("transcript_excerpt") or "").strip()
-            lines.append("Live Whisper transcript evidence:")
+            lines.append("Live Whisper transcript evidence for current media audio:")
             if excerpt:
                 lines.append(excerpt[:2500])
             if transcript and transcript.get("status") == "available":
@@ -4886,7 +6010,20 @@ class DesktopContextService:
             f"- Observed user activity: {analysis.get('activity_summary') or '(not summarized)'}",
             f"- activity: {analysis.get('activity_summary') or '(not summarized)'}",
             f"- comment decision: {'speak' if analysis.get('should_speak') else 'hold'}",
+            (
+                f"- attention channel: {analysis.get('attention_channel') or 'none'}; "
+                f"priority: {self._speech_interrupt_priority(analysis)}"
+            ),
         ]
+        if self._coerce_bool(analysis.get("focus_transition")):
+            transition = str(analysis.get("focus_transition_summary") or "").strip()
+            lines.append(f"- focus transition: {transition or 'yes'}")
+        desktop_basis = str(analysis.get("desktop_relevance_basis") or "").strip()
+        media_basis = str(analysis.get("media_relevance_basis") or "").strip()
+        if desktop_basis:
+            lines.append(f"- desktop relevance basis: {desktop_basis}")
+        if media_basis:
+            lines.append(f"- media relevance basis: {media_basis}")
         media_context = capture_result.get("media_context")
         if isinstance(media_context, list) and media_context:
             item = media_context[0]
@@ -4987,6 +6124,31 @@ class DesktopContextService:
         reason: str,
         force: bool = False,
     ) -> dict[str, Any]:
+        priority = self._speech_interrupt_priority(analysis)
+        preemption: Optional[dict[str, Any]] = None
+        if priority == "critical":
+            force = True
+            preemption = self._request_speech_preemption(analysis, reason=reason)
+        async with self._speech_lock:
+            result = await self._speak_analysis_locked(
+                analysis,
+                capture_result,
+                reason=reason,
+                force=force,
+            )
+        if preemption is not None:
+            result = dict(result)
+            result["preemption"] = preemption
+        return result
+
+    async def _speak_analysis_locked(
+        self,
+        analysis: dict[str, Any],
+        capture_result: dict[str, Any],
+        *,
+        reason: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
         if not self.config.tts_enabled:
             return {"status": "skipped", "reason": "tts_disabled"}
         if not force and not self._speech_due():
@@ -5016,34 +6178,53 @@ class DesktopContextService:
 
         try:
             synth = self._speech_synthesizer or self._default_speech_synthesizer
-            voice_meta = await self._call_maybe_async(synth, spoken_text)
+            voice_meta = await self._call_maybe_async(synth, spoken_text, offload_sync=True)
         except Exception as exc:
             return {"status": "failed", "reason": f"tts_failed:{type(exc).__name__}", "error": str(exc)}
 
         playback: Optional[dict[str, Any]] = None
         audio_path = self._voice_path(voice_meta)
         if self.config.play_audio and audio_path is not None:
-            media: dict[str, Any] = {"paused_players": [], "errors": []}
+            commentary_pause = (
+                capture_result.get("commentary_observation_media_pause")
+                if isinstance(capture_result.get("commentary_observation_media_pause"), dict)
+                else {}
+            )
+            commentary_paused_players = list((commentary_pause or {}).get("paused_players") or [])
+            pause_resume_config_enabled = bool(self.config.pause_media_while_speaking)
+            pause_resume_enabled = pause_resume_config_enabled and not commentary_paused_players
+            media: dict[str, Any] = {
+                "paused_players": list(commentary_paused_players),
+                "errors": [],
+                "pause_resume": {
+                    "enabled": pause_resume_config_enabled,
+                    "deferred_to_commentary_observation": bool(commentary_paused_players),
+                },
+            }
             pre_pause_media_context: list[dict[str, Any]] = []
             pause_started_at: Optional[float] = None
             try:
                 pause = getattr(self._media_controller, "pause_playing", None)
-                if callable(pause):
+                if pause_resume_enabled and callable(pause):
                     pre_pause_media_context = await self._current_media_context()
                     pause_started_at = asyncio.get_running_loop().time()
-                    paused = await self._call_maybe_async(pause)
+                    paused = await self._call_maybe_async(pause, offload_sync=True)
                     if isinstance(paused, dict):
                         media.update(paused)
-                played = await self._call_maybe_async(self._audio_player, audio_path)
+                elif commentary_paused_players:
+                    media["pause_resume"]["reason"] = "already_paused_for_commentary_observation"
+                elif not pause_resume_enabled:
+                    media["pause_resume"]["reason"] = "disabled_by_config"
+                played = await self._play_generated_audio(audio_path)
                 playback = played if isinstance(played, dict) else {"played": bool(played), "path": str(audio_path)}
             except Exception as exc:
                 playback = {"played": False, "error": str(exc), "path": str(audio_path)}
             finally:
                 resume = getattr(self._media_controller, "resume_players", None)
                 paused_players = list(media.get("paused_players") or [])
-                if callable(resume) and paused_players:
+                if pause_resume_enabled and callable(resume) and paused_players:
                     try:
-                        resumed = await self._call_maybe_async(resume, paused_players)
+                        resumed = await self._call_maybe_async(resume, paused_players, offload_sync=True)
                         if isinstance(resumed, dict):
                             media.update(resumed)
                     except Exception as exc:
@@ -5056,11 +6237,22 @@ class DesktopContextService:
                         0.0,
                         asyncio.get_running_loop().time() - pause_started_at,
                     )
-                media["livestream_catchup"] = await self._maybe_apply_livestream_resume_catchup(
-                    paused_players=paused_players,
-                    media_context=pre_pause_media_context,
-                    pause_duration_seconds=pause_duration_seconds,
-                )
+                if pause_resume_enabled:
+                    media["livestream_catchup"] = await self._maybe_apply_livestream_resume_catchup(
+                        paused_players=paused_players,
+                        media_context=pre_pause_media_context,
+                        pause_duration_seconds=pause_duration_seconds,
+                    )
+                elif commentary_paused_players:
+                    media["livestream_catchup"] = {
+                        "status": "skipped",
+                        "reason": "media_pause_resume_deferred_to_commentary_observation",
+                    }
+                else:
+                    media["livestream_catchup"] = {
+                        "status": "skipped",
+                        "reason": "media_pause_resume_disabled",
+                    }
                 if playback is not None:
                     playback["media"] = media
 
@@ -5072,6 +6264,9 @@ class DesktopContextService:
                 "spoken_text_excerpt": spoken_text[:500],
                 "spoken_text_hash": spoken_hash,
                 "spoken_context_signature": context_signature,
+                "attention_channel": analysis.get("attention_channel"),
+                "interrupt_priority": self._speech_interrupt_priority(analysis),
+                "focus_transition": self._coerce_bool(analysis.get("focus_transition")),
                 "voice": voice_meta,
                 "playback": playback,
                 "redirected_to_note": prepared.get("redirected_to_note", False),
@@ -5134,10 +6329,84 @@ class DesktopContextService:
                 continue
             if self._media_item_is_playing(item):
                 if self._media_position_is_stale_for_speech(capture_result, item):
+                    if self._live_transcript_confirms_current_media_for_speech(
+                        capture_result,
+                        observed_identity=observed_identity,
+                        reason=reason,
+                    ):
+                        return ""
                     return "media_position_stale"
+                return ""
+            if self._media_item_was_paused_for_commentary_observation(capture_result, item):
+                if self._media_position_is_stale_for_speech(capture_result, item):
+                    if self._live_transcript_confirms_current_media_for_speech(
+                        capture_result,
+                        observed_identity=observed_identity,
+                        reason=reason,
+                    ):
+                        return ""
+                    return "media_position_stale"
+                return ""
+            if self._live_transcript_confirms_current_media_for_speech(
+                capture_result,
+                observed_identity=observed_identity,
+                reason=reason,
+            ):
                 return ""
             return "media_not_playing"
         return "media_context_stale"
+
+    def _live_transcript_confirms_current_media_for_speech(
+        self,
+        capture_result: dict[str, Any],
+        *,
+        observed_identity: str,
+        reason: str,
+    ) -> bool:
+        """Allow fresh local audio evidence to outrank unreliable media-position metadata."""
+
+        if not str(reason or "").startswith("media_commentary_mode:"):
+            return False
+        live_transcript = capture_result.get("live_transcript")
+        if not isinstance(live_transcript, dict) or live_transcript.get("status") != "available":
+            return False
+        if str(live_transcript.get("media_status") or "").strip().lower() != "playing":
+            return False
+        excerpt = str(
+            live_transcript.get("transcript_excerpt")
+            or live_transcript.get("transcript_text")
+            or ""
+        ).strip()
+        if not excerpt:
+            return False
+        observed = str(observed_identity or "").strip()
+        if not observed:
+            return True
+        media_url = str(live_transcript.get("media_url") or "").strip()
+        candidate_identities = {
+            str(live_transcript.get("media_identity") or "").strip(),
+            self._youtube_video_id(media_url),
+            media_url,
+            str(live_transcript.get("media_title") or "").strip(),
+        }
+        candidate_identities.discard("")
+        return observed in candidate_identities
+
+    def _media_item_was_paused_for_commentary_observation(
+        self,
+        capture_result: dict[str, Any],
+        item: dict[str, Any],
+    ) -> bool:
+        pause = capture_result.get("commentary_observation_media_pause")
+        if not isinstance(pause, dict):
+            return False
+        players = {
+            str(player or "").strip()
+            for player in pause.get("paused_players", [])
+            if str(player or "").strip()
+        }
+        player = str(item.get("player") or "").strip()
+        return bool(player and player in players)
 
     def _media_position_is_stale_for_speech(
         self,
@@ -5443,6 +6712,236 @@ class DesktopContextService:
             return True
         return (self._now() - last).total_seconds() >= self.config.min_speech_interval_seconds
 
+    def _request_speech_preemption(self, analysis: dict[str, Any], *, reason: str) -> dict[str, Any]:
+        """Stop in-flight local playback when a critical desktop observation must interrupt."""
+
+        if self._speech_interrupt_priority(analysis) != "critical":
+            return {
+                "status": "skipped",
+                "reason": "not_critical",
+                "interrupt_priority": self._speech_interrupt_priority(analysis),
+            }
+        with self._active_audio_process_lock:
+            process = self._active_audio_process
+        if process is None:
+            return self._event(
+                "speech_preemption_requested",
+                {
+                    "status": "no_active_audio",
+                    "reason": reason,
+                    "attention_channel": analysis.get("attention_channel"),
+                    "interrupt_priority": "critical",
+                },
+            )
+        try:
+            if process.poll() is not None:
+                return self._event(
+                    "speech_preemption_requested",
+                    {
+                        "status": "already_finished",
+                        "reason": reason,
+                        "attention_channel": analysis.get("attention_channel"),
+                        "interrupt_priority": "critical",
+                        "returncode": process.returncode,
+                    },
+                )
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+                status = "terminated"
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+                status = "killed"
+            return self._event(
+                "speech_preemption_requested",
+                {
+                    "status": status,
+                    "reason": reason,
+                    "attention_channel": analysis.get("attention_channel"),
+                    "interrupt_priority": "critical",
+                    "returncode": process.returncode,
+                },
+            )
+        except Exception as exc:
+            return self._event(
+                "speech_preemption_requested",
+                {
+                    "status": "failed",
+                    "reason": reason,
+                    "attention_channel": analysis.get("attention_channel"),
+                    "interrupt_priority": "critical",
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+
+    async def _play_generated_audio(self, audio_path: Path) -> Any:
+        """Play a generated speech file through the configured or system-default sink."""
+
+        player = self._audio_player
+        audio_sink = self._effective_audio_output_sink()
+        if player is None:
+            return await asyncio.to_thread(self._play_audio_file_tracked, audio_path, audio_sink)
+        try:
+            signature = inspect.signature(player)
+            accepts_sink = "audio_sink" in signature.parameters or any(
+                param.kind == inspect.Parameter.VAR_KEYWORD
+                for param in signature.parameters.values()
+            )
+        except (TypeError, ValueError):
+            accepts_sink = False
+        if accepts_sink:
+            return await self._call_maybe_async(
+                player,
+                audio_path,
+                audio_sink=audio_sink,
+                offload_sync=True,
+            )
+        return await self._call_maybe_async(player, audio_path, offload_sync=True)
+
+    def _play_audio_file_tracked(self, path: Path, audio_sink: Optional[str] = None) -> dict[str, Any]:
+        audio_path = Path(path)
+        if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("OPENCAS_ALLOW_TEST_AUDIO") != "1":
+            return {
+                "played": False,
+                "reason": "pytest_audio_suppressed",
+                "path": str(audio_path),
+                "audio_client_name": BODY_DOUBLE_AUDIO_CLIENT_NAME,
+                "volume_percent": BODY_DOUBLE_AUDIO_VOLUME_PERCENT,
+            }
+        audio_sink = str(audio_sink or "").strip() or _current_default_audio_sink()
+        mpv_args = [
+            "--no-terminal",
+            "--really-quiet",
+            "--no-video",
+            "--audio-channels=stereo",
+            f"--audio-client-name={BODY_DOUBLE_AUDIO_CLIENT_NAME}",
+            f"--title={BODY_DOUBLE_AUDIO_CLIENT_NAME}",
+            f"--volume={BODY_DOUBLE_AUDIO_VOLUME_PERCENT}",
+        ]
+        if audio_sink:
+            mpv_args.extend(["--ao=pulse", f"--audio-device=pulse/{audio_sink}"])
+        mpv_args.append(str(audio_path))
+        ffplay_env = {"PULSE_PROP": f"application.name={BODY_DOUBLE_AUDIO_CLIENT_NAME}"}
+        if audio_sink:
+            ffplay_env["PULSE_SINK"] = audio_sink
+        candidates = [
+            ("mpv", mpv_args, {}),
+            (
+                "ffplay",
+                [
+                    "-nodisp",
+                    "-autoexit",
+                    "-loglevel",
+                    "quiet",
+                    "-volume",
+                    str(BODY_DOUBLE_AUDIO_VOLUME_PERCENT),
+                    "-ac",
+                    "2",
+                    str(audio_path),
+                ],
+                ffplay_env,
+            ),
+        ]
+        for name, args, env_update in candidates:
+            executable = shutil.which(name)
+            if not executable:
+                continue
+            env = None
+            if env_update:
+                env = os.environ.copy()
+                env.update(env_update)
+            process: Optional[subprocess.Popen[Any]] = None
+            try:
+                process = subprocess.Popen(
+                    [executable, *args],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    env=env,
+                )
+                with self._active_audio_process_lock:
+                    self._active_audio_process = process
+                returncode = process.wait(timeout=300)
+            except subprocess.TimeoutExpired:
+                if process is not None:
+                    process.kill()
+                    try:
+                        process.wait(timeout=5)
+                    except Exception:
+                        pass
+                return {
+                    "played": False,
+                    "player": name,
+                    "path": str(audio_path),
+                    "audio_sink": audio_sink,
+                    "error": "playback_timeout",
+                }
+            except Exception as exc:
+                return {
+                    "played": False,
+                    "player": name,
+                    "path": str(audio_path),
+                    "audio_sink": audio_sink,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            finally:
+                if process is not None:
+                    with self._active_audio_process_lock:
+                        if self._active_audio_process is process:
+                            self._active_audio_process = None
+            return {
+                "played": returncode == 0,
+                "player": name,
+                "path": str(audio_path),
+                "audio_sink": audio_sink,
+                "audio_client_name": BODY_DOUBLE_AUDIO_CLIENT_NAME,
+                "volume_percent": BODY_DOUBLE_AUDIO_VOLUME_PERCENT,
+                "returncode": returncode,
+            }
+        return {
+            "played": False,
+            "reason": "no_audio_player",
+            "path": str(audio_path),
+            "audio_sink": audio_sink,
+            "audio_client_name": BODY_DOUBLE_AUDIO_CLIENT_NAME,
+            "volume_percent": BODY_DOUBLE_AUDIO_VOLUME_PERCENT,
+        }
+
+    def _effective_audio_output_sink(self) -> Optional[str]:
+        configured = str(self.config.audio_output_sink or "").strip()
+        return configured or _current_default_audio_sink()
+
+    def _audio_output_status(self) -> dict[str, Any]:
+        configured = str(self.config.audio_output_sink or "").strip()
+        current_default = _current_default_audio_sink()
+        effective = configured or current_default
+        available_sinks = _available_audio_sinks()
+        available_names = {
+            str(sink.get("name") or "").strip()
+            for sink in available_sinks
+            if isinstance(sink, dict) and str(sink.get("name") or "").strip()
+        }
+        configured_available = None if not configured else configured in available_names
+        effective_available = bool(effective and effective in available_names)
+        if configured and not configured_available:
+            diagnostic = "configured_sink_unavailable"
+        elif not current_default and not configured:
+            diagnostic = "system_default_sink_unavailable"
+        elif not available_sinks:
+            diagnostic = "no_audio_sinks_reported"
+        else:
+            diagnostic = "ready"
+        return {
+            "mode": "manual" if configured else "system_default",
+            "configured_sink": configured or None,
+            "current_default_sink": current_default,
+            "effective_sink": effective,
+            "configured_sink_available": configured_available,
+            "effective_sink_available": effective_available,
+            "diagnostic": diagnostic,
+            "available_sinks": available_sinks,
+        }
+
     def _capture_backend_available(self) -> bool:
         if self._capture_provider is not None:
             return True
@@ -5464,6 +6963,22 @@ class DesktopContextService:
             payload = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(payload, dict):
                 migrated = False
+                if payload.get("enabled") is False:
+                    payload.update(
+                        {
+                            "media_commentary_mode_enabled": False,
+                            "proactive_video_commentary_enabled": False,
+                            "live_transcription_enabled": False,
+                            "tts_enabled": False,
+                            "play_audio": False,
+                            "media_commentary_requested_at": None,
+                            "media_commentary_source": None,
+                            "media_commentary_request": None,
+                            "media_commentary_request_source": None,
+                            "media_commentary_request_text": None,
+                        }
+                    )
+                    migrated = True
                 if (
                     "proactive_video_commentary_enabled" not in payload
                     and int(payload.get("capture_interval_seconds") or 300) == 300
@@ -5472,7 +6987,8 @@ class DesktopContextService:
                     migrated = True
                 declared_task = str(payload.get("declared_task") or "")
                 if (
-                    not payload.get("media_commentary_mode_enabled")
+                    payload.get("enabled", True) is not False
+                    and not payload.get("media_commentary_mode_enabled")
                     and self._looks_like_media_commentary_request(declared_task)
                 ):
                     payload["media_commentary_mode_enabled"] = True
@@ -5483,6 +6999,41 @@ class DesktopContextService:
                     payload["media_commentary_request_text"] = declared_task[:1000]
                     payload["live_transcription_enabled"] = True
                     migrated = True
+                commentary_request = str(
+                    payload.get("media_commentary_request")
+                    or payload.get("media_commentary_request_text")
+                    or ""
+                )
+                if commentary_request:
+                    preference_updates = self._media_commentary_preference_updates(commentary_request)
+                    cadence = str(
+                        preference_updates.get("media_commentary_cadence")
+                        or payload.get("media_commentary_cadence")
+                        or ""
+                    )
+                    cadence_fields = {
+                        "capture_interval_seconds",
+                        "min_speech_interval_seconds",
+                        "live_transcription_min_interval_seconds",
+                        "speech_relevance_threshold",
+                    }
+                    for key, value in preference_updates.items():
+                        if key not in payload:
+                            payload[key] = value
+                            migrated = True
+                            continue
+                        if key not in cadence_fields:
+                            continue
+                        current = self._coerce_float(payload.get(key), default=None)
+                        target = self._coerce_float(value, default=None)
+                        if current is None or target is None:
+                            continue
+                        if cadence == "frequent" and (current <= 0 or current > target):
+                            payload[key] = value
+                            migrated = True
+                        elif cadence == "sparse" and current < target:
+                            payload[key] = value
+                            migrated = True
                 config = DesktopContextConfig(**payload)
                 if migrated:
                     path.write_text(
@@ -5548,8 +7099,126 @@ class DesktopContextService:
             return parsed
         return None
 
-    async def _call_maybe_async(self, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
-        result = fn(*args, **kwargs)
+    def _latest_screenshot_snapshot(self, events: Optional[list[dict[str, Any]]] = None) -> dict[str, Any]:
+        """Return the newest captured screenshot known to the service.
+
+        The event log is the source of truth for capture provenance. The file
+        system fallback keeps the manager useful after log truncation, manual
+        repair, or migration from older desktop-context builds.
+        """
+
+        event_source = list(events or self._list_events(limit=500))
+        for event in reversed(event_source):
+            if event.get("type") != "captured":
+                continue
+            raw_path = str(event.get("path") or "").strip()
+            if not raw_path:
+                continue
+            path = Path(raw_path).expanduser()
+            return self._screenshot_file_snapshot(
+                path,
+                captured_at=str(event.get("created_at") or "").strip() or None,
+                source="event",
+                event=event,
+            )
+
+        newest: Path | None = None
+        try:
+            for candidate in self._screenshots_dir().glob("*.png"):
+                if newest is None or candidate.stat().st_mtime > newest.stat().st_mtime:
+                    newest = candidate
+        except Exception:
+            newest = None
+        if newest is None:
+            return {}
+        return self._screenshot_file_snapshot(newest, captured_at=None, source="filesystem")
+
+    def _screenshot_file_snapshot(
+        self,
+        path: Path,
+        *,
+        captured_at: Optional[str],
+        source: str,
+        event: Optional[dict[str, Any]] = None,
+    ) -> dict[str, Any]:
+        exists = path.exists()
+        modified_at: str | None = None
+        size_bytes: int | None = None
+        if exists:
+            try:
+                stat = path.stat()
+                size_bytes = int(stat.st_size)
+                modified_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
+            except Exception:
+                pass
+        return {
+            "path": str(path),
+            "filename": path.name,
+            "exists": exists,
+            "source": source,
+            "captured_at": captured_at or modified_at,
+            "modified_at": modified_at,
+            "size_bytes": size_bytes,
+            "event": event or {},
+        }
+
+    def _capture_schedule_snapshot(self, last_captured_at: Optional[str]) -> dict[str, Any]:
+        if not self.config.enabled:
+            return {
+                "status": "disabled",
+                "interval_seconds": int(self.config.capture_interval_seconds),
+                "next_capture_at": None,
+                "seconds_remaining": None,
+            }
+        interval_seconds = max(0, int(self.config.capture_interval_seconds))
+        if interval_seconds <= 0:
+            return {
+                "status": "manual",
+                "interval_seconds": interval_seconds,
+                "next_capture_at": None,
+                "seconds_remaining": None,
+            }
+        if not last_captured_at:
+            return {
+                "status": "due",
+                "interval_seconds": interval_seconds,
+                "next_capture_at": None,
+                "seconds_remaining": 0.0,
+            }
+        try:
+            captured = datetime.fromisoformat(str(last_captured_at))
+        except ValueError:
+            return {
+                "status": "unknown",
+                "interval_seconds": interval_seconds,
+                "next_capture_at": None,
+                "seconds_remaining": None,
+            }
+        if captured.tzinfo is None:
+            captured = captured.replace(tzinfo=timezone.utc)
+        next_capture = captured.astimezone(timezone.utc) + timedelta(seconds=interval_seconds)
+        remaining = max(0.0, (next_capture - self._now()).total_seconds())
+        return {
+            "status": "scheduled" if remaining > 0 else "due",
+            "interval_seconds": interval_seconds,
+            "next_capture_at": next_capture.isoformat(),
+            "seconds_remaining": round(remaining, 3),
+        }
+
+    async def _call_maybe_async(
+        self,
+        fn: Callable[..., Any],
+        *args: Any,
+        offload_sync: bool = False,
+        **kwargs: Any,
+    ) -> Any:
+        is_async_callable = inspect.iscoroutinefunction(fn) or inspect.iscoroutinefunction(
+            getattr(fn, "__call__", None)
+        )
+        if offload_sync and not is_async_callable:
+            result = await asyncio.to_thread(fn, *args, **kwargs)
+        else:
+            result = fn(*args, **kwargs)
         if inspect.isawaitable(result):
             return await result
         return result
@@ -5591,6 +7260,39 @@ class DesktopContextService:
 
     def _media_state_path(self) -> Path:
         return self.root / "media_state.json"
+
+    def _prune_screenshot_storage(self) -> dict[str, Any]:
+        limit = int(self.config.screenshot_storage_limit_bytes)
+        files: list[tuple[float, str, Path, int]] = []
+        total = 0
+        try:
+            for candidate in self._screenshots_dir().glob("*.png"):
+                if candidate.is_symlink() or not candidate.is_file():
+                    continue
+                stat = candidate.stat()
+                size = int(stat.st_size)
+                total += size
+                files.append((float(stat.st_mtime), candidate.name, candidate, size))
+        except OSError:
+            return {"limit_bytes": limit, "total_bytes": total, "deleted_count": 0, "deleted_bytes": 0}
+        deleted_count = 0
+        deleted_bytes = 0
+        for _, _, path, size in sorted(files):
+            if total <= limit:
+                break
+            try:
+                path.unlink()
+            except OSError:
+                continue
+            total -= size
+            deleted_count += 1
+            deleted_bytes += size
+        return {
+            "limit_bytes": limit,
+            "total_bytes": max(0, total),
+            "deleted_count": deleted_count,
+            "deleted_bytes": deleted_bytes,
+        }
 
     def _screenshots_dir(self) -> Path:
         path = self.root / "screenshots"
@@ -5659,19 +7361,130 @@ def _current_default_audio_sink() -> Optional[str]:
     return None
 
 
-def play_audio_file(path: Path) -> dict[str, Any]:
+def _available_audio_sinks() -> list[dict[str, Any]]:
+    """Return PulseAudio/PipeWire sinks suitable for an operator-facing selector."""
+
+    pactl = shutil.which("pactl")
+    if not pactl:
+        return []
+    detailed: list[dict[str, Any]] = []
+    try:
+        completed = subprocess.run(
+            [pactl, "list", "sinks"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        completed = None
+    default_sink = _current_default_audio_sink()
+    if completed is not None and completed.returncode == 0:
+        current: dict[str, Any] = {}
+        for line in completed.stdout.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("Sink #"):
+                if current.get("name"):
+                    current["is_default"] = bool(default_sink and current.get("name") == default_sink)
+                    detailed.append(current)
+                current = {}
+                continue
+            if stripped.startswith("Name:"):
+                current["name"] = stripped.split(":", 1)[1].strip()
+            elif stripped.startswith("Description:"):
+                current["description"] = stripped.split(":", 1)[1].strip()
+            elif stripped.startswith("Driver:"):
+                current["driver"] = stripped.split(":", 1)[1].strip()
+            elif stripped.startswith("State:"):
+                current["state"] = stripped.split(":", 1)[1].strip()
+        if current.get("name"):
+            current["is_default"] = bool(default_sink and current.get("name") == default_sink)
+            detailed.append(current)
+    if detailed:
+        return detailed
+
+    try:
+        completed = subprocess.run(
+            [pactl, "list", "short", "sinks"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except Exception:
+        return []
+    if completed.returncode != 0:
+        return []
+    sinks: list[dict[str, Any]] = []
+    for line in completed.stdout.splitlines():
+        columns = line.split("\t")
+        if len(columns) < 2:
+            continue
+        name = columns[1].strip()
+        if not name:
+            continue
+        description = name
+        if name.startswith("bluez_output."):
+            description = "Bluetooth audio device"
+        elif name.startswith("alsa_output."):
+            description = "System audio device"
+        sinks.append(
+            {
+                "name": name,
+                "description": description,
+                "driver": columns[2].strip() if len(columns) > 2 else "",
+                "state": columns[4].strip() if len(columns) > 4 else "",
+                "is_default": bool(default_sink and name == default_sink),
+            }
+        )
+    return sinks
+
+
+def play_audio_file(path: Path, audio_sink: Optional[str] = None) -> dict[str, Any]:
     """Play a generated TTS file and return after playback finishes."""
 
     audio_path = Path(path)
-    audio_sink = _current_default_audio_sink()
-    mpv_args = ["--no-terminal", "--really-quiet"]
+    if os.environ.get("PYTEST_CURRENT_TEST") and os.environ.get("OPENCAS_ALLOW_TEST_AUDIO") != "1":
+        return {
+            "played": False,
+            "reason": "pytest_audio_suppressed",
+            "path": str(audio_path),
+            "audio_client_name": BODY_DOUBLE_AUDIO_CLIENT_NAME,
+            "volume_percent": BODY_DOUBLE_AUDIO_VOLUME_PERCENT,
+        }
+    audio_sink = str(audio_sink or "").strip() or _current_default_audio_sink()
+    mpv_args = [
+        "--no-terminal",
+        "--really-quiet",
+        "--no-video",
+        "--audio-channels=stereo",
+        f"--audio-client-name={BODY_DOUBLE_AUDIO_CLIENT_NAME}",
+        f"--title={BODY_DOUBLE_AUDIO_CLIENT_NAME}",
+        f"--volume={BODY_DOUBLE_AUDIO_VOLUME_PERCENT}",
+    ]
     if audio_sink:
         mpv_args.extend(["--ao=pulse", f"--audio-device=pulse/{audio_sink}"])
     mpv_args.append(str(audio_path))
-    ffplay_env = {"PULSE_SINK": audio_sink} if audio_sink else {}
+    ffplay_env = {"PULSE_PROP": f"application.name={BODY_DOUBLE_AUDIO_CLIENT_NAME}"}
+    if audio_sink:
+        ffplay_env["PULSE_SINK"] = audio_sink
     candidates = [
         ("mpv", mpv_args, {}),
-        ("ffplay", ["-nodisp", "-autoexit", "-loglevel", "quiet", str(audio_path)], ffplay_env),
+        (
+            "ffplay",
+            [
+                "-nodisp",
+                "-autoexit",
+                "-loglevel",
+                "quiet",
+                "-volume",
+                str(BODY_DOUBLE_AUDIO_VOLUME_PERCENT),
+                "-ac",
+                "2",
+                str(audio_path),
+            ],
+            ffplay_env,
+        ),
     ]
     for name, args, env_update in candidates:
         executable = shutil.which(name)
@@ -5703,6 +7516,15 @@ def play_audio_file(path: Path) -> dict[str, Any]:
             "player": name,
             "path": str(audio_path),
             "audio_sink": audio_sink,
+            "audio_client_name": BODY_DOUBLE_AUDIO_CLIENT_NAME,
+            "volume_percent": BODY_DOUBLE_AUDIO_VOLUME_PERCENT,
             "returncode": completed.returncode,
         }
-    return {"played": False, "reason": "no_audio_player", "path": str(audio_path), "audio_sink": audio_sink}
+    return {
+        "played": False,
+        "reason": "no_audio_player",
+        "path": str(audio_path),
+        "audio_sink": audio_sink,
+        "audio_client_name": BODY_DOUBLE_AUDIO_CLIENT_NAME,
+        "volume_percent": BODY_DOUBLE_AUDIO_VOLUME_PERCENT,
+    }

@@ -488,7 +488,6 @@ def _test_core_grep_glob() -> bool:
 def _test_keyword_routing() -> bool:
     print("\n[test agent keyword routing]")
     from opencas.tools.loop import ToolUseLoop, ToolUseContext
-    from opencas.tools.models import ToolEntry
     from opencas.autonomy.models import ActionRiskTier
 
     overall = True

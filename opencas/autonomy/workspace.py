@@ -10,6 +10,7 @@ from uuid import UUID, uuid4
 from pydantic import BaseModel, Field
 
 from opencas.autonomy.models import WorkObject
+from .executive_pause_reason import is_executive_pause_reason
 
 from .commitment import Commitment, CommitmentStatus
 
@@ -71,6 +72,9 @@ class ExecutiveWorkspace(BaseModel):
 
     focus: Optional[WorkspaceItem] = None
     queue: List[WorkspaceItem] = Field(default_factory=list)
+    active_commitment_count: int = 0
+    user_facing_commitment_count: int = 0
+    commitment_pressure: float = Field(default=0.0, ge=0.0, le=1.0)
     rebuild_timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @classmethod
@@ -107,6 +111,15 @@ class ExecutiveWorkspace(BaseModel):
             if commitment.status == CommitmentStatus.ACTIVE
         }
         items: List[WorkspaceItem] = []
+        active_commitment_count = sum(
+            1 for commitment in commitments if commitment.status == CommitmentStatus.ACTIVE
+        )
+        user_facing_commitment_count = sum(
+            1
+            for commitment in commitments
+            if commitment.status == CommitmentStatus.ACTIVE
+            and cls._is_user_facing_commitment(commitment)
+        )
 
         for commitment in commitments:
             deferred_user_facing = cls._is_deferred_user_facing_commitment(commitment)
@@ -237,7 +250,18 @@ class ExecutiveWorkspace(BaseModel):
         items.sort(key=lambda i: i.total_score, reverse=True)
         queue = items[:32]
         focus = queue[0] if queue else None
-        return cls(focus=focus, queue=queue, rebuild_timestamp=now)
+        commitment_pressure = cls._commitment_pressure(
+            active_commitment_count=active_commitment_count,
+            user_facing_commitment_count=user_facing_commitment_count,
+        )
+        return cls(
+            focus=focus,
+            queue=queue,
+            active_commitment_count=active_commitment_count,
+            user_facing_commitment_count=user_facing_commitment_count,
+            commitment_pressure=commitment_pressure,
+            rebuild_timestamp=now,
+        )
 
     @staticmethod
     def _urgency_from_deadline(
@@ -269,8 +293,32 @@ class ExecutiveWorkspace(BaseModel):
 
     @staticmethod
     def _is_user_facing_commitment(commitment: Commitment) -> bool:
-        source = str((commitment.meta or {}).get("source", "")).lower()
-        return source in {"assistant_response", "nightly_consolidation"}
+        meta = commitment.meta or {}
+        if bool(meta.get("synthetic_acceptance_probe")):
+            return False
+        source = str(meta.get("source", "")).lower()
+        if source in {
+            "assistant_response",
+            "nightly_consolidation",
+            "project_return_capture",
+            "workflow_create_commitment",
+        }:
+            return True
+        if any(str(meta.get(key, "")).strip() for key in ("source_user_request", "source_user_turn", "previous_user_turn")):
+            return True
+        tags = {str(tag).strip().lower() for tag in (commitment.tags or [])}
+        return bool(tags & {"operator", "operator_support", "user_support", "follow_through"})
+
+    @staticmethod
+    def _commitment_pressure(
+        *,
+        active_commitment_count: int,
+        user_facing_commitment_count: int,
+    ) -> float:
+        """Estimate structural pressure from the active commitment stack."""
+        active_pressure = max(0, int(active_commitment_count) - 2) * 0.08
+        user_pressure = max(0, int(user_facing_commitment_count) - 1) * 0.10
+        return round(min(1.0, active_pressure + user_pressure), 4)
 
     @staticmethod
     def _is_deferred_user_facing_commitment(commitment: Commitment) -> bool:
@@ -279,8 +327,6 @@ class ExecutiveWorkspace(BaseModel):
         if not ExecutiveWorkspace._is_user_facing_commitment(commitment):
             return False
         reason = str((commitment.meta or {}).get("blocked_reason", "")).lower()
-        return reason in {
-            "executive_pause",
-            "executive_fatigue",
-            "executive_overload",
-        } or str((commitment.meta or {}).get("resume_policy", "")).lower() == "auto_on_executive_recovery"
+        return is_executive_pause_reason(reason) or str(
+            (commitment.meta or {}).get("resume_policy", "")
+        ).lower() == "auto_on_executive_recovery"

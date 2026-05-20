@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -8,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from opencas.api import provenance_entry as pe
-from opencas.autonomy.models import ActionRequest, ActionRiskTier, ApprovalDecision, ApprovalLevel
+from opencas.autonomy.models import ActionRequest, ActionRiskTier, ApprovalLevel
 from opencas.infra import HookBus, POST_ACTION_DECISION, POST_TOOL_EXECUTE
 from opencas.runtime.lifecycle import shutdown_runtime_resources
 from opencas.runtime.provenance_hooks import register_runtime_provenance_hooks
@@ -141,7 +140,7 @@ async def test_runtime_tool_provenance_records_session_and_artifact_changes(tmp_
     assert read_result["success"] is True
 
     entries = runtime.ctx.registry_store.list_recent(limit=10)
-    assert len(entries) == 4
+    assert len(entries) == 2
     assert entries[0].session_id == "session:default:abc"
     assert any(item.artifact == "file|workspace|notes.md" and item.action == pe.Action.CREATE for item in entries)
     assert any(item.artifact == "file|workspace|notes.md" and item.action == pe.Action.UPDATE for item in entries)

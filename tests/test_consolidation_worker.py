@@ -9,12 +9,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from opencas.api import LLMClient
 from opencas.bootstrap import BootstrapConfig
-from opencas.embeddings import EmbeddingService
 from opencas.runtime.consolidation_worker import (
     _connect_and_run_worker,
     _run_cli,
     build_consolidation_worker_command,
+    cancel_active_consolidation_worker,
     consolidation_worker_result_path,
     consolidation_worker_status_path,
     run_consolidation_in_worker_process,
@@ -54,6 +55,53 @@ def test_build_consolidation_worker_command_includes_paths_and_budget(tmp_path: 
     assert "--workspace-root" in command.argv
     assert str(workspace_root) in command.argv
     assert "--budget-json" in command.argv
+
+
+def test_cancel_active_consolidation_worker_writes_deferred_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state_dir = tmp_path / "state"
+    result_path = consolidation_worker_result_path(state_dir, "run-foreground")
+    status_path = consolidation_worker_status_path(state_dir)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        json.dumps(
+            {
+                "mode": "subprocess",
+                "pid": 4242,
+                "result_path": str(result_path),
+                "run_id": "run-foreground",
+                "status": "running",
+            }
+        ),
+        encoding="utf-8",
+    )
+    alive = {"value": True}
+    signals: list[int] = []
+
+    def fake_kill(pid: int, sig: int) -> None:
+        assert pid == 4242
+        if sig == 0:
+            if not alive["value"]:
+                raise ProcessLookupError
+            return
+        signals.append(sig)
+        alive["value"] = False
+
+    monkeypatch.setattr("opencas.runtime.consolidation_worker.os.kill", fake_kill)
+
+    payload = cancel_active_consolidation_worker(
+        state_dir,
+        reason="foreground_user_turn",
+        grace_seconds=0.01,
+    )
+
+    assert payload["budget_reason"] == "foreground_user_turn"
+    assert payload["worker"]["status"] == "cancelled"
+    assert signals
+    assert json.loads(result_path.read_text(encoding="utf-8"))["budget_reason"] == "foreground_user_turn"
+    assert json.loads(status_path.read_text(encoding="utf-8"))["status"] == "cancelled"
 
 
 @pytest.mark.asyncio
@@ -210,22 +258,71 @@ async def test_run_consolidation_in_worker_process_kills_cancelled_worker(
 
 
 @pytest.mark.asyncio
+async def test_run_consolidation_in_worker_process_treats_external_cancel_as_deferred(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class CancelledProcess:
+        returncode = -15
+        pid = 1234
+
+        async def communicate(self):
+            return b"", b""
+
+    async def fake_create_subprocess_exec(*args, **kwargs):
+        return CancelledProcess()
+
+    config = SimpleNamespace(
+        state_dir=tmp_path,
+        session_id="worker-session",
+        default_llm_model="kimi-coding/k2p5",
+        embedding_model_id="local-fallback",
+        provider_config_path=None,
+        provider_env_path=None,
+        primary_workspace_root=lambda: tmp_path,
+    )
+    runtime = SimpleNamespace(ctx=SimpleNamespace(config=config))
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    command = build_consolidation_worker_command(config)
+    monkeypatch.setattr(
+        "opencas.runtime.consolidation_worker.build_consolidation_worker_command",
+        lambda *args, **kwargs: command,
+    )
+    command.status_path.parent.mkdir(parents=True, exist_ok=True)
+    command.status_path.write_text(
+        json.dumps(
+            {
+                "mode": "subprocess",
+                "run_id": command.run_id,
+                "pid": 1234,
+                "status": "cancelled",
+                "reason": "foreground_user_turn",
+                "updated_at": "2026-05-16T05:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = await run_consolidation_in_worker_process(
+        runtime,
+        budget={"max_seconds": 1},
+    )
+
+    assert payload["budget_reason"] == "foreground_user_turn"
+    assert payload["worker"]["status"] == "cancelled"
+    assert payload["worker"]["returncode"] == -15
+
+
+@pytest.mark.asyncio
 async def test_worker_uses_canonical_gemma_embedding_records(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     captured = {}
 
-    class FakeGemma:
-        async def embed(self, text: str):
-            return [0.1] * 768
-
-        async def embed_batch(self, texts):
-            return [[0.1] * 768 for _ in texts]
-
-    async def fake_get_local_gemma(self):
-        self._local_gemma = FakeGemma()
-        return self._local_gemma
+    async def fake_embed_batch(self, texts, **kwargs):
+        return [[0.1] * 768 for _ in texts]
 
     class FakeConsolidationResult:
         def model_dump(self, *, mode: str):
@@ -243,7 +340,7 @@ async def test_worker_uses_canonical_gemma_embedding_records(
             captured["record"] = records[0]
             return FakeConsolidationResult()
 
-    monkeypatch.setattr(EmbeddingService, "_get_local_gemma", fake_get_local_gemma)
+    monkeypatch.setattr(LLMClient, "embed_batch", fake_embed_batch)
     monkeypatch.setattr(
         "opencas.runtime.consolidation_worker.NightlyConsolidationEngine",
         FakeNightlyConsolidationEngine,

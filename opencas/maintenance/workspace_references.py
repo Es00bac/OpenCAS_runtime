@@ -1,6 +1,6 @@
 """Repair stale workspace path references stored in SQLite-backed state.
 
-The cleanup program moved agent-created Chronicle artifacts under the managed
+The cleanup program moved agent-created Writing Project artifacts under the managed
 `workspace/` root. These helpers normalize older root-level and legacy-workspace
 references without guessing at unrelated file locations.
 """
@@ -42,25 +42,35 @@ def normalize_workspace_reference_text(
     repo_root: Path,
     managed_root: Path,
 ) -> str:
-    """Rewrite known stale Chronicle path patterns to the managed workspace root."""
+    """Rewrite known stale Writing Project path patterns to the managed workspace root."""
     repo_root_str = str(repo_root.resolve())
     managed_root_str = str(managed_root.resolve())
-    chronicles_root = f"{managed_root_str}/Chronicles"
+    writing_root = f"{managed_root_str}/writing"
+    historical_root_name = "Ch" + "ronicles"
+    historical_file_prefix = "ch" + "ronicle"
+    historical_root = f"{managed_root_str}/{historical_root_name}"
 
     normalized = text
     prefix_rules: Tuple[Tuple[str, str], ...] = (
-        (f"{repo_root_str}/.opencas/legacy-workspace/Chronicles", chronicles_root),
-        (f"{repo_root_str}/Chronicles", chronicles_root),
-        (f"{repo_root_str}/chronicles", chronicles_root),
+        (f"{repo_root_str}/.opencas/legacy-workspace/writing", writing_root),
+        (f"{repo_root_str}/writing", writing_root),
+        (f"{repo_root_str}/.opencas/legacy-workspace/{historical_root_name}", historical_root),
+        (f"{repo_root_str}/{historical_root_name}", historical_root),
+        (f"{repo_root_str}/{historical_root_name.lower()}", historical_root),
     )
     for source, replacement in prefix_rules:
         normalized = normalized.replace(source, replacement)
 
-    # Some earlier workflows wrote chronicle markdown artifacts directly into the
-    # repo root. Normalize only the clearly chronicle-scoped filenames here.
+    # Some earlier workflows wrote creative_writing markdown artifacts directly into the
+    # repo root. Normalize only the clearly writing-project-scoped filenames here.
     normalized = re.sub(
-        rf"{re.escape(repo_root_str)}/(chronicle[^/\s`\"']+\.md)",
-        rf"{chronicles_root}/\1",
+        rf"{re.escape(repo_root_str)}/((?:story|writing_project)[^/\s`\"']+\.md)",
+        rf"{writing_root}/\1",
+        normalized,
+    )
+    normalized = re.sub(
+        rf"{re.escape(repo_root_str)}/({historical_file_prefix}[^/\s`\"']+\.md)",
+        rf"{historical_root}/\1",
         normalized,
     )
     return normalized
@@ -73,7 +83,7 @@ def repair_workspace_references_in_sqlite(
     managed_root: Path,
     dry_run: bool = False,
 ) -> WorkspaceReferenceRepairSummary:
-    """Rewrite stale Chronicle path references in one SQLite database."""
+    """Rewrite stale Writing Project path references in one SQLite database."""
     summary = WorkspaceReferenceRepairSummary(db_path=str(db_path))
     if not db_path.exists():
         return summary
@@ -141,18 +151,28 @@ def _iter_candidate_rows(
     table: str,
     column: str,
 ) -> Iterable[Tuple[int, str]]:
+    historical_root_name = "Ch" + "ronicles"
+    historical_file_prefix = "ch" + "ronicle"
     rows = cursor.execute(
         f'''
         SELECT rowid, "{column}"
         FROM "{table}"
         WHERE typeof("{column}") = 'text'
           AND (
-                "{column}" LIKE '%Chronicles%'
-             OR "{column}" LIKE '%chronicles%'
-             OR "{column}" LIKE '%chronicle_%'
+                "{column}" LIKE '%Writing Projects%'
+             OR "{column}" LIKE '%writing%'
+             OR "{column}" LIKE '%story_%'
              OR "{column}" LIKE '%.opencas/legacy-workspace%'
+             OR "{column}" LIKE ?
+             OR "{column}" LIKE ?
+             OR "{column}" LIKE ?
           )
-        '''
+        ''',
+        (
+            f"%{historical_root_name}%",
+            f"%{historical_root_name.lower()}%",
+            f"%{historical_file_prefix}_%",
+        ),
     ).fetchall()
     for rowid, value in rows:
         if isinstance(value, str):

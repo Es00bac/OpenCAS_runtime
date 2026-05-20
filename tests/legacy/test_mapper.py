@@ -2,7 +2,6 @@
 
 from datetime import datetime, timezone
 
-from opencas.legacy.loader import load_json
 from opencas.legacy.mapper import (
     bulma_episode_uuid,
     map_bulma_episode,

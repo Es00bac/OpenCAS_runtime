@@ -66,8 +66,11 @@ class SessionContextStore:
 
     async def connect(self) -> "SessionContextStore":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(str(self.path))
+        self._db = await aiosqlite.connect(str(self.path), timeout=30)
         self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA busy_timeout=30000")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.executescript(_SCHEMA)
         await self._backfill_sessions()
         await self._db.commit()

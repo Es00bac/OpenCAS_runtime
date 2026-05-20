@@ -14,6 +14,8 @@ from urllib.parse import unquote
 from textwrap import shorten
 from typing import Any, Optional
 
+from .audit_mode import is_audit_only_text
+
 
 @dataclass(frozen=True)
 class ContinuityBreadcrumb:
@@ -157,6 +159,19 @@ async def record_burst_continuity(
     episode_id: Optional[str] = None,
 ) -> Optional[str]:
     """Persist a burst breadcrumb in identity and musubi history."""
+    if is_audit_only_text(trigger, phase, intent, focus, next_step, note):
+        runtime_trace = getattr(runtime, "_trace", None)
+        if callable(runtime_trace):
+            runtime_trace(
+                "continuity_breadcrumb_suppressed",
+                {
+                    "reason": "audit_only_turn",
+                    "trigger": trigger,
+                    "phase": phase,
+                },
+            )
+        return None
+
     identity = getattr(getattr(runtime, "ctx", None), "identity", None)
     relational = getattr(getattr(runtime, "ctx", None), "relational", None)
     rendered = build_runtime_burst_breadcrumb(

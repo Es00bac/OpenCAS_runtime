@@ -95,6 +95,74 @@ def test_artifact_metadata_resets_no_progress_counter() -> None:
     ) is None
 
 
+def test_browser_setup_and_cleanup_do_not_count_as_meaningful_progress() -> None:
+    guard = MeaningfulProgressGuard(max_consecutive_no_progress=3)
+
+    assert guard.record_result(
+        "browser_start",
+        {"headless": False},
+        {
+            "success": True,
+            "output": '{"session_id": "s1", "status": "started"}',
+            "metadata": {"headless": False},
+        },
+    ) is None
+    assert guard.last_assessment is not None
+    assert guard.last_assessment.signal == "browser_setup"
+
+    assert guard.record_result(
+        "browser_clear",
+        {},
+        {
+            "success": True,
+            "output": '{"removed": 1}',
+            "metadata": {},
+        },
+    ) is None
+
+    reason = guard.record_result(
+        "browser_start",
+        {"headless": False},
+        {
+            "success": True,
+            "output": '{"session_id": "s2", "status": "started"}',
+            "metadata": {"headless": False},
+        },
+    )
+
+    assert reason is not None
+    assert "no meaningful progress" in reason.lower()
+
+
+def test_browser_navigation_counts_as_meaningful_progress() -> None:
+    guard = MeaningfulProgressGuard(max_consecutive_no_progress=2)
+
+    assert guard.record_result(
+        "browser_start",
+        {"headless": True},
+        {
+            "success": True,
+            "output": '{"session_id": "s1", "status": "started"}',
+            "metadata": {},
+        },
+    ) is None
+
+    reason = guard.record_result(
+        "browser_navigate",
+        {"session_id": "s1", "url": "https://example.test"},
+        {
+            "success": True,
+            "output": '{"url": "https://example.test", "title": "Example"}',
+            "metadata": {},
+        },
+    )
+
+    assert reason is None
+    assert guard.last_assessment is not None
+    assert guard.last_assessment.meaningful is True
+    assert guard.consecutive_no_progress == 0
+
+
 def test_repeated_stale_evidence_is_not_meaningful_forever() -> None:
     guard = MeaningfulProgressGuard(repeated_evidence_limit=3)
     result = {"success": True, "output": "status: still processing", "metadata": {}}

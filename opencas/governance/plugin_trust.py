@@ -13,7 +13,6 @@ from typing import Dict, List, Optional
 
 import aiosqlite
 from cryptography.exceptions import InvalidSignature
-from cryptography.hazmat.primitives.asymmetric import ed25519
 
 SUPPORTED_PLUGIN_TRUST_FEED_VERSIONS = {1}
 _SUPPORTED_PLUGIN_TRUST_FEED_SIGNATURE_ALGORITHMS = {"ed25519"}

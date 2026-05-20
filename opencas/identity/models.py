@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from uuid import UUID, uuid4
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class SelfModel(BaseModel):
@@ -27,6 +27,8 @@ class SelfModel(BaseModel):
     memory_anchors: List[Dict[str, Any]] = Field(default_factory=list)
     recent_themes: List[Dict[str, Any]] = Field(default_factory=list)
     identity_rebuild_audit: Dict[str, Any] = Field(default_factory=dict)
+    last_offline_started_at: Optional[datetime] = None
+    last_offline_duration_seconds: Optional[float] = None
 
 
 class UserModel(BaseModel):
@@ -35,7 +37,7 @@ class UserModel(BaseModel):
     model_id: UUID = Field(default_factory=uuid4)
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     explicit_preferences: Dict[str, Any] = Field(default_factory=dict)
-    inferred_goals: List[str] = Field(default_factory=list)
+    inferred_goals: List[Dict[str, Any]] = Field(default_factory=list)
     known_boundaries: List[str] = Field(default_factory=list)
     trust_level: float = Field(default=0.5, ge=0.0, le=1.0)
     uncertainty_areas: List[str] = Field(default_factory=list)
@@ -43,6 +45,23 @@ class UserModel(BaseModel):
     partner_musubi: Optional[float] = None
     partner_trust_raw: Optional[float] = None
     partner_musubi_raw: Optional[float] = None
+
+    @field_validator("inferred_goals", mode="before")
+    @classmethod
+    def migrate_inferred_goals(cls, v: Any) -> Any:
+        if not isinstance(v, list):
+            return v
+        migrated: List[Dict[str, Any]] = []
+        changed = False
+        for item in v:
+            if isinstance(item, str):
+                migrated.append({"text": item, "provenance": "legacy"})
+                changed = True
+            elif isinstance(item, dict):
+                migrated.append(item)
+            else:
+                changed = True
+        return migrated if changed else v
 
 
 class ContinuityState(BaseModel):
@@ -52,6 +71,10 @@ class ContinuityState(BaseModel):
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     last_session_id: Optional[str] = None
     last_shutdown_time: Optional[datetime] = None
+    last_persisted_at: Optional[datetime] = None
+    last_boot_time: Optional[datetime] = None
+    last_offline_started_at: Optional[datetime] = None
+    last_offline_duration_seconds: Optional[float] = None
     boot_count: int = 0
     compaction_count: int = 0
     version: str = "0.1.0"

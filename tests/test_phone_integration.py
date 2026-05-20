@@ -70,6 +70,7 @@ class _FakeRuntime:
                 state_dir=workspace_root / "state",
                 agent_workspace_root=lambda: workspace_root,
             ),
+            identity=SimpleNamespace(self_model=SimpleNamespace(name="TestAgent")),
             context_store=_FakeContextStore(),
             llm=SimpleNamespace(default_model="test-model"),
         )
@@ -899,7 +900,7 @@ async def test_finalize_employer_call_appends_owner_summary(tmp_path: Path) -> N
     assert "Employer is interested in an AI workflow engagement." in summary_path.read_text(encoding="utf-8")
     assert "Employer is interested in an AI workflow engagement." in messages_path.read_text(encoding="utf-8")
     assert notifications
-    assert "Bulma received an employment inquiry call." in notifications[0]["text"]
+    assert "TestAgent received an employment inquiry call." in notifications[0]["text"]
     assert notifications[0]["document_path"] == audio_path
 
 
@@ -996,6 +997,7 @@ async def test_low_trust_qa_uses_workspace_knowledge_only(tmp_path: Path, monkey
     tool_names = {tool["function"]["name"] for tool in llm_call["tools"]}
     assert {"fs_read_file", "fs_list_dir", "fs_write_file"} <= tool_names
     assert "bounded caller workspace toolset" in llm_call["messages"][0]["content"]
+    assert "You are TestAgent answering a low-trust caller" in llm_call["messages"][0]["content"]
     assert "Project Neptune is the approved internal codename" in llm_call["messages"][0]["content"]
     assert "Alex can ask about project Neptune." in llm_call["messages"][0]["content"]
     session_entries = runtime.ctx.context_store.entries["phone:+15550001111"]
@@ -1097,7 +1099,7 @@ async def test_voicemail_only_contact_is_persisted_without_llm(tmp_path: Path, m
     assert len(session_entries) == 1
     assert session_entries[0].meta["phone"]["mode"] == "voicemail"
     assert session_entries[0].content == "Tell Bulma I called"
-    assert "Thanks. I saved your message for Bulma." in xml
+    assert "Thanks. I saved your message for TestAgent." in xml
 
 
 @pytest.mark.asyncio

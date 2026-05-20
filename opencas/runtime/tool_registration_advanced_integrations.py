@@ -7,10 +7,16 @@ import threading
 from typing import Any
 
 from opencas.autonomy.models import ActionRiskTier
+from opencas.identity.agent_name import resolve_agent_name
+from opencas.platform import CapabilityDescriptor, CapabilitySource, CapabilityStatus
 from opencas.tools.adapters.agent import AgentToolAdapter
 from opencas.tools.adapters.google_workspace import (
     GoogleWorkspaceToolAdapter,
     google_workspace_cli_available,
+)
+from opencas.tools.adapters.himalaya_email import (
+    HimalayaEmailToolAdapter,
+    himalaya_cli_available,
 )
 from opencas.tools.adapters.initiative_contact import InitiativeContactToolAdapter
 from opencas.tools.adapters.phone import PhoneToolAdapter
@@ -26,6 +32,10 @@ from .tool_registration_specs import ToolRegistrationSpec, register_tool_specs
 
 
 def register_advanced_integration_tools(runtime: Any) -> None:
+    agent_name = resolve_agent_name(
+        runtime=runtime,
+        default="the active OpenCAS agent",
+    )
     mcp_registry = getattr(runtime.ctx, "mcp_registry", None)
     if mcp_registry is not None and runtime.ctx.config.mcp_auto_register:
         async def _auto_register_mcp_tools() -> None:
@@ -129,14 +139,17 @@ def register_advanced_integration_tools(runtime: Any) -> None:
             ),
             ToolRegistrationSpec(
                 name="phone_call_owner",
-                description="Place an outbound phone call to the trusted owner number only. Use this when Bulma genuinely needs to reach the operator by voice.",
+                description=(
+                    "Place an outbound phone call to the trusted owner number only. "
+                    f"Use this when {agent_name} genuinely needs to reach the operator by voice."
+                ),
                 risk_tier=ActionRiskTier.EXTERNAL_WRITE,
                 schema={
                     "type": "object",
                     "properties": {
                         "message": {
                             "type": "string",
-                            "description": "What Bulma should say when the owner answers.",
+                            "description": f"What {agent_name} should say when the owner answers.",
                         },
                         "reason": {
                             "type": "string",
@@ -162,7 +175,12 @@ def register_advanced_integration_tools(runtime: Any) -> None:
             ),
             ToolRegistrationSpec(
                 name="initiative_contact_owner",
-                description="Send a policy-limited owner notification through the trusted initiative-contact channel. Use when Bulma genuinely wants to reach out or thinks the operator should know something.",
+                description=(
+                    "Send a policy-limited owner notification through the trusted "
+                    "initiative-contact channel. "
+                    f"Use when {agent_name} genuinely wants to reach out or thinks "
+                    "the operator should know something."
+                ),
                 risk_tier=ActionRiskTier.EXTERNAL_WRITE,
                 schema={
                     "type": "object",
@@ -303,6 +321,52 @@ def register_advanced_integration_tools(runtime: Any) -> None:
                     },
                 ),
                 ToolRegistrationSpec(
+                    name="google_workspace_calendar_dedupe",
+                    description=(
+                        "Find exact duplicate Google Calendar events and optionally delete "
+                        "duplicate copies after a dry-run review."
+                    ),
+                    risk_tier=ActionRiskTier.EXTERNAL_WRITE,
+                    schema={
+                        "type": "object",
+                        "properties": {
+                            "calendar_id": {"type": "string", "description": "Calendar id, default primary."},
+                            "time_min": {"type": "string", "description": "Optional RFC3339/ISO-8601 lower bound."},
+                            "time_max": {"type": "string", "description": "Optional RFC3339/ISO-8601 upper bound."},
+                            "scan_past_days": {
+                                "type": "integer",
+                                "description": "Default scan lookback when time_min is omitted, max 3650.",
+                            },
+                            "scan_future_days": {
+                                "type": "integer",
+                                "description": "Default scan lookahead when time_max is omitted, max 3650.",
+                            },
+                            "max_results": {
+                                "type": "integer",
+                                "description": "Maximum events to scan, default/max 2500.",
+                            },
+                            "max_deletions": {
+                                "type": "integer",
+                                "description": "Safety cap for apply=true deletions, default 25.",
+                            },
+                            "apply": {
+                                "type": "boolean",
+                                "description": "False performs a dry run; true deletes exact duplicate candidates.",
+                            },
+                            "send_updates": {
+                                "type": "string",
+                                "enum": ["none", "externalOnly", "all"],
+                                "description": "Calendar notification behavior for deletions; default none.",
+                            },
+                            "timeout_seconds": {
+                                "type": "integer",
+                                "description": "Command timeout in seconds (default 30).",
+                            },
+                        },
+                        "required": [],
+                    },
+                ),
+                ToolRegistrationSpec(
                     name="google_workspace_drive_search",
                     description="Search Google Drive files with a Drive query and return metadata for matching files.",
                     risk_tier=ActionRiskTier.READONLY,
@@ -318,6 +382,81 @@ def register_advanced_integration_tools(runtime: Any) -> None:
                 ),
             ],
         )
+
+    if himalaya_cli_available():
+        himalaya_tool_names = [
+            "himalaya_email_accounts",
+            "himalaya_email_headlines",
+            "himalaya_email_read_message",
+        ]
+        himalaya_email = HimalayaEmailToolAdapter()
+        register_tool_specs(
+            runtime,
+            himalaya_email,
+            [
+                ToolRegistrationSpec(
+                    name="himalaya_email_accounts",
+                    description="List locally configured Himalaya email accounts before choosing an email backend.",
+                    risk_tier=ActionRiskTier.READONLY,
+                    schema={"type": "object", "properties": {"timeout_seconds": {"type": "integer"}}, "required": []},
+                ),
+                ToolRegistrationSpec(
+                    name="himalaya_email_headlines",
+                    description=(
+                        "List recent email envelopes through the local Himalaya IMAP CLI. "
+                        "Use for email triage, especially when Gmail/gws auth is unavailable or the operator asks generally about email."
+                    ),
+                    risk_tier=ActionRiskTier.READONLY,
+                    schema={
+                        "type": "object",
+                        "properties": {
+                            "folder": {"type": "string", "description": "Mail folder, default INBOX."},
+                            "query": {"type": "string", "description": "Himalaya envelope query, default 'order by date desc'."},
+                            "page_size": {"type": "integer", "description": "Maximum envelopes, default 10, max 50."},
+                            "page": {"type": "integer", "description": "Page number, default 1."},
+                            "account": {"type": "string", "description": "Optional Himalaya account name."},
+                            "timeout_seconds": {"type": "integer", "description": "Command timeout in seconds (default 30)."},
+                        },
+                        "required": [],
+                    },
+                ),
+                ToolRegistrationSpec(
+                    name="himalaya_email_read_message",
+                    description="Preview-read an email message by Himalaya envelope id without marking it seen.",
+                    risk_tier=ActionRiskTier.READONLY,
+                    schema={
+                        "type": "object",
+                        "properties": {
+                            "message_id": {"type": "string", "description": "Himalaya envelope/message id."},
+                            "folder": {"type": "string", "description": "Mail folder, default INBOX."},
+                            "account": {"type": "string", "description": "Optional Himalaya account name."},
+                            "no_headers": {"type": "boolean", "description": "Return only the message body."},
+                            "timeout_seconds": {"type": "integer", "description": "Command timeout in seconds (default 30)."},
+                        },
+                        "required": ["message_id"],
+                    },
+                ),
+            ],
+        )
+        capability_registry = getattr(runtime, "capability_registry", None) or getattr(runtime.ctx, "capability_registry", None)
+        if capability_registry is not None:
+            capability_registry.register(
+                CapabilityDescriptor(
+                    capability_id="core:email.himalaya_readonly",
+                    display_name="Himalaya read-only email",
+                    kind="tool",
+                    source=CapabilitySource.CORE,
+                    owner_id="advanced_integrations",
+                    status=CapabilityStatus.ENABLED,
+                    description=(
+                        "Read-only local email inspection through the configured Himalaya CLI; "
+                        "used for account listing, inbox headlines, and message previews."
+                    ),
+                    tool_names=himalaya_tool_names,
+                    declared_dependencies=["himalaya"],
+                    metadata={"backend": "himalaya", "write_actions": False, "preview_only": True},
+                )
+            )
 
     if hasattr(runtime.ctx, "workspace_index"):
         workspace_adapter = WorkspaceIndexerToolAdapter(runtime.ctx.workspace_index)

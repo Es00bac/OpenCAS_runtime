@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional
 
 from opencas.embeddings.models import EmbeddingRecord
 from opencas.embeddings.service import EmbeddingCache, EmbeddingService
@@ -53,21 +53,10 @@ async def import_qdrant_collection(
                 updated_at=now,
                 meta=meta,
             ))
-            # Also store under the native OpenCAS model_id so that cache
-            # lookups by EmbeddingService hit without recomputing.  Bulma
-            # used the same model (google/gemini-embedding-2-preview) so
-            # the vectors are identical — no re-embedding needed.
-            native_model_id = "google/gemini-embedding-2-preview"
-            if model_tag != native_model_id:
-                await cache.put(EmbeddingRecord(
-                    source_hash=source_hash,
-                    model_id=native_model_id,
-                    dimension=len(vector),
-                    vector=vector,
-                    created_at=now,
-                    updated_at=now,
-                    meta=meta,
-                ))
+            # Do not alias legacy vectors under the current OpenCAS embedding
+            # model. The active embedding model is owned by OpenLLMAuth and may
+            # differ from whatever produced the imported Qdrant point; downstream
+            # code must explicitly re-embed if it needs current-model vectors.
             count += 1
     except (ValueError, RuntimeError, PermissionError, OSError):
         pass

@@ -248,6 +248,34 @@ class TestDoctorNewChecks:
         assert check.details["total_non_compacted"] == 999
         assert check.message == "Compactable episodes: 298 (total non-compacted: 999)"
 
+    @pytest.mark.asyncio
+    async def test_compaction_lag_reports_sessionless_reference_material_without_failing(self):
+        context = MagicMock()
+        context.memory.compaction_backlog_stats = AsyncMock(
+            return_value={
+                "tail_size": 10,
+                "session_count": 3,
+                "session_non_compacted": 90,
+                "sessionless_non_compacted": 5000,
+                "non_compactable_reference_lag": 5000,
+                "total_non_compacted": 5090,
+                "compactable_lag": 42,
+                "compactable_session_count": 2,
+                "max_session_lag": 31,
+                "top_sessions": [{"session_id": "s1", "count": 31, "compactable": 21}],
+                "sessionless_kind_counts": {"artifact": 5000},
+            }
+        )
+        context.memory.list_non_compacted_episodes = AsyncMock(
+            return_value=[MagicMock(kind=EpisodeKind.ARTIFACT, session_id=None)] * 1000
+        )
+        doctor = Doctor(context=context)
+        check = await doctor.check_compaction_lag()
+        assert check.status == CheckStatus.PASS
+        assert check.details["lag"] == 42
+        assert check.details["non_compactable_reference_lag"] == 5000
+        assert check.message == "Compactable episodes: 42 (total non-compacted: 5090)"
+
 
     @pytest.mark.asyncio
     async def test_embedding_latency_skip_when_no_context(self):
@@ -471,6 +499,88 @@ class TestDoctorNewChecks:
         assert check.status == CheckStatus.FAIL
         assert check.details["worker_status"] == "timeout_killed"
         assert "timed out" in check.message
+
+    @pytest.mark.asyncio
+    async def test_consolidation_worker_status_warns_on_intentional_cancellation(self, tmp_path: Path):
+        status_path = tmp_path / "consolidation_worker" / "status.json"
+        status_path.parent.mkdir(parents=True)
+        status_path.write_text(
+            json.dumps(
+                {
+                    "status": "cancelled",
+                    "run_id": "run-1",
+                    "reason": "foreground_user_turn",
+                    "updated_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        context = SimpleNamespace(config=SimpleNamespace(state_dir=tmp_path))
+        doctor = Doctor(context=context)
+
+        check = await doctor.check_consolidation_worker()
+
+        assert check.status == CheckStatus.WARN
+        assert check.details["worker_status"] == "cancelled"
+        assert check.details["reason"] == "foreground_user_turn"
+        assert "foreground_user_turn" in check.message
+
+    @pytest.mark.asyncio
+    async def test_consolidation_worker_status_fails_when_running_pid_is_dead(self, tmp_path: Path):
+        status_path = tmp_path / "consolidation_worker" / "status.json"
+        status_path.parent.mkdir(parents=True)
+        status_path.write_text(
+            json.dumps(
+                {
+                    "status": "running",
+                    "run_id": "run-1",
+                    "pid": 99999999,
+                    "heartbeat_at": datetime.now(timezone.utc).isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        context = SimpleNamespace(config=SimpleNamespace(state_dir=tmp_path))
+        doctor = Doctor(context=context)
+
+        check = await doctor.check_consolidation_worker()
+
+        assert check.status == CheckStatus.FAIL
+        assert check.details["worker_status"] == "running"
+        assert check.details["pid_alive"] is False
+        assert "pid is not alive" in check.message
+
+    @pytest.mark.asyncio
+    async def test_consolidation_worker_status_warns_when_dead_pid_is_from_previous_boot(
+        self, tmp_path: Path
+    ):
+        worker_heartbeat = datetime(2026, 5, 10, 5, 30, 10, tzinfo=timezone.utc)
+        boot_ready_at = datetime(2026, 5, 10, 5, 30, 24, tzinfo=timezone.utc)
+        status_path = tmp_path / "consolidation_worker" / "status.json"
+        status_path.parent.mkdir(parents=True)
+        status_path.write_text(
+            json.dumps(
+                {
+                    "status": "running",
+                    "run_id": "run-before-restart",
+                    "pid": 99999999,
+                    "heartbeat_at": worker_heartbeat.isoformat(),
+                }
+            ),
+            encoding="utf-8",
+        )
+        context = SimpleNamespace(
+            config=SimpleNamespace(state_dir=tmp_path),
+            readiness=SimpleNamespace(snapshot=lambda: {"since": boot_ready_at.isoformat()}),
+        )
+        doctor = Doctor(context=context)
+
+        check = await doctor.check_consolidation_worker()
+
+        assert check.status == CheckStatus.WARN
+        assert check.details["worker_status"] == "running"
+        assert check.details["pid_alive"] is False
+        assert "previous boot" in check.message
 
     @pytest.mark.asyncio
     async def test_somatic_variance_fails_flat_snapshots(self):

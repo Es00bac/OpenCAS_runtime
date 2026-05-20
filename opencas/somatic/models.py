@@ -88,6 +88,10 @@ class SomaticState(BaseModel):
     # Optional free-form somatic tag for memory tagging
     somatic_tag: Optional[str] = None
 
+    # Explicit rest window requested by the operator. This gates autonomous loops
+    # without pretending fatigue itself must remain high for the whole break.
+    rest_until: Optional[datetime] = None
+
     def to_memory_salience_modifier(self) -> float:
         """Return a scalar that boosts memory salience when arousal/tension are high."""
         return 1.0 + (self.arousal * 0.3) + (self.tension * 0.3) - (self.fatigue * 0.2)

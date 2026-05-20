@@ -140,6 +140,31 @@ class CommitmentStore:
         """Return active commitments ordered by priority."""
         return await self.list_by_status(CommitmentStatus.ACTIVE, limit, offset)
 
+    async def list_since(
+        self,
+        since: Optional[datetime] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[Commitment]:
+        """Return recent commitments, optionally filtered by creation time."""
+        assert self._db is not None
+        params: list[object] = []
+        where = ""
+        if since is not None:
+            where = "WHERE created_at >= ?"
+            params.append(since.isoformat())
+        cursor = await self._db.execute(
+            f"""
+            SELECT * FROM commitments
+            {where}
+            ORDER BY created_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            tuple(params + [max(1, min(1000, int(limit))), max(0, int(offset))]),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_commitment(r) for r in rows]
+
     async def count_by_status(self, status: CommitmentStatus) -> int:
         """Return the number of commitments in a given status."""
         assert self._db is not None

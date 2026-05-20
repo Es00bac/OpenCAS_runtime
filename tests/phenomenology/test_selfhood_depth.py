@@ -20,11 +20,9 @@ simple score drop; it records observations and emits warnings.
 
 from __future__ import annotations
 
-import asyncio
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
-from unittest.mock import AsyncMock, MagicMock
+from typing import Any, List, Optional
 
 import pytest
 

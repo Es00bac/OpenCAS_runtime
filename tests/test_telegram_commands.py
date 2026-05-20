@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from opencas.autonomy.models import ApprovalMode
 from opencas.telegram_commands import (
     BOT_COMMAND_MENU,
     TelegramCommandRouter,
@@ -130,6 +131,10 @@ def _build_runtime() -> SimpleNamespace:
 
     runtime.calls = []
     runtime.converse = converse
+    runtime.approval = SimpleNamespace(
+        mode=ApprovalMode.AUTO_REVIEW,
+        set_mode=lambda mode: setattr(runtime.approval, "mode", mode),
+    )
     return runtime
 
 
@@ -154,6 +159,21 @@ async def test_help_lists_every_menu_command(tmp_path):
     reply = await router.dispatch(chat_id=1, user_id=1, text="/help")
     for name, _ in BOT_COMMAND_MENU:
         assert f"/{name}" in reply
+
+
+@pytest.mark.asyncio
+async def test_approval_mode_command_gets_and_sets_mode(tmp_path):
+    runtime = _build_runtime()
+    router = TelegramCommandRouter(runtime, state_path=tmp_path / "sessions.json")
+
+    current = await router.dispatch(chat_id=1, user_id=1, text="/approval_mode")
+    updated = await router.dispatch(chat_id=1, user_id=1, text="/approval_mode yolo")
+    invalid = await router.dispatch(chat_id=1, user_id=1, text="/approval_mode nope")
+
+    assert "auto_review" in current
+    assert "fully_autonomous" in updated
+    assert runtime.approval.mode is ApprovalMode.FULLY_AUTONOMOUS
+    assert "Invalid mode" in invalid
 
 
 @pytest.mark.asyncio

@@ -192,6 +192,7 @@ def _make_mock_runtime():
     work_store.summary_counts = AsyncMock(return_value={"total": 0, "ready": 0, "blocked": 0})
     work_store.list_all = AsyncMock(return_value=[])
     work_store.get = AsyncMock(return_value=None)
+    work_store.list_by_commitment = AsyncMock(return_value=[])
     work_store.save = AsyncMock(return_value=None)
     runtime.ctx.work_store = work_store
 
@@ -218,6 +219,8 @@ def _make_mock_runtime():
     runtime.ctx.tasks = task_store
 
     runtime.ctx.plan_store = plan_store
+    runtime.executive = MagicMock()
+    runtime.executive.reconcile_work_update = MagicMock()
 
     return runtime
 
@@ -1530,6 +1533,73 @@ def test_update_commitment() -> None:
     runtime.commitment_store.save.assert_awaited_once()
 
 
+def test_update_commitment_completes_linked_work() -> None:
+    runtime = _make_mock_runtime()
+    commitment_id = UUID("00000000-0000-0000-0000-000000000212")
+    linked_work = WorkObject(
+        stage=WorkStage.MICRO_TASK,
+        content="Create writing project 4246 audiobook.",
+        commitment_id=str(commitment_id),
+    )
+    commitment = Commitment(
+        commitment_id=commitment_id,
+        content="Create writing project 4246 audiobook",
+        status=CommitmentStatus.ACTIVE,
+        linked_work_ids=[str(linked_work.work_id)],
+        priority=5.0,
+    )
+    runtime.commitment_store.get = AsyncMock(return_value=commitment)
+    runtime.ctx.work_store.get = AsyncMock(return_value=linked_work)
+    app = _make_test_app(runtime)
+    client = TestClient(app)
+
+    resp = client.patch(
+        "/api/operations/commitments/commit-001",
+        json={"status": "completed"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["found"] is True
+    assert data["commitment"]["status"] == "completed"
+    saved_work = runtime.ctx.work_store.save.call_args.args[0]
+    assert saved_work.stage == WorkStage.ARTIFACT
+    assert saved_work.meta["terminal_commitment_status"] == "completed"
+    assert saved_work.meta["terminal_commitment_id"] == str(commitment_id)
+    runtime.executive.reconcile_work_update.assert_called_once_with(saved_work)
+
+
+def test_update_commitment_rejects_ongoing_income_support_without_evidence() -> None:
+    runtime = _make_mock_runtime()
+    commitment_id = UUID("00000000-0000-0000-0000-000000000313")
+    commitment = Commitment(
+        commitment_id=commitment_id,
+        content=(
+            "Support Jarrod in developing a productive routine and a realistic "
+            "non-employee income/business model"
+        ),
+        status=CommitmentStatus.ACTIVE,
+        priority=8.0,
+        tags=["jarrod_support", "routine", "income", "business_model", "follow_through"],
+        meta={"source": "workflow_create_commitment"},
+    )
+    runtime.commitment_store.get = AsyncMock(return_value=commitment)
+    app = _make_test_app(runtime)
+    client = TestClient(app)
+
+    resp = client.patch(
+        "/api/operations/commitments/commit-001",
+        json={"status": "completed"},
+    )
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["found"] is True
+    assert "completion_evidence" in data["error"]
+    assert data["commitment"]["status"] == "active"
+    runtime.commitment_store.save.assert_not_awaited()
+
+
 def test_update_plan() -> None:
     runtime = _make_mock_runtime()
     updated_plan = PlanEntry(
@@ -1770,6 +1840,33 @@ def test_list_tasks_empty() -> None:
     data = resp.json()
     assert data["counts"]["total"] == 0
     assert data["items"] == []
+
+
+def test_list_tasks_surfaces_held_schedule_tasks_as_waiting() -> None:
+    runtime = _make_mock_runtime()
+    now = datetime.now(timezone.utc)
+    task = SimpleNamespace(
+        task_id="task-held-001",
+        objective="Run scheduled follow-up",
+        status="held",
+        stage=SimpleNamespace(value="queued"),
+        created_at=now,
+        updated_at=now,
+        meta={"source": "schedule", "held_reason": "executive_recommended_pause"},
+        project_id=None,
+        commitment_id=None,
+    )
+    runtime.ctx.tasks.list_all = AsyncMock(return_value=[task])
+    app = _make_test_app(runtime)
+    client = TestClient(app)
+
+    resp = client.get("/api/operations/tasks")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["counts"]["waiting"] == 1
+    assert data["counts"]["active"] == 0
+    assert data["items"][0]["status"] == "held"
+    assert data["items"][0]["source"] == "schedule"
 
 
 def test_get_task_detail() -> None:

@@ -16,9 +16,9 @@ from opencas.daydream.models import (
     DaydreamReflection,
     DaydreamSpark,
 )
-from opencas.execution.models import ExecutionPhase, ExecutionReceipt, PhaseRecord, RepairTask
+from opencas.execution.models import ExecutionPhase, ExecutionReceipt, PhaseRecord
 from opencas.governance.models import ApprovalLedgerEntry
-from opencas.harness.models import NotebookEntry, NotebookEntryKind, ObjectiveLoop, ObjectiveStatus, ResearchNotebook
+from opencas.harness.models import ObjectiveLoop, ObjectiveStatus, ResearchNotebook
 from opencas.memory.models import Episode, EpisodeEdge, EpisodeKind
 from opencas.plugins.models import SkillEntry
 from opencas.somatic.models import AffectState, PrimaryEmotion, SomaticSnapshot, SocialTarget
@@ -39,7 +39,6 @@ from .models import (
     BulmaMemoryEdge,
     BulmaObjectiveLoop,
     BulmaResearchNotebook,
-    BulmaSession,
     BulmaSessionMessage,
     BulmaSkillEntry,
     BulmaSomaticState,

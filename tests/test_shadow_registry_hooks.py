@@ -10,7 +10,7 @@ from opencas.governance import BlockReason, ShadowRegistry, ShadowRegistryStore
 from opencas.infra import HookBus
 from opencas.runtime.shadow_registry_hooks import register_runtime_shadow_registry_hooks
 from opencas.runtime.tool_runtime import execute_runtime_tool
-from opencas.tools import FileSystemToolAdapter, ToolRegistry
+from opencas.tools import ToolRegistry
 from opencas.tools.adapters.process import ProcessToolAdapter
 from opencas.tools.adapters.shell import ShellToolAdapter
 from opencas.tools.validation import create_default_tool_validation_pipeline

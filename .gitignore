@@ -45,7 +45,6 @@ data/
 *.db
 *.db-journal
 *.jsonl
-!tests/legacy/fixtures/*.jsonl
 logs/
 scratch/
 .opencas/
@@ -81,6 +80,17 @@ dev-notes/snapshots/
 .omc/
 .playwright-cli/
 .research/
+output/
+verification/
+workspace/v3-projects/
+workspace/phase4_quality_baseline/
+workspace/chat_uploads/
+workspace/self/
+workspace/dreams/
+workspace/**/build/
+android/**/.gradle/
+android/**/build/
+android/**/local.properties
 nohup.out
 server.log
 temp_docs/
@@ -96,27 +106,7 @@ patch_*.py
 test_landscape*.py
 test_script.sh
 test_memory.py
+.worktrees/
 
-# Public release boundary
-# Keep the public repo limited to the clean source/docs/test surface.
-.claude/
-.codex/
-.lock
-.opencode/
-.opencas_test/
-.opencas_test_state/
-Chronicles/
-archive/
-autonomic-guardian-evolution/
-browser-image-automation/
-bulma-interface/
-bulma-secure-location/
-bulma-secure-location-apk/
-chat_uploads/
-content_engine/
-daydream-lab/
-memory-architecture-v1/
-my_website/
-research/
-schedules/
-/workspace/
+# Local Development Dashboard
+dev_dashboard/

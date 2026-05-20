@@ -9,7 +9,6 @@ meaningful under hash embeddings, but FTS + salience + recency are.
 from __future__ import annotations
 
 import asyncio
-import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path

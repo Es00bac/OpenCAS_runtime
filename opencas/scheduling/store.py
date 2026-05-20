@@ -201,6 +201,15 @@ class ScheduleStore:
             INSERT INTO schedule_runs (
                 run_id, schedule_id, scheduled_for, started_at, finished_at, status, task_id, error, meta
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(run_id) DO UPDATE SET
+                schedule_id = excluded.schedule_id,
+                scheduled_for = excluded.scheduled_for,
+                started_at = excluded.started_at,
+                finished_at = excluded.finished_at,
+                status = excluded.status,
+                task_id = excluded.task_id,
+                error = excluded.error,
+                meta = excluded.meta
             """,
             (
                 str(run.run_id),

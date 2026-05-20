@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter
@@ -45,7 +46,7 @@ class UserModelResponse(BaseModel):
     model_id: str
     updated_at: str
     explicit_preferences: Dict[str, Any]
-    inferred_goals: List[str]
+    inferred_goals: List[Dict[str, Any]]
     known_boundaries: List[str]
     trust_level: float
     uncertainty_areas: List[str]
@@ -60,6 +61,12 @@ class ContinuityResponse(BaseModel):
     updated_at: str
     last_session_id: Optional[str]
     last_shutdown_time: Optional[str]
+    last_persisted_at: Optional[str] = None
+    last_boot_time: Optional[str] = None
+    last_offline_started_at: Optional[str] = None
+    last_offline_duration_seconds: Optional[float] = None
+    continuous_present_score: float = 1.0
+    continuity_breadcrumb: Optional[str] = None
     boot_count: int
     version: str
     source_system: Optional[str] = None
@@ -138,7 +145,7 @@ def _user_model_to_dict(um: Any) -> Dict[str, Any]:
         "model_id": str(um.model_id),
         "updated_at": um.updated_at.isoformat(),
         "explicit_preferences": dict(um.explicit_preferences),
-        "inferred_goals": um.inferred_goals,
+        "inferred_goals": list(um.inferred_goals),
         "known_boundaries": um.known_boundaries,
         "trust_level": um.trust_level,
         "uncertainty_areas": um.uncertainty_areas,
@@ -155,6 +162,12 @@ def _continuity_to_dict(cs: Any) -> Dict[str, Any]:
         "updated_at": cs.updated_at.isoformat(),
         "last_session_id": cs.last_session_id,
         "last_shutdown_time": cs.last_shutdown_time.isoformat() if cs.last_shutdown_time else None,
+        "last_persisted_at": cs.last_persisted_at.isoformat() if getattr(cs, "last_persisted_at", None) else None,
+        "last_boot_time": cs.last_boot_time.isoformat() if getattr(cs, "last_boot_time", None) else None,
+        "last_offline_started_at": cs.last_offline_started_at.isoformat() if getattr(cs, "last_offline_started_at", None) else None,
+        "last_offline_duration_seconds": getattr(cs, "last_offline_duration_seconds", None),
+        "continuous_present_score": getattr(cs, "continuous_present_score", 1.0),
+        "continuity_breadcrumb": getattr(cs, "continuity_breadcrumb", None),
         "boot_count": cs.boot_count,
         "version": cs.version,
         "source_system": getattr(cs, "source_system", None),
@@ -165,12 +178,26 @@ def _continuity_to_dict(cs: Any) -> Dict[str, Any]:
 
 def _belief_payload(belief: Any) -> Dict[str, Any]:
     timestamp = getattr(belief, "timestamp", None)
+    valid_from = getattr(belief, "valid_from", None)
+    valid_until = getattr(belief, "valid_until", None)
     return {
         "belief_id": str(getattr(belief, "belief_id", "")),
         "timestamp": timestamp.isoformat() if timestamp is not None else None,
         "subject": _enum_value(getattr(belief, "subject", "")),
         "predicate": getattr(belief, "predicate", ""),
+        "relation": getattr(belief, "relation", ""),
+        "object": getattr(belief, "object", ""),
         "confidence": getattr(belief, "confidence", None),
+        "effective_confidence": getattr(belief, "effective_confidence", None)
+        or getattr(belief, "confidence", None),
+        "evidence_ids": list(getattr(belief, "evidence_ids", []) or []),
+        "source_kind": getattr(belief, "source_kind", "unknown"),
+        "source_strength": getattr(belief, "source_strength", None),
+        "valid_from": valid_from.isoformat() if valid_from is not None else None,
+        "valid_until": valid_until.isoformat() if valid_until is not None else None,
+        "decay_rate": getattr(belief, "decay_rate", 0.0),
+        "supersedes": [str(item) for item in getattr(belief, "supersedes", []) or []],
+        "contradicted_by": [str(item) for item in getattr(belief, "contradicted_by", []) or []],
         "reinforcement_count": getattr(belief, "reinforcement_count", 0),
         "belief_revision_score": getattr(belief, "belief_revision_score", 0.0),
         "meta": dict(getattr(belief, "meta", {}) or {}),
@@ -197,6 +224,14 @@ def _count_by(items: List[Any], attr: str) -> Dict[str, int]:
         key = _enum_value(getattr(item, attr, "")) or "unknown"
         counts[key] = counts.get(key, 0) + 1
     return dict(sorted(counts.items()))
+
+
+def _recent_items(items: List[Any], limit: int) -> List[Any]:
+    return sorted(
+        items,
+        key=lambda item: getattr(item, "timestamp", None) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )[:limit]
 
 
 def build_identity_router(runtime: Any) -> APIRouter:
@@ -307,6 +342,7 @@ def build_identity_router(runtime: Any) -> APIRouter:
         )
 
     @r.get("/tom", response_model=TomSummaryResponse)
+    @r.get("/tom-summary", response_model=TomSummaryResponse)
     async def get_tom_summary(limit: int = 12) -> TomSummaryResponse:
         tom = getattr(runtime, "tom", None) or getattr(runtime.ctx, "tom", None)
         empty_counts = {
@@ -350,8 +386,8 @@ def build_identity_router(runtime: Any) -> APIRouter:
                 "active": by_status.get("active", 0),
                 "by_status": by_status,
             },
-            recent_beliefs=[_belief_payload(item) for item in beliefs[:bounded_limit]],
-            recent_intentions=[_intention_payload(item) for item in intentions[:bounded_limit]],
+            recent_beliefs=[_belief_payload(item) for item in _recent_items(beliefs, bounded_limit)],
+            recent_intentions=[_intention_payload(item) for item in _recent_items(intentions, bounded_limit)],
             consistency=consistency,
         )
 

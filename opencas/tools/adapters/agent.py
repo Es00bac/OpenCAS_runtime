@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 from ..models import ToolResult
 
@@ -36,7 +36,6 @@ class AgentToolAdapter:
             )
 
         from opencas.tools import ToolRegistry, ToolUseContext, ToolUseLoop
-        from opencas.autonomy.models import ActionRiskTier
 
         # Build a filtered registry that excludes the agent tool to avoid recursion
         sub_registry = ToolRegistry(

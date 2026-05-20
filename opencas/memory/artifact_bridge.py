@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Dict, Iterable, List, Optional
 from uuid import NAMESPACE_URL, uuid5
 
 from opencas.embeddings import EmbeddingService
@@ -125,7 +125,11 @@ class ArtifactMemoryBridge:
                     "chunk_count": len(chunks),
                     "artifact_sha256": artifact_hash,
                     "content_sha256": hashlib.sha256(chunk.encode("utf-8")).hexdigest(),
-                }
+                },
+                "source_lane": "reflective",
+                "origin_context_lane": "reflective",
+                "context_authority": "interpretation",
+                "context_material": "artifact",
             }
             content = (
                 f"Artifact memory from {relative_path}\n"

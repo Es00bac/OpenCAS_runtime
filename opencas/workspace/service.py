@@ -1,14 +1,24 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, List, Optional
 
 from opencas.api import LLMClient
 from opencas.embeddings import EmbeddingService
-from .store import WorkspaceStore
-from .scanner import FileSnapshot, classify_file, walk_workspace, sha256_file
+
 from .gisting import generate_validated_gist
+from .scanner import (
+    FileSnapshot,
+    classify_file,
+    sha256_file,
+    sha256_file_sync,
+    should_exclude_dir,
+    walk_workspace,
+)
+from .store import WorkspaceStore
+
 
 class WorkspaceIndexService:
     def __init__(
@@ -167,6 +177,40 @@ class WorkspaceIndexService:
             if force or not await self.store.checksum_exists(checksum):
                 await self._ensure_checksum_materialized(path, checksum, snapshot.file_kind)
 
+    async def record_write(self, abs_path: Path) -> Optional[str]:
+        """Materialize structural workspace index rows for one successful write."""
+        return await asyncio.to_thread(self.record_write_sync, abs_path)
+
+    def record_write_sync(self, abs_path: Path) -> Optional[str]:
+        """Synchronous record-write path usable from sync hook handlers."""
+        path = Path(abs_path).expanduser().resolve()
+        if not path.is_file():
+            return None
+        try:
+            stat = path.stat()
+        except OSError:
+            return None
+        checksum = sha256_file_sync(path)
+        if checksum == "ERROR_READING_FILE":
+            return None
+        root = self._root_for_path(path)
+        snapshot = FileSnapshot(
+            abs_path=path,
+            rel_path=path.relative_to(root) if root else Path(path.name),
+            parent_dir=path.parent,
+            file_name=path.name,
+            extension=path.suffix.lower() or None,
+            size_bytes=stat.st_size,
+            mtime_ns=stat.st_mtime_ns,
+            file_kind=classify_file(path),
+        )
+        WorkspaceStore.sync_upsert_path_and_checksum(
+            self.store.path,
+            snapshot=snapshot,
+            checksum=checksum,
+        )
+        return checksum
+
     def _root_for_path(self, path: Path) -> Path | None:
         for root in self.roots:
             resolved = Path(root).expanduser().resolve()
@@ -203,6 +247,89 @@ class WorkspaceIndexService:
     async def list_directory(self, dir_path: Path):
         return await self.store.get_gists_for_dir(dir_path)
 
+    async def list_directory_with_status(self, path: Path) -> dict[str, Any]:
+        directory = Path(path).expanduser().resolve()
+        indexed = await self.store.get_gists_for_dir(directory)
+        latest_scan = await self.store.latest_completed_scan()
+        last_scan_age_seconds: Optional[int] = None
+        scan_root: Optional[str] = None
+        if latest_scan:
+            scan_root = latest_scan.get("root_path")
+            finished_at = latest_scan.get("finished_at")
+            if finished_at:
+                try:
+                    finished = datetime.fromisoformat(finished_at)
+                    if finished.tzinfo is None:
+                        finished = finished.replace(tzinfo=timezone.utc)
+                    last_scan_age_seconds = max(
+                        0,
+                        int((datetime.now(timezone.utc) - finished.astimezone(timezone.utc)).total_seconds()),
+                    )
+                except Exception:
+                    last_scan_age_seconds = None
+
+        disk_exists = directory.is_dir()
+        disk_count = 0
+        disk_entries: list[Path] = []
+        disk_listing: list[dict[str, Any]] = []
+        if disk_exists:
+            for entry in directory.iterdir():
+                if entry.name.startswith("."):
+                    continue
+                if entry.is_dir() and should_exclude_dir(entry.name):
+                    continue
+                disk_entries.append(entry)
+            disk_count = len(disk_entries)
+            for entry in sorted(disk_entries, key=lambda item: item.name.lower()):
+                disk_listing.append(_disk_entry_status(entry))
+
+        disk_paths = {entry.resolve() for entry in disk_entries}
+        indexed_paths = {result.abs_path.resolve() for result in indexed}
+        not_indexed = [
+            _disk_entry_status(entry)
+            for entry in sorted(disk_entries, key=lambda item: item.name.lower())
+            if entry.resolve() not in indexed_paths
+        ]
+        missing_on_disk = [
+            {
+                "name": result.abs_path.name,
+                "path": str(result.abs_path),
+                "kind": result.file_kind,
+            }
+            for result in indexed
+            if result.abs_path.resolve() not in disk_paths
+        ]
+
+        fallback_used = bool(disk_exists and not indexed)
+        return {
+            "directory": str(directory),
+            "indexed_files": [
+                {
+                    "name": result.abs_path.name,
+                    "path": str(result.abs_path),
+                    "kind": result.file_kind,
+                    "checksum": result.checksum,
+                    "gist": result.gist_text,
+                    "needs_further_reading": result.needs_further_reading,
+                    "gist_pending": result.gist_text is None,
+                    "size_bytes": result.size_bytes,
+                }
+                for result in indexed
+            ],
+            "disk_listing": disk_listing,
+            "index_status": {
+                "last_scan_age_seconds": last_scan_age_seconds,
+                "indexed_count": len(indexed),
+                "disk_count": disk_count,
+                "fallback_used": fallback_used,
+                "live_listing_complete": disk_exists,
+                "scan_root": scan_root,
+                "not_indexed": not_indexed,
+                "missing_on_disk": missing_on_disk,
+                "stale_index_count": len(missing_on_disk),
+            },
+        }
+
     async def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
         query_embedding = await self.embeddings.embed(
             query,
@@ -230,3 +357,19 @@ class WorkspaceIndexService:
             if len(results) >= limit:
                 break
         return results
+
+
+def _disk_entry_status(entry: Path) -> dict[str, Any]:
+    item = {
+        "name": entry.name,
+        "path": str(entry.resolve()),
+        "kind": "directory" if entry.is_dir() else classify_file(entry),
+        "indexed": False,
+        "gist_pending": entry.is_file(),
+    }
+    if entry.is_file():
+        try:
+            item["size_bytes"] = entry.stat().st_size
+        except OSError:
+            item["size_bytes"] = None
+    return item

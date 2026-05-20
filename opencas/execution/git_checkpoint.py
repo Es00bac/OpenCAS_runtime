@@ -2,9 +2,25 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from pathlib import Path
 from typing import List, Optional
+
+
+logger = logging.getLogger(__name__)
+
+
+class GitCheckpointError(RuntimeError):
+    """Raised when a git checkpoint command fails."""
+
+    def __init__(self, cmd: List[str], returncode: int, stderr: str) -> None:
+        self.cmd = cmd
+        self.returncode = returncode
+        self.stderr = stderr
+        super().__init__(
+            f"git checkpoint command failed ({returncode}): {' '.join(cmd)}: {stderr}"
+        )
 
 
 class GitCheckpointManager:
@@ -47,38 +63,48 @@ class GitCheckpointManager:
 
     def _run_git(self, args: List[str], cwd: Optional[Path] = None) -> str:
         cwd = cwd or self._repo_root_path()
+        cmd = ["git", *args]
         result = subprocess.run(
-            ["git", *args],
+            cmd,
             cwd=str(cwd),
             capture_output=True,
             text=True,
         )
+        if result.returncode != 0:
+            stderr = (result.stderr or result.stdout or "").strip()
+            raise GitCheckpointError(cmd, result.returncode, stderr)
         return result.stdout.strip()
 
-    def snapshot(self, file_paths: List[str], message: str = "auto-checkpoint") -> str:
+    def snapshot(self, file_paths: List[str], message: str = "auto-checkpoint") -> Optional[str]:
         """Commit the given files and return the commit hash."""
-        root = self._repo_root_path()
+        try:
+            root = self._repo_root_path()
 
-        # Ensure files are tracked
-        for fp in file_paths:
-            src = Path(fp).resolve()
-            if src.exists():
-                rel = src.relative_to(root) if src.is_relative_to(root) else src.name
-                self._run_git(["add", str(rel)], cwd=root)
+            # Ensure files are tracked
+            for fp in file_paths:
+                src = Path(fp).resolve()
+                if src.exists():
+                    rel = src.relative_to(root) if src.is_relative_to(root) else src.name
+                    self._run_git(["add", str(rel)], cwd=root)
 
-        self._run_git(["commit", "-m", message, "--allow-empty"], cwd=root)
-        commit_hash = self._run_git(["rev-parse", "HEAD"], cwd=root)
-        tag = f"opencas-checkpoint-{commit_hash[:12]}"
-        self._run_git(["tag", "-f", tag, commit_hash], cwd=root)
-        return commit_hash
+            self._run_git(["commit", "-m", message, "--allow-empty"], cwd=root)
+            commit_hash = self._run_git(["rev-parse", "HEAD"], cwd=root)
+            tag = f"opencas-checkpoint-{commit_hash[:12]}"
+            self._run_git(["tag", "-f", tag, commit_hash], cwd=root)
+            return commit_hash
+        except GitCheckpointError as exc:
+            logger.warning("git checkpoint snapshot failed: %s", exc)
+            return None
 
     def restore(self, commit_hash: Optional[str] = None) -> None:
-        """Restore files to *commit_hash* or the latest checkpoint tag."""
+        """Restore files to *commit_hash*."""
         root = self._repo_root_path()
-        if commit_hash is None:
-            commit_hash = self._latest_checkpoint(root)
-        if not commit_hash:
-            return
+        if commit_hash is None or not commit_hash.strip() or commit_hash == "HEAD":
+            raise GitCheckpointError(
+                ["git", "restore-checkpoint", str(commit_hash or "")],
+                128,
+                f"invalid checkpoint commit: {commit_hash!r}",
+            )
         self._run_git(["checkout", commit_hash, "--", "."], cwd=root)
         self._run_git(["reset", "--mixed", commit_hash], cwd=root)
 

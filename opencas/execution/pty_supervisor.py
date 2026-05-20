@@ -18,6 +18,8 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
+from opencas.tools.environment import build_tool_execution_env
+
 # Matches ANSI escape sequences: CSI (ESC[...), OSC (ESC]...), DCS, and bare ESC codes.
 _ANSI_RE = re.compile(
     r"\x1b"           # ESC character
@@ -160,6 +162,7 @@ class PtySupervisor:
                 text=False,
                 close_fds=True,
                 start_new_session=True,
+                env=build_tool_execution_env(),
             )
         except Exception:
             os.close(master_fd)

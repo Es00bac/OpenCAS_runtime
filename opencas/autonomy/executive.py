@@ -7,13 +7,14 @@ Integrates with identity self_model and somatic state.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
 import math
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from opencas.autonomy.completion_evidence import requires_explicit_completion_evidence
 from opencas.identity import IdentityManager
 from opencas.identity.text_hygiene import is_bootstrap_placeholder_intention
 from opencas.somatic import SomaticManager
@@ -21,7 +22,16 @@ from opencas.telemetry import EventKind, Tracer
 
 from .commitment import CommitmentStatus
 from .commitment_store import CommitmentStore
-from .goal_hygiene import split_live_and_parked_goals
+from .goal_hygiene import (
+    hard_reject_goal_reason,
+    is_hard_reject_goal_reason,
+    is_self_referential_suppression_metadata,
+    split_live_and_parked_goals,
+)
+from .executive_pause_reason import (
+    is_executive_pause_reason,
+    is_known_executive_pause_reason,
+)
 from .models import WorkObject, WorkStage
 from .work_store import WorkStore
 
@@ -32,9 +42,11 @@ _ARCHIVABLE_PARK_REASONS = frozenset(
         "machine_fragment_goal",
         "numbered_fragment_goal",
         "path_fragment_goal",
+        "stale_promoted_work_fragment",
     }
 )
 _PARKED_RESIDUE_ARCHIVE_THRESHOLD = 6
+_LOW_DIVERGENCE_REFRAME_LIVE_LIMIT = 1
 
 
 class ExecutiveSnapshot(BaseModel):
@@ -76,6 +88,7 @@ class ExecutiveState:
         self._parked_goal_metadata: Dict[str, Dict[str, Any]] = {}
         self._archived_parked_goals: List[str] = []
         self._archived_parked_goal_metadata: Dict[str, Dict[str, Any]] = {}
+        self._suppressed_parked_goal_rejections: List[Dict[str, Any]] = []
         self._task_queue: List[WorkObject] = []
         self._max_capacity: int = 5
         self._max_queue_depth: Optional[int] = None
@@ -97,6 +110,7 @@ class ExecutiveState:
         self._sync_identity_intention(
             intention,
             previous_intention=previous_intention,
+            force=source == "tasklist_live_objective",
         )
         self._trace("intention_set", {"intention": intention, "source": self._intention_source})
         self._auto_save()
@@ -137,9 +151,26 @@ class ExecutiveState:
     def archived_parked_goal_metadata(self) -> Dict[str, Dict[str, Any]]:
         return dict(self._archived_parked_goal_metadata)
 
+    def consume_suppressed_parked_goal_rejections(self) -> List[Dict[str, Any]]:
+        """Return and clear suppression metadata rejected while loading snapshots."""
+        rejections = list(self._suppressed_parked_goal_rejections)
+        self._suppressed_parked_goal_rejections.clear()
+        return rejections
+
     def add_goal(self, goal: str) -> None:
         normalized_goal = str(goal or "").strip()
         if not normalized_goal:
+            return
+        rejection_reason = hard_reject_goal_reason(normalized_goal)
+        if rejection_reason:
+            self._trace(
+                "goal_rejected",
+                {
+                    "goal": normalized_goal,
+                    "reason": rejection_reason,
+                    "source": "add_goal",
+                },
+            )
             return
         previous_identity_goals = list(getattr(self.identity.self_model, "current_goals", []) or [])
         goal_surface = split_live_and_parked_goals([normalized_goal])
@@ -193,6 +224,21 @@ class ExecutiveState:
     ) -> bool:
         normalized_goal = str(goal or "").strip()
         if not normalized_goal:
+            return False
+        if is_self_referential_suppression_metadata(
+            normalized_goal,
+            reason=reason,
+            source_artifact=source_artifact,
+            details=details,
+        ):
+            self._trace(
+                "parked_goal_suppression_metadata_rejected",
+                {
+                    "goal": normalized_goal,
+                    "reason": reason,
+                    "source_artifact": source_artifact,
+                },
+            )
             return False
 
         changed = False
@@ -317,6 +363,59 @@ class ExecutiveState:
             return compact
         return compact[: max(0, limit - 3)].rstrip() + "..."
 
+    def _generated_goal_for_work(self, work: WorkObject) -> str:
+        """Return the default active-goal text generated from a work object."""
+
+        return f"Advance promoted work: {self._work_preview(work, limit=96)}"
+
+    def _work_goal_rejection_reason(self, work: WorkObject) -> Optional[str]:
+        """Return a hygiene rejection reason for work that should not enter live focus."""
+
+        if work.stage not in (WorkStage.MICRO_TASK, WorkStage.PROJECT_SEED, WorkStage.PROJECT):
+            return None
+        explicit = str((work.meta or {}).get("active_goal") or "").strip()
+        return hard_reject_goal_reason(explicit or self._generated_goal_for_work(work))
+
+    def _block_rejected_work(self, work: WorkObject, *, reason: str, source: str) -> None:
+        """Move residue work out of the ready queue without deleting its provenance."""
+
+        marker = f"goal_hygiene:{reason}"
+        if marker not in work.blocked_by:
+            work.blocked_by.append(marker)
+        work.updated_at = datetime.now(timezone.utc)
+        work.meta = dict(work.meta or {})
+        work.meta["goal_hygiene_rejected_at"] = work.updated_at.isoformat()
+        work.meta["goal_hygiene_rejected_reason"] = reason
+        work.meta["goal_hygiene_rejected_source"] = source
+        self._sync_work(work)
+
+    def _ensure_active_goal_from_work(self, work: WorkObject, *, source: str) -> bool:
+        """Create a live goal when promoted work enters the executive queue."""
+        if work.stage not in (WorkStage.MICRO_TASK, WorkStage.PROJECT_SEED, WorkStage.PROJECT):
+            return False
+        explicit = str((work.meta or {}).get("active_goal") or "").strip()
+        goal = explicit or self._generated_goal_for_work(work)
+        rejection_reason = hard_reject_goal_reason(goal)
+        if rejection_reason:
+            self._trace(
+                "goal_rejected",
+                {
+                    "goal": goal,
+                    "reason": rejection_reason,
+                    "source": source,
+                    "work_id": str(work.work_id),
+                },
+            )
+            return False
+        if goal in self._active_goals:
+            return False
+        self._active_goals.append(goal)
+        self._trace(
+            "goal_added_from_work",
+            {"goal": goal, "source": source, "work_id": str(work.work_id)},
+        )
+        return True
+
     def queue_metadata(self) -> List[Dict[str, Any]]:
         """Return queue items with a stable active/held contract."""
         ordered_queue = sorted(self._task_queue, key=self._dequeue_sort_key)
@@ -353,12 +452,28 @@ class ExecutiveState:
         """
         if commitment_id is not None:
             work.commitment_id = commitment_id
+        rejection_reason = self._work_goal_rejection_reason(work)
+        if rejection_reason:
+            self._block_rejected_work(work, reason=rejection_reason, source="enqueue")
+            self._trace(
+                "enqueue_rejected",
+                {
+                    "work_id": str(work.work_id),
+                    "reason": rejection_reason,
+                    "content": self._work_preview(work, limit=160),
+                },
+            )
+            return False
         if len(self._task_queue) >= self.queue_hard_cap:
             self._trace("enqueue_rejected", {"work_id": str(work.work_id), "reason": "capacity"})
             return False
+        previous_identity_goals = list(getattr(self.identity.self_model, "current_goals", []) or [])
         self._task_queue.append(work)
         self._normalize_queue_state()
+        goal_changed = self._ensure_active_goal_from_work(work, source="enqueue")
         self._sync_work(work)
+        if goal_changed:
+            self._sync_identity_goals(previous_goals=previous_identity_goals)
         self._sync_structural_load()
         self._trace("enqueue_accepted", {"work_id": str(work.work_id), "stage": work.stage.value})
         self._auto_save()
@@ -387,6 +502,57 @@ class ExecutiveState:
                 return True
         return False
 
+    def reconcile_work_update(self, work: WorkObject) -> bool:
+        """Reflect external work-store edits in the live queue and goals.
+
+        Operations routes can demote or block work without going through
+        ``enqueue``/``dequeue``. When that happens, the work should remain in the
+        durable store, but it must stop occupying live executive focus.
+        """
+
+        work_id = str(work.work_id)
+        executable = work.stage in (
+            WorkStage.MICRO_TASK,
+            WorkStage.PROJECT_SEED,
+            WorkStage.PROJECT,
+        ) and not work.blocked_by
+        if executable:
+            return False
+
+        previous_identity_goals = list(getattr(self.identity.self_model, "current_goals", []) or [])
+        changed = False
+        before = len(self._task_queue)
+        self._task_queue = [item for item in self._task_queue if str(item.work_id) != work_id]
+        if len(self._task_queue) != before:
+            changed = True
+            self._normalize_queue_state()
+
+        explicit = str((work.meta or {}).get("active_goal") or "").strip()
+        goal = explicit or self._generated_goal_for_work(work)
+        if goal in self._active_goals:
+            still_queued = any(
+                (str(item.work_id) != work_id)
+                and (str((item.meta or {}).get("active_goal") or "").strip() or self._generated_goal_for_work(item)) == goal
+                for item in self._task_queue
+            )
+            if not still_queued:
+                self._active_goals.remove(goal)
+                changed = True
+
+        if changed:
+            self._sync_identity_goals(previous_goals=previous_identity_goals)
+            self._sync_structural_load()
+            self._trace(
+                "work_update_reconciled",
+                {
+                    "work_id": work_id,
+                    "stage": work.stage.value if hasattr(work.stage, "value") else str(work.stage),
+                    "blocked_by": list(work.blocked_by),
+                },
+            )
+            self._auto_save()
+        return changed
+
     async def restore_queue(self, limit: int = 100) -> int:
         """Load ready work objects from the store into the task queue.
 
@@ -396,8 +562,24 @@ class ExecutiveState:
             return 0
         work_items = await self.work_store.list_ready(limit=limit)
         restored = 0
+        previous_identity_goals = list(getattr(self.identity.self_model, "current_goals", []) or [])
+        goal_changed = False
         for work in work_items:
             if work.stage in (WorkStage.MICRO_TASK, WorkStage.PROJECT_SEED, WorkStage.PROJECT):
+                rejection_reason = self._work_goal_rejection_reason(work)
+                if rejection_reason:
+                    self._block_rejected_work(work, reason=rejection_reason, source="restore_queue")
+                    if self.work_store:
+                        await self.work_store.save(work)
+                    self._trace(
+                        "restore_queue_skipped",
+                        {
+                            "work_id": str(work.work_id),
+                            "reason": rejection_reason,
+                            "content": self._work_preview(work, limit=160),
+                        },
+                    )
+                    continue
                 if work.commitment_id and self.commitment_store:
                     commitment = await self.commitment_store.get(work.commitment_id)
                     if commitment and commitment.status != CommitmentStatus.ACTIVE:
@@ -409,9 +591,15 @@ class ExecutiveState:
                     if not any(str(w.work_id) == str(work.work_id) for w in self._task_queue):
                         self._task_queue.append(work)
                         self._normalize_queue_state()
+                        goal_changed = (
+                            self._ensure_active_goal_from_work(work, source="restore_queue")
+                            or goal_changed
+                        )
                         restored += 1
                 else:
                     break
+        if goal_changed:
+            self._sync_identity_goals(previous_goals=previous_identity_goals)
         self._sync_structural_load()
         self._trace("queue_restored", {"restored": restored})
         self._auto_save()
@@ -420,7 +608,11 @@ class ExecutiveState:
     def restore_goals_from_identity(self) -> int:
         """Hydrate active goals from the identity self-model."""
         identity_goals = list(getattr(self.identity.self_model, "current_goals", []) or [])
-        goal_surface = split_live_and_parked_goals(identity_goals)
+        filtered_identity_goals, rejected = self._filter_hard_rejected_goals(
+            identity_goals,
+            source="identity.current_goals",
+        )
+        goal_surface = split_live_and_parked_goals(filtered_identity_goals)
         added = 0
         for g in goal_surface.active_goals:
             if g and g not in self._active_goals:
@@ -431,10 +623,13 @@ class ExecutiveState:
             goal_surface.parked_reasons,
         )
         compacted = self._compact_parked_goal_residue()
-        if added or parked_changed or compacted:
+        if added or parked_changed or compacted or rejected:
             self._sync_identity_goals(previous_goals=identity_goals)
             self._sync_structural_load()
-            self._trace("goals_restored_from_identity", {"count": added})
+            self._trace(
+                "goals_restored_from_identity",
+                {"count": added, "rejected_count": len(rejected)},
+            )
             self._auto_save()
         return added
 
@@ -449,13 +644,18 @@ class ExecutiveState:
             )
             self._intention = snap.intention
             self._intention_source = snap.intention_source
-            self._active_goals = list(snap.active_goals)
+            self._active_goals, rejected_active = self._filter_hard_rejected_goals(
+                snap.active_goals,
+                source="snapshot.active_goals",
+            )
             self._parked_goals = list(snap.parked_goals)
             self._parked_goal_reasons = dict(snap.parked_goal_reasons)
             self._parked_goal_metadata = dict(snap.parked_goal_metadata)
             self._archived_parked_goals = list(snap.archived_parked_goals)
             self._archived_parked_goal_metadata = dict(snap.archived_parked_goal_metadata)
+            rejected_parked = self._drop_hard_rejected_parked_goals(source="snapshot.parked_goals")
             self._merge_parked_goals(self._parked_goals, self._parked_goal_reasons)
+            reconciled = self._reconcile_suppressed_parked_goal_metadata()
             goal_surface = split_live_and_parked_goals(self._active_goals)
             self._active_goals = list(goal_surface.active_goals)
             self._merge_parked_goals(goal_surface.parked_goals, goal_surface.parked_reasons)
@@ -473,10 +673,16 @@ class ExecutiveState:
                     "goals_count": len(self._active_goals),
                     "parked_goal_count": len(self._parked_goals),
                     "archived_parked_goal_count": len(self._archived_parked_goals),
+                    "rejected_goal_count": len(rejected_active) + len(rejected_parked),
                 },
             )
-            if compacted:
+            if compacted or rejected_active or rejected_parked:
                 self._auto_save()
+            elif reconciled:
+                self._trace(
+                    "snapshot_suppression_metadata_reconciled",
+                    {"rejected_count": len(self._suppressed_parked_goal_rejections)},
+                )
         except Exception:
             pass
 
@@ -518,6 +724,8 @@ class ExecutiveState:
         if self.commitment_store:
             commitments = await self.commitment_store.list_active()
             for commitment in commitments:
+                if self._requires_explicit_completion_evidence(commitment):
+                    continue
                 if self._goal_satisfied_by(commitment.content, completed_text):
                     resolved.append(commitment.content)
                     await self.commitment_store.update_status(
@@ -581,11 +789,17 @@ class ExecutiveState:
         overlap = len(goal_tokens & text_tokens)
         return overlap >= max(2, len(goal_tokens) * 0.3)
 
+    @staticmethod
+    def _requires_explicit_completion_evidence(commitment: Any) -> bool:
+        """Evidence-bearing commitments need proof, not keyword overlap."""
+        return requires_explicit_completion_evidence(commitment)
+
     def _sync_identity_intention(
         self,
         intention: Optional[str],
         *,
         previous_intention: Optional[str],
+        force: bool = False,
     ) -> None:
         """Synchronize stale placeholder self-intentions with live executive intent."""
         candidate = str(intention or "").strip() or None
@@ -595,7 +809,7 @@ class ExecutiveState:
         current = str(self.identity.self_model.current_intention or "").strip()
         if current == candidate:
             return
-        if current and not (
+        if current and not force and not (
             is_bootstrap_placeholder_intention(current)
             or (previous_intention is not None and current == previous_intention)
         ):
@@ -662,8 +876,16 @@ class ExecutiveState:
         """Return the executive pause reason, if any."""
         if self.is_overloaded:
             return "overload"
-        if self.somatic and self.somatic.state.fatigue > 0.7:
-            return "fatigue"
+        if self.somatic:
+            state = self.somatic.state
+            rest_until = getattr(state, "rest_until", None)
+            if rest_until is not None:
+                if getattr(rest_until, "tzinfo", None) is None:
+                    rest_until = rest_until.replace(tzinfo=timezone.utc)
+                if rest_until > datetime.now(timezone.utc):
+                    return "operator_rest"
+            if state.fatigue > 0.7:
+                return "fatigue"
         return None
 
     def recommend_pause(self) -> bool:
@@ -710,10 +932,21 @@ class ExecutiveState:
         changed = False
         reason_map = reasons or {}
         for goal in goals:
+            reason = reason_map.get(goal)
+            rejection_reason = hard_reject_goal_reason(goal)
+            if rejection_reason or is_hard_reject_goal_reason(reason):
+                self._trace(
+                    "goal_rejected",
+                    {
+                        "goal": goal,
+                        "reason": rejection_reason or reason,
+                        "source": "parked_goal_merge",
+                    },
+                )
+                continue
             if goal not in self._parked_goals:
                 self._parked_goals.append(goal)
                 changed = True
-            reason = reason_map.get(goal)
             if reason and self._parked_goal_reasons.get(goal) != reason:
                 self._parked_goal_reasons[goal] = reason
                 changed = True
@@ -724,13 +957,108 @@ class ExecutiveState:
                 changed = True
         return changed
 
+    def _filter_hard_rejected_goals(
+        self,
+        goals: List[str],
+        *,
+        source: str,
+    ) -> tuple[List[str], List[Dict[str, str]]]:
+        kept: List[str] = []
+        rejected: List[Dict[str, str]] = []
+        for raw_goal in goals:
+            goal = str(raw_goal or "").strip()
+            if not goal:
+                continue
+            reason = hard_reject_goal_reason(goal)
+            if reason:
+                record = {"goal": goal, "reason": reason, "source": source}
+                rejected.append(record)
+                self._trace("goal_rejected", record)
+                continue
+            kept.append(goal)
+        return kept, rejected
+
+    def _drop_hard_rejected_parked_goals(self, *, source: str) -> List[Dict[str, str]]:
+        rejected: List[Dict[str, str]] = []
+        for goal in list(self._parked_goals):
+            reason = (
+                hard_reject_goal_reason(goal)
+                or self._parked_goal_reasons.get(goal)
+                or (self._parked_goal_metadata.get(goal) or {}).get("reason")
+            )
+            if not is_hard_reject_goal_reason(reason):
+                continue
+            if goal in self._parked_goals:
+                self._parked_goals.remove(goal)
+            self._parked_goal_reasons.pop(goal, None)
+            self._parked_goal_metadata.pop(goal, None)
+            record = {"goal": goal, "reason": str(reason), "source": source}
+            rejected.append(record)
+            self._trace("goal_rejected", record)
+        return rejected
+
+    def _reconcile_suppressed_parked_goal_metadata(self) -> bool:
+        """Remove loaded suppression packets from the active parked-goal surface."""
+        changed = False
+        for goal in list(self._parked_goals):
+            metadata = dict(self._parked_goal_metadata.get(goal) or {})
+            reason = str(
+                metadata.get("reason")
+                or self._parked_goal_reasons.get(goal)
+                or ""
+            ).strip()
+            source_artifact = metadata.get("source_artifact")
+            if not is_self_referential_suppression_metadata(
+                goal,
+                reason=reason,
+                source_artifact=str(source_artifact) if source_artifact is not None else None,
+                details=metadata,
+            ):
+                continue
+
+            if goal in self._parked_goals:
+                self._parked_goals.remove(goal)
+                changed = True
+            self._parked_goal_reasons.pop(goal, None)
+            self._parked_goal_metadata.pop(goal, None)
+            rejection = {
+                "goal": goal,
+                "reason": reason,
+                "source_artifact": source_artifact,
+                "metadata": metadata,
+            }
+            self._suppressed_parked_goal_rejections.append(rejection)
+            self._trace(
+                "parked_goal_suppression_metadata_loaded_rejected",
+                {
+                    "goal": goal,
+                    "reason": reason,
+                    "source_artifact": source_artifact,
+                },
+            )
+        return changed
+
     def _compact_parked_goal_residue(self) -> bool:
-        candidates = [
+        routine_residue = [
             goal
             for goal in self._parked_goals
             if self._should_archive_parked_goal(goal)
         ]
-        if len(candidates) < _PARKED_RESIDUE_ARCHIVE_THRESHOLD:
+        candidates: List[str] = []
+        if len(routine_residue) >= _PARKED_RESIDUE_ARCHIVE_THRESHOLD:
+            candidates.extend(routine_residue)
+
+        low_divergence_reframes = [
+            goal
+            for goal in self._parked_goals
+            if self._is_low_divergence_reframe_goal(goal)
+        ]
+        overflow_count = max(0, len(low_divergence_reframes) - _LOW_DIVERGENCE_REFRAME_LIVE_LIMIT)
+        if overflow_count:
+            candidates.extend(low_divergence_reframes[:overflow_count])
+
+        candidates = list(dict.fromkeys(candidates))
+        if not candidates:
             return False
 
         archived_at = datetime.now(timezone.utc).isoformat()
@@ -738,15 +1066,20 @@ class ExecutiveState:
         changed = False
         for goal in list(candidates):
             metadata = dict(self._parked_goal_metadata.get(goal) or {})
+            archive_reason = (
+                "low_divergence_reframe_limit"
+                if self._is_low_divergence_reframe_goal(goal)
+                else "residue_compaction"
+            )
             reason = str(
                 metadata.get("reason")
                 or self._parked_goal_reasons.get(goal)
-                or "residue_compaction"
-            ).strip() or "residue_compaction"
+                or archive_reason
+            ).strip() or archive_reason
             reason_counts[reason] = reason_counts.get(reason, 0) + 1
             metadata["reason"] = reason
             metadata["archived_at"] = archived_at
-            metadata["archive_reason"] = "residue_compaction"
+            metadata["archive_reason"] = archive_reason
             metadata.setdefault(
                 "wake_trigger",
                 "fresh failing artifact, materially new evidence, or direct user request",
@@ -791,6 +1124,15 @@ class ExecutiveState:
         if metadata.get("reframe_hint"):
             return False
         return True
+
+    def _is_low_divergence_reframe_goal(self, goal: str) -> bool:
+        metadata = self._parked_goal_metadata.get(goal) or {}
+        reason = str(
+            metadata.get("reason")
+            or self._parked_goal_reasons.get(goal)
+            or ""
+        ).strip()
+        return reason == "low_divergence_reframe"
 
     def _sync_structural_load(self) -> None:
         if not self.somatic:
@@ -838,11 +1180,27 @@ class ExecutiveState:
         )
         return metadata
 
-    @staticmethod
-    def _is_resume_eligible_commitment(commitment: Any) -> bool:
+    def _is_resume_eligible_commitment(self, commitment: Any) -> bool:
         """Return True when a blocked commitment should auto-resume after recovery."""
         reason = str(commitment.meta.get("blocked_reason", "")).strip().lower()
-        if reason in {"executive_pause", "executive_fatigue", "executive_overload"}:
+        if is_executive_pause_reason(reason):
+            if not is_known_executive_pause_reason(reason):
+                self._trace(
+                    "resume_with_unknown_executive_block_reason",
+                    {
+                        "blocked_reason": reason,
+                        "commitment_id": str(commitment.commitment_id),
+                    },
+                )
+                if self.tracer:
+                    self.tracer.log(
+                        EventKind.WARNING,
+                        message="Unknown executive pause reason encountered during deferred resume.",
+                        payload={
+                            "commitment_id": str(commitment.commitment_id),
+                            "blocked_reason": reason,
+                        },
+                    )
             return True
         if commitment.meta.get("resume_policy") == "auto_on_executive_recovery":
             return True

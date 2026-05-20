@@ -21,6 +21,7 @@ class BlockReason(str, Enum):
     SAFETY_BLOCKED = "safety_blocked"
     TOOL_LOOP_GUARD_BLOCKED = "tool_loop_guard_blocked"
     RETRY_BLOCKED = "retry_blocked"
+    PROJECT_COMPOSTED = "project_composted"
     UNKNOWN_BLOCKED = "unknown_blocked"
 
 

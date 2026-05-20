@@ -48,21 +48,35 @@ def test_somatic_decay_recovers_idle_fatigue_and_arousal(tmp_path: Path) -> None
 
 def test_somatic_bump_from_work(tmp_path: Path) -> None:
     mgr = SomaticManager(tmp_path / "somatic.json")
-    mgr.set_fatigue(0.0)
+    mgr.set_fatigue(0.2)
     mgr.set_tension(0.5)
     mgr.set_valence(0.0)
 
     mgr.bump_from_work(intensity=0.2, success=True)
-    assert mgr.state.fatigue > 0.0
+    assert mgr.state.fatigue <= 0.2
     assert mgr.state.tension < 0.5
     assert mgr.state.valence > 0.0
 
-    mgr.set_fatigue(0.0)
+    mgr.set_fatigue(0.2)
     mgr.set_tension(0.5)
     mgr.set_valence(0.0)
     mgr.bump_from_work(intensity=0.2, success=False)
+    assert mgr.state.fatigue > 0.2
     assert mgr.state.tension > 0.5
     assert mgr.state.valence < 0.0
+
+
+def test_repeated_successful_work_spends_energy_without_maxing_fatigue(tmp_path: Path) -> None:
+    mgr = SomaticManager(tmp_path / "somatic.json")
+    mgr.set_fatigue(0.2)
+    mgr.set_energy(1.0)
+
+    for _ in range(10):
+        mgr.bump_from_work(intensity=0.5, success=True)
+
+    assert mgr.state.fatigue <= 0.2
+    assert mgr.state.energy < 1.0
+    assert mgr.state.somatic_tag != "tired"
 
 
 def test_somatic_salience_modifier(tmp_path: Path) -> None:

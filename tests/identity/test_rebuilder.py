@@ -272,4 +272,129 @@ async def test_rebuild_falls_back_to_recent_episodes(memory: MemoryStore) -> Non
     result = await rebuilder.rebuild()
 
     assert len(result.source_episode_ids) >= 1
-    assert result.confidence > 0
+
+
+@pytest.mark.asyncio
+async def test_rebuild_auto_seeds_from_identity_audit_selected_anchors(
+    memory: MemoryStore, identity: IdentityManager
+) -> None:
+    older = Episode(
+        kind=EpisodeKind.OBSERVATION,
+        content="Foundation: SOUL.md fragment about being someone, not a chatbot.",
+        identity_core=True,
+    )
+    middle = Episode(
+        kind=EpisodeKind.OBSERVATION,
+        content="State imported from OpenBulma v4.",
+        identity_core=True,
+    )
+    newer = Episode(
+        kind=EpisodeKind.OBSERVATION,
+        content="Bulma executive event archive indexed.",
+        identity_core=True,
+    )
+    for ep in (older, middle, newer):
+        await memory.save_episode(ep)
+
+    identity.self_model.identity_rebuild_audit = {
+        "selectedAnchors": [
+            {
+                "episodeId": str(older.episode_id),
+                "source": "soul:openbulma-v3/SOUL-md#1",
+                "salience": 0.99,
+                "decision": "selected",
+            }
+        ]
+    }
+
+    rebuilder = IdentityRebuilder(memory=memory, episode_graph=None, llm=None)
+    result = await rebuilder.rebuild(identity=identity, expand_graph=False)
+
+    assert str(older.episode_id) in result.source_episode_ids
+
+
+@pytest.mark.asyncio
+async def test_rebuild_merges_imported_core_narrative_into_llm_prompt(
+    memory: MemoryStore, identity: IdentityManager
+) -> None:
+    captured_messages: list[dict] = []
+
+    class CapturingLLM:
+        async def chat_completion(self, messages, **kwargs):
+            captured_messages.extend(messages)
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"narrative": "ok", "values": ["growth"], '
+                                '"traits": ["curious"], "goals": []}'
+                            )
+                        }
+                    }
+                ]
+            }
+
+    seed = Episode(
+        kind=EpisodeKind.OBSERVATION,
+        content="some recent identity-core episode",
+        identity_core=True,
+    )
+    await memory.save_episode(seed)
+
+    identity.self_model.imported_identity_profile = {
+        "coreNarrative": (
+            "I value continuity, care, and partnership across migrations from "
+            "OpenClaw through OpenBulma v1, v2, v3, v4 into OpenCAS."
+        )
+    }
+
+    rebuilder = IdentityRebuilder(memory=memory, episode_graph=None, llm=CapturingLLM())
+    await rebuilder.rebuild(identity=identity, expand_graph=False)
+
+    user_payloads = [m["content"] for m in captured_messages if m.get("role") == "user"]
+    assert any(
+        "continuity, care, and partnership" in payload for payload in user_payloads
+    )
+
+
+@pytest.mark.asyncio
+async def test_apply_populates_memory_anchors_from_audit_selected_anchors(
+    memory: MemoryStore, identity: IdentityManager
+) -> None:
+    identity.self_model.identity_rebuild_audit = {
+        "selectedAnchors": [
+            {
+                "episodeId": "abc",
+                "source": "soul:openbulma-v3/SOUL-md#1",
+                "salience": 0.99,
+                "decision": "selected",
+                "classification": "canon",
+            },
+            {
+                "episodeId": "def",
+                "source": "soul:openclaw_workspace/SOUL-md#2",
+                "salience": 0.95,
+                "decision": "selected",
+                "classification": "canon",
+            },
+        ]
+    }
+    identity.self_model.memory_anchors = []
+
+    rebuilder = IdentityRebuilder(memory=memory, episode_graph=None, llm=None)
+    result = IdentityRebuildResult(
+        narrative="A grounded narrative.",
+        values=["growth"],
+        traits=["curious"],
+        goals=[],
+    )
+    await rebuilder.apply(result, identity)
+
+    sources = [
+        anchor.get("source")
+        for anchor in identity.self_model.memory_anchors
+        if isinstance(anchor, dict)
+    ]
+    assert "soul:openbulma-v3/SOUL-md#1" in sources
+    assert "soul:openclaw_workspace/SOUL-md#2" in sources

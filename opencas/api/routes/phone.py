@@ -150,6 +150,14 @@ def _current_phone_settings(runtime: Any) -> PhoneRuntimeConfig:
     return PhoneRuntimeConfig()
 
 
+async def _phone_status_snapshot(runtime: Any) -> Dict[str, Any]:
+    getter = getattr(runtime, "phone_status", None)
+    if not callable(getter):
+        raise HTTPException(status_code=503, detail="Phone bridge is not available")
+    status = await getter()
+    return status if isinstance(status, dict) else {}
+
+
 def _external_websocket_url(runtime: Any, websocket: WebSocket) -> str:
     public_base_url = _configured_public_base_url(runtime)
     if not public_base_url:
@@ -169,10 +177,7 @@ def build_phone_router(runtime: Any) -> APIRouter:
 
     @r.get("/status")
     async def get_status() -> Dict[str, Any]:
-        getter = getattr(runtime, "phone_status", None)
-        if not callable(getter):
-            raise HTTPException(status_code=503, detail="Phone bridge is not available")
-        return await getter()
+        return await _phone_status_snapshot(runtime)
 
     @r.get("/recent-calls")
     async def get_recent_calls(limit: int = 10) -> Dict[str, Any]:
@@ -280,6 +285,20 @@ def build_phone_router(runtime: Any) -> APIRouter:
         )
         return await configurer(settings)
 
+    @r.get("/config")
+    async def get_config() -> Dict[str, Any]:
+        status: Dict[str, Any] = {}
+        getter = getattr(runtime, "phone_status", None)
+        if callable(getter):
+            raw_status = await getter()
+            status = raw_status if isinstance(raw_status, dict) else {}
+        current = _current_phone_settings(runtime).redacted_dict()
+        status_config = status.get("config")
+        return {
+            "config": status_config if isinstance(status_config, dict) else current,
+            "status": status,
+        }
+
     @r.post("/autoconfigure")
     async def autoconfigure(req: PhoneAutoconfigureRequest) -> Dict[str, Any]:
         autoconfigure_phone = getattr(runtime, "autoconfigure_phone", None)
@@ -315,12 +334,28 @@ def build_phone_router(runtime: Any) -> APIRouter:
             raise HTTPException(status_code=503, detail="Phone bridge is not available")
         return await configurer(req.model_dump(mode="json"))
 
+    @r.get("/session-profiles")
+    async def get_session_profiles() -> Dict[str, Any]:
+        status = await _phone_status_snapshot(runtime)
+        return {
+            "session_profiles": status.get("session_profiles") or {},
+            "menu_config_source": status.get("menu_config_source") or {},
+        }
+
     @r.post("/menu-config")
     async def update_menu_config(req: PhoneMenuConfigUpdateRequest) -> Dict[str, Any]:
         configurer = getattr(runtime, "configure_phone_menu_config", None)
         if not callable(configurer):
             raise HTTPException(status_code=503, detail="Phone bridge is not available")
         return await configurer(req.config)
+
+    @r.get("/menu-config")
+    async def get_menu_config() -> Dict[str, Any]:
+        status = await _phone_status_snapshot(runtime)
+        return {
+            "menu_config": status.get("menu_config") or {},
+            "menu_config_source": status.get("menu_config_source") or {},
+        }
 
     @r.post("/twilio/voice")
     async def twilio_voice(request: Request) -> Response:

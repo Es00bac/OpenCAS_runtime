@@ -11,9 +11,10 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import shutil
 from datetime import UTC, date, datetime, time, timedelta
 from typing import Any, Dict, Iterable, Optional
+
+from opencas.tools.environment import build_tool_execution_env, resolve_executable
 
 from ..models import ToolResult
 
@@ -51,7 +52,24 @@ def google_workspace_cli_command() -> str:
 
 def google_workspace_cli_available(command: Optional[str] = None) -> bool:
     """Return True when the Google Workspace CLI is available on PATH."""
-    return shutil.which(command or google_workspace_cli_command()) is not None
+    command_name = command or google_workspace_cli_command()
+    return resolve_executable(command_name) is not None
+
+
+def looks_like_google_workspace_auth_error(text: str) -> bool:
+    """Return True for common Google Workspace OAuth/token failure text."""
+    lowered = str(text or "").lower()
+    return any(
+        token in lowered
+        for token in (
+            "invalid_grant",
+            "expired or revoked",
+            "authentication failed",
+            '"reason":"autherror"',
+            '"reason": "autherror"',
+            "failed to get token",
+        )
+    )
 
 
 class GoogleWorkspaceToolAdapter:
@@ -74,6 +92,8 @@ class GoogleWorkspaceToolAdapter:
                 return await self._gmail_get_message(args)
             if name == "google_workspace_calendar_schedule":
                 return await self._calendar_schedule(args)
+            if name == "google_workspace_calendar_dedupe":
+                return await self._calendar_dedupe(args)
             if name == "google_workspace_drive_search":
                 return await self._drive_search(args)
             return ToolResult(False, f"Unknown Google Workspace tool: {name}", {})
@@ -315,6 +335,146 @@ class GoogleWorkspaceToolAdapter:
             )
         return result
 
+    async def _calendar_dedupe(self, args: Dict[str, Any]) -> ToolResult:
+        calendar_id = str(args.get("calendar_id", "primary")).strip() or "primary"
+        apply_changes = bool(args.get("apply", False))
+        max_results = max(1, min(int(args.get("max_results", 2500)), 2500))
+        max_deletions = max(1, min(int(args.get("max_deletions", 25)), 100))
+        send_updates = str(args.get("send_updates", "none")).strip() or "none"
+        if send_updates not in {"all", "externalOnly", "none"}:
+            return ToolResult(False, "send_updates must be one of: all, externalOnly, none", {})
+        timeout = _coerce_timeout(args)
+
+        time_min = _clean_optional(args.get("time_min"))
+        time_max = _clean_optional(args.get("time_max"))
+        if not time_min:
+            past_days = max(0, min(int(args.get("scan_past_days", 3650)), 3650))
+            time_min = _to_utc_rfc3339(datetime.now(UTC) - timedelta(days=past_days))
+        if not time_max:
+            future_days = max(1, min(int(args.get("scan_future_days", 3650)), 3650))
+            time_max = _to_utc_rfc3339(datetime.now(UTC) + timedelta(days=future_days))
+
+        params: Dict[str, Any] = {
+            "calendarId": calendar_id,
+            "singleEvents": True,
+            "orderBy": "startTime",
+            "showDeleted": False,
+            "maxResults": max_results,
+            "timeMin": time_min,
+            "timeMax": time_max,
+        }
+        list_result = await self._run_json_command(
+            [
+                "calendar",
+                "events",
+                "list",
+                "--params",
+                json.dumps(params, separators=(",", ":")),
+                "--format",
+                "json",
+            ],
+            timeout=timeout,
+        )
+        if not list_result.success:
+            return list_result
+        listing = json.loads(list_result.output)
+        events = [event for event in (listing.get("items") or []) if isinstance(event, dict)]
+        duplicate_groups = _calendar_duplicate_groups(events)
+        candidates: list[dict[str, Any]] = []
+        kept: list[dict[str, Any]] = []
+        for group in duplicate_groups:
+            keep = max(group, key=_calendar_keep_score)
+            kept.append(_calendar_event_summary(keep))
+            for event in group:
+                if event is keep:
+                    continue
+                candidates.append(
+                    {
+                        **_calendar_event_summary(event),
+                        "delete_event_id": str(event.get("recurringEventId") or event.get("id") or ""),
+                        "delete_scope": "recurring_series" if event.get("recurringEventId") else "single_event",
+                        "kept_event_id": str(keep.get("id") or ""),
+                    }
+                )
+        candidates = _coalesce_calendar_delete_candidates(candidates)
+
+        deletions: list[dict[str, Any]] = []
+        failures: list[dict[str, Any]] = []
+        if apply_changes:
+            if len(candidates) > max_deletions:
+                payload = {
+                    "status": "blocked",
+                    "reason": "candidate_count_exceeds_max_deletions",
+                    "calendar_id": calendar_id,
+                    "scanned_events": len(events),
+                    "duplicate_group_count": len(duplicate_groups),
+                    "duplicate_candidate_count": len(candidates),
+                    "max_deletions": max_deletions,
+                    "candidates": candidates,
+                    "kept": kept,
+                    "time_min": time_min,
+                    "time_max": time_max,
+                }
+                return ToolResult(False, json.dumps(payload, indent=2), payload)
+            for candidate in candidates:
+                event_id = str(candidate.get("delete_event_id") or "").strip()
+                if not event_id:
+                    failures.append({**candidate, "error": "missing_event_id"})
+                    continue
+                delete_params = {
+                    "calendarId": calendar_id,
+                    "eventId": event_id,
+                    "sendUpdates": send_updates,
+                }
+                delete_result = await self._run_json_command(
+                    [
+                        "calendar",
+                        "events",
+                        "delete",
+                        "--params",
+                        json.dumps(delete_params, separators=(",", ":")),
+                        "--format",
+                        "json",
+                    ],
+                    timeout=timeout,
+                )
+                if delete_result.success:
+                    deletions.append(candidate)
+                else:
+                    failures.append({**candidate, "error": delete_result.output})
+
+        payload = {
+            "status": "applied" if apply_changes else "dry_run",
+            "calendar_id": calendar_id,
+            "scanned_events": len(events),
+            "duplicate_group_count": len(duplicate_groups),
+            "duplicate_candidate_count": len(candidates),
+            "deleted_count": len(deletions),
+            "failed_count": len(failures),
+            "time_min": time_min,
+            "time_max": time_max,
+            "send_updates": send_updates if apply_changes else None,
+            "candidates": candidates,
+            "kept": kept,
+            "deleted": deletions,
+            "failures": failures,
+            "next_page_token": listing.get("nextPageToken"),
+        }
+        return ToolResult(
+            apply_changes is False or not failures,
+            json.dumps(payload, indent=2),
+            {
+                "service": "calendar",
+                "calendar_id": calendar_id,
+                "apply": apply_changes,
+                "duplicate_candidate_count": len(candidates),
+                "deleted_count": len(deletions),
+                "failed_count": len(failures),
+                "time_min": time_min,
+                "time_max": time_max,
+            },
+        )
+
     async def _drive_search(self, args: Dict[str, Any]) -> ToolResult:
         query = str(args.get("query", "trashed=false")).strip() or "trashed=false"
         page_size = max(1, min(int(args.get("page_size", 10)), 50))
@@ -341,17 +501,24 @@ class GoogleWorkspaceToolAdapter:
         return result
 
     async def _run_json_command(self, argv: list[str], *, timeout: int) -> ToolResult:
-        if not google_workspace_cli_available(self.command):
+        env = build_tool_execution_env()
+        resolved_command = resolve_executable(self.command, env=env)
+        if resolved_command is None:
             return ToolResult(
                 False,
                 f"Google Workspace CLI not available: {self.command}",
-                {"missing_command": True, "command": self.command},
+                {
+                    "missing_command": True,
+                    "command": self.command,
+                    "path": env.get("PATH", ""),
+                },
             )
         proc = await asyncio.create_subprocess_exec(
-            self.command,
+            resolved_command,
             *argv,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=env,
         )
         try:
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -369,6 +536,7 @@ class GoogleWorkspaceToolAdapter:
         parsed = _try_parse_json(stdout_text)
         metadata = {
             "command": self.command,
+            "resolved_command": resolved_command,
             "argv": argv,
             "exit_code": proc.returncode,
         }
@@ -380,7 +548,7 @@ class GoogleWorkspaceToolAdapter:
             if parsed is not None:
                 output = json.dumps(parsed, indent=2)
             metadata["error"] = True
-            metadata["auth_error"] = proc.returncode == 2
+            metadata["auth_error"] = proc.returncode == 2 or looks_like_google_workspace_auth_error(output)
             return ToolResult(False, output, metadata)
 
         if parsed is not None:
@@ -426,6 +594,111 @@ def _header_map(headers: Iterable[Dict[str, Any]]) -> Dict[str, str]:
             continue
         mapped[name] = str(header.get("value", "")).strip()
     return mapped
+
+
+def _calendar_duplicate_groups(events: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    grouped: dict[tuple[str, str, str, str, str], list[dict[str, Any]]] = {}
+    for event in events:
+        if str(event.get("status") or "").lower() == "cancelled":
+            continue
+        event_id = str(event.get("id") or "").strip()
+        if not event_id:
+            continue
+        key = _calendar_duplicate_key(event)
+        grouped.setdefault(key, []).append(event)
+    return [group for group in grouped.values() if len(group) > 1]
+
+
+def _calendar_duplicate_key(event: dict[str, Any]) -> tuple[str, str, str, str, str]:
+    return (
+        _normalize_event_text(event.get("summary")),
+        _event_time_key(event.get("start")),
+        _event_time_key(event.get("end")),
+        _normalize_event_text(event.get("location")),
+        _normalize_event_text(event.get("description")),
+    )
+
+
+def _calendar_keep_score(event: dict[str, Any]) -> tuple[int, int, float]:
+    richness = 0
+    if str(event.get("description") or "").strip():
+        richness += 1
+    if str(event.get("location") or "").strip():
+        richness += 1
+    if event.get("attendees"):
+        richness += len(event.get("attendees") or [])
+    if event.get("reminders"):
+        richness += 1
+    if event.get("conferenceData"):
+        richness += 1
+    if event.get("recurringEventId"):
+        richness += 1
+    created = _event_timestamp(event.get("created"))
+    updated = _event_timestamp(event.get("updated"))
+    # Prefer richer events, then older originals, then newer updates.
+    created_preference = -created if created else float("-inf")
+    return (richness, created_preference, updated)
+
+
+def _calendar_event_summary(event: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": str(event.get("id") or ""),
+        "summary": str(event.get("summary") or ""),
+        "start": event.get("start"),
+        "end": event.get("end"),
+        "description": str(event.get("description") or ""),
+        "location": str(event.get("location") or ""),
+        "created": event.get("created"),
+        "updated": event.get("updated"),
+        "recurringEventId": event.get("recurringEventId"),
+        "htmlLink": event.get("htmlLink"),
+    }
+
+
+def _coalesce_calendar_delete_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    coalesced: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        delete_event_id = str(candidate.get("delete_event_id") or candidate.get("id") or "").strip()
+        if not delete_event_id:
+            continue
+        existing = coalesced.get(delete_event_id)
+        occurrence = {
+            "id": candidate.get("id"),
+            "start": candidate.get("start"),
+            "end": candidate.get("end"),
+            "kept_event_id": candidate.get("kept_event_id"),
+        }
+        if existing is None:
+            copied = dict(candidate)
+            copied["duplicate_occurrence_count"] = 1
+            copied["sample_occurrences"] = [occurrence]
+            coalesced[delete_event_id] = copied
+            continue
+        existing["duplicate_occurrence_count"] = int(existing.get("duplicate_occurrence_count", 1)) + 1
+        samples = existing.setdefault("sample_occurrences", [])
+        if isinstance(samples, list) and len(samples) < 5:
+            samples.append(occurrence)
+    return list(coalesced.values())
+
+
+def _normalize_event_text(value: Any) -> str:
+    return " ".join(str(value or "").split()).casefold()
+
+
+def _event_time_key(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    return str(value.get("dateTime") or value.get("date") or "").strip()
+
+
+def _event_timestamp(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return 0.0
 
 
 def _day_bounds(value: str) -> tuple[str, str]:

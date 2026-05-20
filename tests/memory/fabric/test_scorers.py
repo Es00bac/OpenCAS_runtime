@@ -5,7 +5,7 @@ from datetime import datetime, timezone, timedelta
 import pytest
 
 from opencas.embeddings import EmbeddingCache, EmbeddingService
-from opencas.memory import EdgeKind, Episode, EpisodeKind
+from opencas.memory import Episode, EpisodeKind
 from opencas.memory.fabric.scorers import (
     CausalScorer,
     ConceptualScorer,

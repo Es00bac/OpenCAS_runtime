@@ -29,6 +29,7 @@ class ExecutionPhase(str, Enum):
     EXECUTE = "execute"
     VERIFY = "verify"
     POSTCHECK = "postcheck"
+    ROLLBACK = "rollback"
 
 
 class RetryMode(str, Enum):
@@ -123,6 +124,7 @@ class ExecutionReceipt(BaseModel):
     completed_at: Optional[datetime] = None
     success: bool = False
     output: str = ""
+    meta: Dict[str, Any] = Field(default_factory=dict)
 
 
 class AttemptSalvagePacket(BaseModel):

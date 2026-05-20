@@ -151,6 +151,43 @@ async def _rebuild_workspace(runtime: "AgentRuntime") -> ExecutiveWorkspace:
     commitments = await _list_workspace_commitments(runtime)
     work_objects = await _list_ready_work_objects(runtime)
     portfolio_boosts = await _build_portfolio_boosts(runtime)
+    somatic = getattr(runtime, "somatic", None) or getattr(getattr(runtime, "ctx", None), "somatic", None)
+    if somatic is not None:
+        active_commitments = [
+            commitment
+            for commitment in commitments
+            if getattr(commitment, "status", None) == CommitmentStatus.ACTIVE
+        ]
+        user_facing_commitments = [
+            commitment
+            for commitment in active_commitments
+            if ExecutiveWorkspace._is_user_facing_commitment(commitment)
+        ]
+        blocked_commitments = [
+            commitment
+            for commitment in commitments
+            if getattr(commitment, "status", None) == CommitmentStatus.BLOCKED
+        ]
+        try:
+            somatic.reflect_structural_load(
+                weighted_queue_load=runtime.executive.weighted_queue_load()
+                if runtime.executive is not None
+                else 0.0,
+                queue_depth=len(runtime.executive.task_queue)
+                if runtime.executive is not None
+                else 0,
+                active_goal_count=len(runtime.executive.active_goals)
+                if runtime.executive is not None
+                else 0,
+                parked_goal_count=len(runtime.executive.parked_goals)
+                if runtime.executive is not None
+                else 0,
+                active_commitment_count=len(active_commitments),
+                user_facing_commitment_count=len(user_facing_commitments),
+                blocked_commitment_count=len(blocked_commitments),
+            )
+        except Exception:
+            pass
     return ExecutiveWorkspace.rebuild(
         commitments=commitments,
         work_objects=work_objects,

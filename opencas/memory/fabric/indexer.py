@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List
 
 from opencas.embeddings import EmbeddingService
 from opencas.memory import Episode

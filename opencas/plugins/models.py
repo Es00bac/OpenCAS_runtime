@@ -3,7 +3,6 @@
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
-from opencas.autonomy.models import ActionRiskTier
 from opencas.tools import ToolRegistry
 
 

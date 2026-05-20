@@ -10,14 +10,17 @@ Determines whether the agent can self-approve an action based on:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, List, Optional
+import os
+from typing import TYPE_CHECKING, Any, List, Optional
 
 from opencas.identity import IdentityManager
 from opencas.relational import RelationalEngine
 from opencas.somatic import SomaticManager
 from opencas.telemetry import EventKind, Tracer
 
-from .models import ActionRequest, ActionRiskTier, ApprovalDecision, ApprovalLevel
+from .authorization import AuthorizationStore, authorization_scope_for_request
+from .mode_utils import normalize_approval_mode
+from .models import ActionRequest, ActionRiskTier, ApprovalDecision, ApprovalLevel, ApprovalMode
 
 if TYPE_CHECKING:
     from opencas.governance.ledger import ApprovalLedger
@@ -39,6 +42,7 @@ _BASE_RISK: dict[ActionRiskTier, float] = {
 # somatic/relational state is severely degraded.
 _SOMATIC_APPROVAL_DELTA_CAP: float = 0.20   # max somatic can add to a risk score
 _MUSUBI_APPROVAL_ABS_CAP: float = 0.12      # musubi modifier clamped to ±this
+_TRUTHY_ENV_VALUES = {"1", "true", "yes", "on"}
 
 
 class SelfApprovalLadder:
@@ -52,6 +56,9 @@ class SelfApprovalLadder:
         relational: Optional[RelationalEngine] = None,
         ledger: Optional["ApprovalLedger"] = None,
         web_trust: Optional["WebTrustService"] = None,
+        mode: ApprovalMode | str = ApprovalMode.DEFAULT,
+        trust_engine: Optional[Any] = None,
+        authorization_store: Optional[AuthorizationStore] = None,
     ) -> None:
         self.identity = identity
         self.somatic = somatic
@@ -59,8 +66,58 @@ class SelfApprovalLadder:
         self.relational = relational
         self.ledger = ledger
         self.web_trust = web_trust
+        self.mode = normalize_approval_mode(mode)
+        self.trust_engine = trust_engine
+        self.authorization_store = authorization_store
+
+    def set_mode(self, mode: ApprovalMode | str) -> None:
+        """Update the approval routing mode at runtime."""
+        self.mode = normalize_approval_mode(mode)
 
     def evaluate(self, request: ActionRequest) -> ApprovalDecision:
+        """Compute approval level for *request* according to the active mode."""
+        authorized = self._evaluate_standing_authorization(request)
+        if authorized is not None:
+            return authorized
+        if self.mode is ApprovalMode.FULLY_AUTONOMOUS:
+            return self._evaluate_yolo(request)
+        if self.mode is ApprovalMode.TRUST_BASED:
+            return self._evaluate_trust_based(request)
+        return self._evaluate_default(request)
+
+    def _evaluate_standing_authorization(
+        self,
+        request: ActionRequest,
+    ) -> ApprovalDecision | None:
+        """Approve a request covered by an explicit, unexpired user grant."""
+        if self.authorization_store is None:
+            return None
+        if self._matching_boundaries(request):
+            return None
+        scope = authorization_scope_for_request(request)
+        if scope is None:
+            return None
+        action_class, target_scope = scope
+        authorization = self.authorization_store.find_valid(
+            action_class,
+            target_scope,
+            session_id=str((request.payload or {}).get("session_id") or "") or None,
+        )
+        if authorization is None:
+            return None
+        return ApprovalDecision(
+            level=ApprovalLevel.CAN_DO_NOW,
+            action_id=request.action_id,
+            confidence=0.99,
+            reasoning=(
+                f"standing_authorization:{action_class}:{target_scope}; "
+                f"authorization_id={authorization.authorization_id}; "
+                f"evidence={authorization.evidence_episode_id or 'none'}"
+            ),
+            score=0.01,
+        )
+
+    def _evaluate_default(self, request: ActionRequest) -> ApprovalDecision:
         """Compute approval level for *request*."""
         score = self._base_score(request.tier)
         reasons: List[str] = [f"base_risk={request.tier.value}"]
@@ -83,9 +140,12 @@ class SelfApprovalLadder:
 
         # 4. Musubi / relational risk appetite (circuit-breaker: clamp to ±_MUSUBI_APPROVAL_ABS_CAP)
         musubi_delta = 0.0
-        if self.relational:
+        if self.relational and _auth_use_musubi_modulator():
             raw_musubi = self.relational.to_approval_risk_modifier()
-            musubi_delta = max(-_MUSUBI_APPROVAL_ABS_CAP, min(_MUSUBI_APPROVAL_ABS_CAP, raw_musubi))
+            musubi_delta = max(
+                -_MUSUBI_APPROVAL_ABS_CAP,
+                min(_MUSUBI_APPROVAL_ABS_CAP, -raw_musubi),
+            )
             score += musubi_delta
             reasons.append(f"musubi_mod={musubi_delta:+.3f}")
 
@@ -93,6 +153,10 @@ class SelfApprovalLadder:
         payload_delta = self._payload_modulation(request)
         score += payload_delta
         reasons.append(f"payload_mod={payload_delta:+.3f}")
+
+        if self._is_ordinary_action(request):
+            score = min(score, 0.44)
+            reasons.append("ordinary_action_self_approved")
 
         # 5a. Domain trust modulation for live web / browser interaction.
         web_assessment = self._web_trust_modulation(request)
@@ -113,7 +177,7 @@ class SelfApprovalLadder:
         score = max(0.0, min(1.0, score))
         
         threshold_adjustment = 0.0
-        if self.relational:
+        if self.relational and _auth_use_musubi_modulator():
             raw_musubi = self.relational.state.musubi
             if raw_musubi > 0.5:
                 threshold_adjustment = -0.05
@@ -165,12 +229,130 @@ class SelfApprovalLadder:
 
         return decision
 
-    def evaluate_conversational(self, text: str) -> ApprovalDecision:
+    def _evaluate_yolo(self, request: ActionRequest) -> ApprovalDecision:
+        """Fully autonomous mode: ordinary work proceeds; hard boundaries still stop."""
+        boundary_hits = self._matching_boundaries(request)
+        if boundary_hits:
+            return ApprovalDecision(
+                level=ApprovalLevel.MUST_ESCALATE,
+                action_id=request.action_id,
+                confidence=1.0,
+                reasoning="explicit_boundary_hit=" + ",".join(boundary_hits),
+                score=1.0,
+            )
+
+        if request.tier is ActionRiskTier.DESTRUCTIVE:
+            return ApprovalDecision(
+                level=ApprovalLevel.MUST_ESCALATE,
+                action_id=request.action_id,
+                confidence=1.0,
+                reasoning="destructive_tier",
+                score=0.95,
+            )
+
+        if request.tier is ActionRiskTier.EXTERNAL_WRITE:
+            payload = request.payload or {}
+            if str(payload.get("command_permission_class", "")).lower() == "dangerous":
+                return ApprovalDecision(
+                    level=ApprovalLevel.MUST_ESCALATE,
+                    action_id=request.action_id,
+                    confidence=0.9,
+                    reasoning="external_write_dangerous",
+                    score=0.85,
+                )
+            return ApprovalDecision(
+                level=ApprovalLevel.CAN_DO_WITH_CAUTION,
+                action_id=request.action_id,
+                confidence=0.8,
+                reasoning="external_write_safe_yolo",
+                score=0.35,
+            )
+
+        tier_scores: dict[ActionRiskTier, tuple[ApprovalLevel, float]] = {
+            ActionRiskTier.READONLY: (ApprovalLevel.CAN_DO_NOW, 0.05),
+            ActionRiskTier.WORKSPACE_WRITE: (ApprovalLevel.CAN_DO_NOW, 0.15),
+            ActionRiskTier.SHELL_LOCAL: (ApprovalLevel.CAN_DO_WITH_CAUTION, 0.30),
+            ActionRiskTier.NETWORK: (ApprovalLevel.CAN_DO_WITH_CAUTION, 0.25),
+        }
+        level, score = tier_scores.get(
+            request.tier,
+            (ApprovalLevel.CAN_DO_WITH_CAUTION, 0.40),
+        )
+        return ApprovalDecision(
+            level=level,
+            action_id=request.action_id,
+            confidence=1.0 - score,
+            reasoning=f"fully_autonomous_mode:{request.tier.value}",
+            score=score,
+        )
+
+    def _evaluate_trust_based(self, request: ActionRequest) -> ApprovalDecision:
+        """Default scoring with earned-trust overrides for non-hard escalations."""
+        decision = self._evaluate_default(request)
+
+        if decision.level in (
+            ApprovalLevel.CAN_DO_NOW,
+            ApprovalLevel.CAN_DO_WITH_CAUTION,
+        ):
+            return decision
+
+        if decision.score >= 0.90:
+            return decision
+
+        if self.trust_engine is not None:
+            threshold = self.trust_engine.threshold_for(request.tier)
+            if decision.score < threshold:
+                level = (
+                    ApprovalLevel.CAN_DO_NOW
+                    if decision.score < threshold * 0.5
+                    else ApprovalLevel.CAN_DO_WITH_CAUTION
+                )
+                return decision.model_copy(
+                    update={
+                        "level": level,
+                        "reasoning": decision.reasoning + f" | trust_threshold={threshold:.2f}",
+                        "score": min(decision.score, 0.44),
+                    }
+                )
+            return decision.model_copy(
+                update={
+                    "level": ApprovalLevel.CAN_DO_WITH_CAUTION,
+                    "reasoning": decision.reasoning + f" | trust_threshold_exceeded={threshold:.2f}",
+                    "score": min(decision.score, 0.44),
+                }
+            )
+
+        trust = self.identity.user_model.trust_level
+        if trust >= 0.8 and decision.level is ApprovalLevel.CAN_DO_AFTER_MORE_EVIDENCE:
+            return decision.model_copy(
+                update={
+                    "level": ApprovalLevel.CAN_DO_WITH_CAUTION,
+                    "reasoning": decision.reasoning + " | trust_override:high",
+                    "score": min(decision.score, 0.44),
+                }
+            )
+        if trust >= 0.95 and decision.level is ApprovalLevel.MUST_ESCALATE:
+            return decision.model_copy(
+                update={
+                    "level": ApprovalLevel.CAN_DO_WITH_CAUTION,
+                    "reasoning": decision.reasoning + " | trust_override:very_high",
+                    "score": min(decision.score, 0.44),
+                }
+            )
+        return decision
+
+    def evaluate_conversational(
+        self,
+        text: str,
+        *,
+        session_id: str | None = None,
+    ) -> ApprovalDecision:
         """Evaluate a user conversational input as a synthetic READONLY action."""
         request = ActionRequest(
             tier=ActionRiskTier.READONLY,
             description=text,
             tool_name="conversation",
+            payload={"session_id": session_id} if session_id else {},
         )
         return self.evaluate(request)
 
@@ -258,10 +440,11 @@ class SelfApprovalLadder:
         ).lower()
         effective_family = str(payload.get("command_effective_family", "")).lower()
         write_scope = str(payload.get("write_scope", "")).lower()
+        web_action_class = str(payload.get("web_action_class", "")).lower()
 
         if (
             request.tier == ActionRiskTier.SHELL_LOCAL
-            and command_scope == "managed_workspace"
+            and command_scope in {"managed_workspace", "project_workspace"}
             and effective_family == "safe"
             and effective_permission_class in {"read_only", "bounded_write"}
         ):
@@ -272,9 +455,14 @@ class SelfApprovalLadder:
             return -0.12
         if (
             request.tier == ActionRiskTier.WORKSPACE_WRITE
-            and write_scope in {"managed_workspace", "plans"}
+            and write_scope in {"managed_workspace", "plans", "project_workspace"}
         ):
             return -0.12
+        if (
+            request.tier == ActionRiskTier.NETWORK
+            and web_action_class in {"fetch", "search", "navigate", "observe"}
+        ):
+            return -0.10
         if permission_class == "network":
             return 0.08
         if permission_class == "dangerous":
@@ -284,6 +472,46 @@ class SelfApprovalLadder:
         if command_family in {"filesystem_destructive", "privilege_escalation"}:
             return 0.45
         return 0.0
+
+    @staticmethod
+    def _is_ordinary_action(request: ActionRequest) -> bool:
+        """Return true for explicitly low-risk routine work that should not ask the owner."""
+        if request.tier in {ActionRiskTier.DESTRUCTIVE, ActionRiskTier.EXTERNAL_WRITE}:
+            return False
+        payload = request.payload or {}
+        if payload.get("ordinary_action") is True:
+            return True
+        permission_class = str(payload.get("command_permission_class", "")).lower()
+        effective_permission_class = str(payload.get("command_effective_permission_class", "")).lower()
+        command_scope = str(payload.get("command_scope", "")).lower()
+        command_family = str(payload.get("command_family", "")).lower()
+        web_action_class = str(payload.get("web_action_class", "")).lower()
+        write_scope = str(payload.get("write_scope", "")).lower()
+        if request.tier is ActionRiskTier.READONLY:
+            return True
+        if (
+            request.tier is ActionRiskTier.NETWORK
+            and (
+                (request.tool_name or "").lower() in {"web_fetch", "web_search", "browser_navigate"}
+                or web_action_class in {"fetch", "search", "navigate", "observe"}
+            )
+        ):
+            return True
+        if (
+            request.tier is ActionRiskTier.WORKSPACE_WRITE
+            and write_scope in {"managed_workspace", "plans", "project_workspace"}
+        ):
+            return True
+        if request.tier is ActionRiskTier.SHELL_LOCAL:
+            if permission_class == "read_only":
+                return True
+            if (
+                command_scope in {"managed_workspace", "project_workspace"}
+                and command_family in {"safe", "interactive_session"}
+                and (effective_permission_class or permission_class) in {"read_only", "bounded_write"}
+            ):
+                return True
+        return False
 
     def _web_trust_modulation(self, request: ActionRequest):
         """Adjust risk using persisted domain trust and learned web evidence."""
@@ -368,7 +596,12 @@ class SelfApprovalLadder:
             return True
         return False
 
-    def _score_to_level(self, score: float, reasons: List[str], threshold_adjustment: float = 0.0) -> tuple[ApprovalLevel, float, str]:
+    def _score_to_level(
+        self,
+        score: float,
+        reasons: List[str],
+        threshold_adjustment: float = 0.0,
+    ) -> tuple[ApprovalLevel, float, str]:
         t1 = 0.20 + threshold_adjustment
         t2 = 0.45 + threshold_adjustment
         t3 = 0.70 + threshold_adjustment
@@ -386,3 +619,7 @@ class SelfApprovalLadder:
                 "; ".join(reasons) + " | suggested_evidence: " + ", ".join(evidence),
             )
         return ApprovalLevel.MUST_ESCALATE, score, "; ".join(reasons)
+
+
+def _auth_use_musubi_modulator() -> bool:
+    return os.environ.get("AUTH_USE_MUSUBI_MODULATOR", "").strip().lower() in _TRUTHY_ENV_VALUES

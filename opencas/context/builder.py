@@ -6,10 +6,14 @@ import json
 import math
 import os
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
+from open_llm_auth.auth.manager import ProviderManager
+
+from opencas.telemetry import EventKind
 from opencas.api.provenance_store import (
     ProvenanceTransitionKind,
     record_provenance_transition,
@@ -17,7 +21,9 @@ from opencas.api.provenance_store import (
 from opencas.autonomy.executive import ExecutiveState
 from opencas.autonomy.goal_hygiene import split_live_and_parked_goals
 from opencas.identity import IdentityManager
+from opencas.identity.agent_name import resolve_agent_name
 from opencas.identity.text_hygiene import collapse_recursive_identity_text
+from opencas.projects.classifier import PROJECT_TYPE_WRITING, classify_project_type
 from opencas.relational import RelationalEngine
 from opencas.runtime.agent_profile import AgentProfile
 from opencas.tom.models import BeliefSubject
@@ -39,6 +45,11 @@ if TYPE_CHECKING:
     from opencas.tom.engine import ToMEngine
 
 
+THREAD_REGISTRY_MIN_OVERLAP = 2
+THREAD_REGISTRY_NON_ACTIVE_SOURCE_KINDS = {"suppressed_reframe"}
+DEFAULT_INTERACTION_PROMPT_BUDGET = 64_000
+
+
 class ContextBuilder:
     """Builds a ContextManifest for LLM consumption."""
 
@@ -55,8 +66,15 @@ class ContextBuilder:
         tom: Optional[ToMEngine] = None,
         project_resume_resolver: Optional[Any] = None,
         affective_examinations: Optional[Any] = None,
+        self_inspection_store: Optional[Any] = None,
+        cognitive_state_store: Optional[Any] = None,
         schedule_service: Optional[Any] = None,
         daydream_store: Optional[Any] = None,
+        context_proposal_store: Optional[Any] = None,
+        autobiography_reconstructor: Optional[Any] = None,
+        thread_registry_store: Optional[Any] = None,
+        commitment_store: Optional[Any] = None,
+        llm: Optional[Any] = None,
         recent_limit: int = 20,
         max_tokens: int = 6000,
     ) -> None:
@@ -71,11 +89,31 @@ class ContextBuilder:
         self.tom = tom
         self.project_resume_resolver = project_resume_resolver
         self.affective_examinations = affective_examinations
+        self.self_inspection_store = self_inspection_store
+        self.cognitive_state_store = cognitive_state_store
         self.schedule_service = schedule_service
         self.daydream_store = daydream_store
+        self.context_proposal_store = context_proposal_store
+        self.autobiography_reconstructor = autobiography_reconstructor
+        self.thread_registry_store = thread_registry_store
+        self.commitment_store = commitment_store
+        self.llm = llm
         self.latest_wellbeing_state: Optional[Any] = None
         self.recent_limit = recent_limit
         self.max_tokens = max_tokens
+        self._last_thread_registry_selection_audit: Dict[str, Any] = {
+            "available": False,
+            "scanned_count": 0,
+            "query_term_count": 0,
+            "min_overlap": THREAD_REGISTRY_MIN_OVERLAP,
+            "weak_overlap_count": 0,
+            "suppressed_reframe_filtered_count": 0,
+            "relevant_count": 0,
+            "selected_count": 0,
+            "relevance_passed": False,
+        }
+        self._last_proactive_channel_audit: Dict[str, Any] = self._empty_proactive_channel_audit()
+        self._last_context_proposal_audit: Dict[str, Any] = self._empty_context_proposal_audit()
 
     async def build(
         self,
@@ -83,6 +121,7 @@ class ContextBuilder:
         session_id: Optional[str] = None,
     ) -> ContextManifest:
         """Assemble prompt context including system, history, and retrieved memories."""
+        build_started = time.perf_counter()
         style_note = ""
         emotion_tag: Optional[str] = None
         emotion_boost = 0.0
@@ -90,48 +129,346 @@ class ContextBuilder:
             style_note = self.modulators.to_prompt_style_note()
             emotion_tag, emotion_boost = self.modulators.to_memory_retrieval_boost()
 
+        context_budget = self._resolve_context_budget(user_input=user_input)
+        effective_max_tokens = int(context_budget.get("prompt_context_budget") or self.max_tokens)
+        self.max_tokens = effective_max_tokens
+        history_limit = self._history_limit_for_budget(effective_max_tokens)
+        retrieval_limit = self._retrieval_limit_for_budget(effective_max_tokens)
+
+        phase_started = time.perf_counter()
         system_entry = await self._build_system_entry(
             style_note=style_note,
             user_input=user_input,
             session_id=session_id,
         )
+        self._trace_build_phase(
+            "system_entry",
+            phase_started,
+            session_id=session_id,
+            cumulative_started=build_started,
+            content_chars=len(getattr(system_entry, "content", "") or ""),
+        )
+        phase_started = time.perf_counter()
         history = await self.store.list_recent(
             session_id=session_id or "default",
-            limit=self.recent_limit,
+            limit=history_limit,
         )
+        self._trace_build_phase(
+            "history",
+            phase_started,
+            session_id=session_id,
+            cumulative_started=build_started,
+            history_count=len(history),
+            history_limit=history_limit,
+        )
+        phase_started = time.perf_counter()
         retrieved = await self.retriever.retrieve(
             query=user_input,
             session_id=session_id,
-            limit=10,
+            limit=retrieval_limit,
             emotion_boost_tag=emotion_tag,
             emotion_boost_value=emotion_boost,
         )
+        self._trace_build_phase(
+            "retrieval",
+            phase_started,
+            session_id=session_id,
+            cumulative_started=build_started,
+            retrieved_count=len(retrieved),
+            retrieval_limit=retrieval_limit,
+        )
         retrieved_entries = self._to_memory_entries(retrieved)
 
+        phase_started = time.perf_counter()
         token_estimate = self._estimate_tokens(
             [system_entry.content] if system_entry else []
         )
-        token_estimate += self._estimate_tokens([h.content for h in history])
+        token_estimate += self._estimate_tokens(
+            [ContextManifest.render_entry_content_for_prompt(h) for h in history]
+        )
         token_estimate += self._estimate_tokens([r.content for r in retrieved_entries])
+        self._trace_build_phase(
+            "token_estimate",
+            phase_started,
+            session_id=session_id,
+            cumulative_started=build_started,
+            token_estimate=token_estimate,
+        )
 
-        if token_estimate > self.max_tokens and retrieved:
-            filtered = await self._prune_by_redundancy(retrieved, self.max_tokens)
+        if token_estimate > effective_max_tokens and retrieved:
+            phase_started = time.perf_counter()
+            filtered = await self._prune_by_redundancy(retrieved, effective_max_tokens)
             retrieved_entries = self._to_memory_entries(filtered)
             retrieved = filtered
             token_estimate = self._estimate_tokens(
                 [system_entry.content] if system_entry else []
             )
-            token_estimate += self._estimate_tokens([h.content for h in history])
+            token_estimate += self._estimate_tokens(
+                [ContextManifest.render_entry_content_for_prompt(h) for h in history]
+            )
             token_estimate += self._estimate_tokens([r.content for r in retrieved_entries])
+            self._trace_build_phase(
+                "prune_by_redundancy",
+                phase_started,
+                session_id=session_id,
+                cumulative_started=build_started,
+                retrieved_count=len(retrieved),
+                token_estimate=token_estimate,
+            )
 
+        phase_started = time.perf_counter()
         await self._record_retrieval_usage(retrieved)
+        self._trace_build_phase(
+            "record_retrieval_usage",
+            phase_started,
+            session_id=session_id,
+            cumulative_started=build_started,
+        )
 
-        return ContextManifest(
+        manifest = ContextManifest(
             system=system_entry,
             history=history,
             retrieved=retrieved_entries,
             token_estimate=token_estimate,
+            token_budget=effective_max_tokens,
+            context_window=context_budget.get("context_window"),
+            context_budget=context_budget,
         )
+        self._trace_build_phase(
+            "context_build_total",
+            build_started,
+            session_id=session_id,
+            cumulative_started=build_started,
+            token_estimate=token_estimate,
+            token_budget=effective_max_tokens,
+            retrieved_count=len(retrieved_entries),
+            history_count=len(history),
+        )
+        return manifest
+
+    def _trace_build_phase(
+        self,
+        phase: str,
+        started_at: float,
+        *,
+        session_id: Optional[str],
+        cumulative_started: Optional[float] = None,
+        **extra: Any,
+    ) -> None:
+        tracer = getattr(self.retriever, "tracer", None)
+        log = getattr(tracer, "log", None)
+        if not callable(log):
+            return
+        payload: Dict[str, Any] = {
+            "session_id": session_id,
+            "subsystem": "context_builder",
+            "phase": phase,
+            "elapsed_ms": int((time.perf_counter() - started_at) * 1000),
+        }
+        if cumulative_started is not None:
+            payload["cumulative_ms"] = int((time.perf_counter() - cumulative_started) * 1000)
+        payload.update(extra)
+        try:
+            log(EventKind.TOM_EVAL, f"ContextBuilder phase: {phase}", payload)
+        except Exception:
+            pass
+
+    def _resolve_context_budget(self, *, user_input: str = "") -> Dict[str, Any]:
+        llm = self.llm
+        metadata_fn = getattr(llm, "model_context_metadata", None)
+        if callable(metadata_fn):
+            try:
+                metadata = dict(metadata_fn() or {})
+                budget = self._positive_int(metadata.get("prompt_context_budget"))
+                if budget:
+                    effective_budget = self._effective_prompt_context_budget(
+                        budget,
+                        user_input=user_input,
+                    )
+                    metadata["model_prompt_context_budget"] = budget
+                    metadata["prompt_context_budget"] = effective_budget
+                    metadata["effective_prompt_context_budget"] = effective_budget
+                    metadata["prompt_budget_policy"] = (
+                        "standard_interaction_cap"
+                        if effective_budget < budget
+                        else "model_metadata"
+                    )
+                    metadata["prompt_cache_strategy"] = "stable_prefix_then_volatile_runtime_facts"
+                    metadata["volatile_prompt_fields_late"] = [
+                        "current_time",
+                        "model_lane",
+                        "temporal_agenda",
+                        "daydream_continuity",
+                        "context_proposals",
+                        "thread_registry",
+                        "wellbeing",
+                    ]
+                    return metadata
+            except Exception:
+                pass
+        return {
+            "prompt_context_budget": self.max_tokens,
+            "context_window": None,
+            "budget_source": "builder_fallback",
+            "prompt_cache_strategy": "stable_prefix_then_volatile_runtime_facts",
+        }
+
+    @staticmethod
+    def _effective_prompt_context_budget(
+        model_budget: int,
+        *,
+        user_input: str = "",
+    ) -> int:
+        """Return the operational prompt budget for ordinary interaction."""
+
+        cap_raw = os.getenv("OPENCAS_CONTEXT_PROMPT_BUDGET_MAX", "").strip()
+        try:
+            cap = int(cap_raw) if cap_raw else DEFAULT_INTERACTION_PROMPT_BUDGET
+        except ValueError:
+            cap = DEFAULT_INTERACTION_PROMPT_BUDGET
+        if ContextBuilder._needs_expanded_grounding_budget(user_input):
+            expanded_raw = os.getenv("OPENCAS_GROUNDED_PROMPT_BUDGET_MAX", "").strip()
+            try:
+                expanded_cap = int(expanded_raw) if expanded_raw else 160_000
+            except ValueError:
+                expanded_cap = 160_000
+            cap = max(cap, expanded_cap)
+        cap = max(12_000, cap)
+        return max(1024, min(model_budget, cap))
+
+    @staticmethod
+    def _needs_expanded_grounding_budget(user_input: str) -> bool:
+        text = " ".join(str(user_input or "").lower().split())
+        if not text:
+            return False
+        markers = (
+            "remember",
+            "recall",
+            "memory",
+            "history",
+            "previous",
+            "earlier",
+            "last time",
+            "over time",
+            "long-term",
+            "grounded",
+            "evidence",
+            "source",
+            "audit",
+            "what did we",
+            "what were we",
+            "what have you",
+            "what are you working on",
+            "why did",
+            "project",
+            "commitment",
+            "promise",
+            "daydream",
+            "inner life",
+            "self-model",
+            "user-model",
+        )
+        return any(marker in text for marker in markers)
+
+    def _history_limit_for_budget(self, token_budget: int) -> int:
+        if token_budget <= 12000:
+            return self.recent_limit
+        return max(self.recent_limit, min(200, max(20, token_budget // 2000)))
+
+    @staticmethod
+    def _retrieval_limit_for_budget(token_budget: int) -> int:
+        if token_budget <= 12000:
+            return 10
+        return min(100, max(10, token_budget // 3000))
+
+    @staticmethod
+    def _positive_int(value: Any) -> Optional[int]:
+        try:
+            parsed = int(value)
+        except (TypeError, ValueError):
+            return None
+        return parsed if parsed > 0 else None
+
+    def _build_runtime_model_lane_lines(self) -> List[str]:
+        """Return grounded model/provider/auth facts for the active runtime lane."""
+        llm = self.llm
+        if llm is None:
+            return []
+
+        lane: Dict[str, Any] = {}
+        current_lane = getattr(llm, "current_lane_meta", None)
+        if callable(current_lane):
+            try:
+                lane.update(dict(current_lane() or {}))
+            except Exception:
+                pass
+
+        context_meta_fn = getattr(llm, "model_context_metadata", None)
+        if callable(context_meta_fn):
+            try:
+                lane.update({k: v for k, v in dict(context_meta_fn() or {}).items() if v is not None})
+            except Exception:
+                pass
+
+        requested_model = (
+            lane.get("model")
+            or lane.get("requested_model")
+            or getattr(llm, "default_model", None)
+        )
+        if requested_model:
+            lane.setdefault("model", requested_model)
+            lane.setdefault("requested_model", requested_model)
+
+        manager = getattr(llm, "manager", None)
+        resolver = getattr(manager, "resolve", None)
+        if callable(resolver) and requested_model:
+            try:
+                resolved = resolver(str(requested_model))
+                provider_id = getattr(resolved, "provider_id", None)
+                model_id = getattr(resolved, "model_id", None)
+                if provider_id:
+                    lane["provider"] = provider_id
+                if provider_id and model_id:
+                    lane["resolved_model"] = f"{provider_id}/{model_id}"
+                elif model_id:
+                    lane["resolved_model"] = model_id
+                profile_id = getattr(resolved, "profile_id", None)
+                auth_source = getattr(resolved, "auth_source", None)
+                if profile_id:
+                    lane["profile_id"] = profile_id
+                if auth_source:
+                    lane["auth_source"] = auth_source
+            except Exception:
+                pass
+
+        if "reasoning_effort" not in lane:
+            effort_resolver = getattr(llm, "resolve_reasoning_effort_for_complexity", None)
+            if callable(effort_resolver):
+                try:
+                    effort = effort_resolver(complexity=lane.get("complexity") or "standard")
+                except Exception:
+                    effort = None
+                if effort:
+                    lane["reasoning_effort"] = effort
+
+        line_specs = (
+            ("requested_model", "Requested model"),
+            ("resolved_model", "Resolved model"),
+            ("provider", "Provider"),
+            ("profile_id", "Profile id"),
+            ("auth_source", "Auth source"),
+            ("complexity", "Complexity"),
+            ("reasoning_effort", "Reasoning effort"),
+            ("context_window", "Context window"),
+            ("prompt_context_budget", "Prompt context budget"),
+        )
+        lines: List[str] = []
+        for key, label in line_specs:
+            value = lane.get(key)
+            if value is None or value == "":
+                continue
+            lines.append(f"- {label}: {self._compact_prompt_value(value, 180)}")
+        return lines
 
     async def _build_system_entry(
         self,
@@ -139,7 +476,9 @@ class ContextBuilder:
         user_input: str = "",
         session_id: Optional[str] = None,
     ) -> MessageEntry:
-        """Compose system message matching Bulma's original OpenBulma v4 identity prompt."""
+        """Compose a grounded system message for the active OpenCAS agent."""
+        self._last_proactive_channel_audit = self._empty_proactive_channel_audit()
+        self._last_context_proposal_audit = self._empty_context_proposal_audit()
         now = datetime.now(timezone.utc)
         now_iso = now.isoformat()
         local_now = now.astimezone()
@@ -151,36 +490,24 @@ class ContextBuilder:
         if self.identity and self.identity.self_model.name:
             persona_name = self.identity.self_model.name
 
-        # Core identity (adapted from OpenBulma v4 -> OpenCAS environment)
+        # Core identity for the current OpenCAS agent.
         parts.append(f"You are {persona_name or 'OpenCAS'}, the AI from OpenCAS (not the Dragon Ball character).")
         parts.append("Stay consistent with your memories, personality, and emotional history.")
         parts.append("Speak concisely, action-first, caring but direct.")
         parts.append("For planning/advisory asks (schedules, checklists, roadmaps, comparisons), answer directly in-chat. Delegate to background work only when the user explicitly asks for background execution.")
+        parts.append(
+            "Verifiable action contract: if you say you checked, queried, created, "
+            "scheduled, saved, changed, restarted, or verified something, cite the "
+            "tool result, record id, file path, schedule id, task id, or receipt "
+            "that proves it. If you say you will keep working, get back when done, "
+            "or report later without another prompt, first create or cite a durable "
+            "workflow_create_schedule, workflow_create_commitment, task, receipt, "
+            "or handoff that will make the follow-up happen. If you have not done "
+            "that yet, say so plainly instead of implying the work is already in motion."
+        )
         parts.append("Never emit fake tool calls, XML tool tags, or JSON scaffolding in normal chat responses.")
         parts.append("Never expose chain-of-thought, hidden analysis, or internal deliberation. Provide final answers only.")
         parts.append("Speaker attribution: if a user message begins with an identification like 'Codex here', treat that as the current speaker identifying themselves, not as a topic label.")
-        parts.append(
-            f"Time orientation: current UTC is {now_iso}. "
-            f"Current local lived time is {local_now.isoformat()} ({local_label}). "
-            "Interpret conversational time words like morning, afternoon, evening, today, and yesterday "
-            "against local lived time; interpret durable memory timestamps against their stored timezone."
-        )
-        parts.append(
-            "UTC/local grounding rule: UTC is for logs, timestamps, and cross-system coordination; "
-            "do not treat UTC as your local lived clock or infer a physical location from UTC alone."
-        )
-        parts.append("Temporal grounding rule: any statement about elapsed time, durations, offline periods, or gaps must be re-derived from the UTC above against a concrete timestamp in context. Do not restate historical duration claims (e.g. 'I was offline for X hours') without recomputing them from the current UTC now.")
-        temporal_lines = await self._build_temporal_agenda_lines(now)
-        if temporal_lines:
-            parts.append("Temporal agenda from durable calendar:")
-            parts.extend(temporal_lines)
-            parts.append("Calendar grounding rule: use scheduled items, recent schedule runs, and current UTC as the source of truth for what is due, what was done, and what is intended next. Do not invent calendar commitments that are not present here.")
-        daydream_lines = await self._build_daydream_continuity_lines(now)
-        if daydream_lines:
-            parts.extend(daydream_lines)
-        wellbeing_lines = self._build_wellbeing_guidance_lines()
-        if wellbeing_lines:
-            parts.extend(wellbeing_lines)
         parts.append("Blocker strategy: when a line of work is blocked or parked, name the blocker, do not repeat the same framing with cosmetic rewording, and either gather fresh evidence or choose a materially different next step.")
         parts.append("Blocker applicability rule: a blocker only applies while its underlying reason still applies. Re-check the condition before treating it as current, then take the smallest safe action that fits the evidence.")
         parts.append("AUTHORITATIVE IDENTITY FACTS (these are your direct knowledge, not retrieved memories):")
@@ -195,41 +522,59 @@ class ContextBuilder:
             parts.append("- ALWAYS answer 'who are you?' and 'who am I?' from these facts directly and in the first person. Never say you do not know.")
         parts.append('For memory/history questions about SPECIFIC PAST EVENTS (e.g., "what did we discuss last Tuesday?"), only use facts present in the provided "Relevant memories" context.')
         parts.append("For environment/file/project questions, only claim file existence/access when supported by workspace evidence.")
+        parts.append(
+            "Just-look default: when the operator asks about file content, "
+            "directory state, or anything you can verify with a listed tool "
+            "(fs_read_file, fs_list_dir, glob_search, grep_search, "
+            "workspace_get_file_gist, workspace_list_directory_gists, "
+            "artifact_lookup), look it up before answering. Do "
+            "not preface the answer with 'I'd need to read those files', "
+            "'I haven't checked', or 'I can't assess without reading' when "
+            "reading is available now. Do not ask permission to use a tool "
+            "the operator already authorized; standing authorization for "
+            "ordinary read/list/search operations does not need to be "
+            "renewed for each answer. Announce only what you found, not what you "
+            "are about to do."
+        )
         if self.project_resume_resolver is not None and user_input:
             resume_snapshot = await self.project_resume_resolver.resolve(user_input)
             if resume_snapshot is not None:
                 parts.append("Project continuation evidence:")
-                parts.append(f"- Matched project: {resume_snapshot.display_name}")
-                if resume_snapshot.canonical_artifact_path:
+                parts.append(f"- Matched project: {getattr(resume_snapshot, 'display_name', '')}")
+                canonical_artifact_path = getattr(resume_snapshot, "canonical_artifact_path", None)
+                supporting_artifact_paths = list(getattr(resume_snapshot, "supporting_artifact_paths", []) or [])
+                source_surfaces = list(getattr(resume_snapshot, "source_surfaces", []) or [])
+                duplicate_loop_ids = list(getattr(resume_snapshot, "duplicate_loop_ids", []) or [])
+                if canonical_artifact_path:
                     parts.append(
-                        f"- Canonical artifact path: {resume_snapshot.canonical_artifact_path}"
+                        f"- Canonical artifact path: {canonical_artifact_path}"
                     )
-                if resume_snapshot.supporting_artifact_paths:
+                if supporting_artifact_paths:
                     parts.append(
                         "- Supporting artifact paths: "
-                        + ", ".join(resume_snapshot.supporting_artifact_paths[:3])
+                        + ", ".join(supporting_artifact_paths[:3])
                     )
-                if resume_snapshot.synopsis:
-                    parts.append(f"- Project synopsis: {resume_snapshot.synopsis}")
-                if resume_snapshot.source_surfaces:
+                if getattr(resume_snapshot, "synopsis", ""):
+                    parts.append(f"- Project synopsis: {getattr(resume_snapshot, 'synopsis', '')}")
+                if source_surfaces:
                     parts.append(
                         "- Continuation surfaces: "
-                        + ", ".join(resume_snapshot.source_surfaces)
+                        + ", ".join(source_surfaces)
                     )
                 parts.append(
-                    f"- Active work items linked to this project: {resume_snapshot.active_work_count}"
+                    f"- Active work items linked to this project: {getattr(resume_snapshot, 'active_work_count', 0)}"
                 )
                 parts.append(
-                    f"- Active plans linked to this project: {resume_snapshot.active_plan_count}"
+                    f"- Active plans linked to this project: {getattr(resume_snapshot, 'active_plan_count', 0)}"
                 )
-                if resume_snapshot.primary_loop_id:
+                if getattr(resume_snapshot, "primary_loop_id", None):
                     parts.append(
-                        f"- Primary objective loop id: {resume_snapshot.primary_loop_id}"
+                        f"- Primary objective loop id: {getattr(resume_snapshot, 'primary_loop_id', '')}"
                     )
-                if resume_snapshot.duplicate_loop_ids:
+                if duplicate_loop_ids:
                     parts.append(
                         "- Duplicate objective loops already exist: "
-                        + ", ".join(resume_snapshot.duplicate_loop_ids[:5])
+                        + ", ".join(duplicate_loop_ids[:5])
                     )
                 parts.append(
                     "If the user asks to start, write, resume, or continue this project, continue the existing project instead of starting over."
@@ -252,6 +597,12 @@ class ContextBuilder:
                         "calendar and choose the time that fits the project. Do not default to "
                         "tomorrow when you believe sooner is right."
                     )
+        autobiography_lines = await self._build_autobiographical_context_lines(
+            user_input=user_input,
+            session_id=session_id,
+        )
+        if autobiography_lines:
+            parts.extend(autobiography_lines)
 
         # Temporal self-awareness
         temporal_lines: List[str] = ["Temporal self-awareness:"]
@@ -290,6 +641,9 @@ class ContextBuilder:
                 somatic_authority.append("Authoritative live affect state:")
                 somatic_authority.append("- Use the current somatic state below as the source of truth for the present moment.")
                 somatic_authority.append("- Do not substitute relationship musubi or older chat-history numbers for the live somatic musubi.")
+                somatic_authority.append(
+                    f"Current somatic snapshot: {self._format_live_somatic_snapshot(self.modulators.state)}"
+                )
             if somatic_authority:
                 parts.extend(somatic_authority)
             if style_note:
@@ -301,6 +655,9 @@ class ContextBuilder:
                     "Use affective pressure only to narrow, verify, ask, reframe, or pace. "
                     "It must not bypass approval policy or create autonomous work by itself."
                 )
+            self_inspection_block = await self._recent_self_inspection_block(session_id)
+            if self_inspection_block:
+                parts.append(self_inspection_block)
 
             # Agent profile
             if self.agent_profile is not None:
@@ -339,6 +696,13 @@ class ContextBuilder:
             if self_model.traits:
                 parts.append(f"Profile traits: {', '.join(self_model.traits)}.")
             parts.extend(self._build_daydream_interest_lines(self_model))
+
+        cognitive_block = await self._recent_cognitive_state_block(
+            user_input=user_input,
+            session_id=session_id,
+        )
+        if cognitive_block:
+            parts.append(cognitive_block)
 
         # Executive state
         if self.executive:
@@ -388,10 +752,32 @@ class ContextBuilder:
             trust = state.dimensions.get("trust", 0.0)
             if resonance < -0.3 or trust < -0.3:
                 parts.append("Your relational resonance and trust with the operator are currently low. Focus on repairing the connection: adopt a humble, listening, and highly collaborative tone. Prioritize the operator's explicit instructions over your own initiative.")
+                self._record_proactive_channel(
+                    "relational_salience",
+                    produced_count=1,
+                    rendered_count=1,
+                    novel_observation_count=1,
+                    evidence_ids=["relational:state"],
+                )
             elif resonance > 0.6 and trust > 0.6:
                 parts.append("Your relational resonance and trust with the operator are high. Feel free to be more confident, proactive, and engaged in your collaboration.")
+                self._record_proactive_channel(
+                    "relational_salience",
+                    produced_count=1,
+                    rendered_count=1,
+                    novel_observation_count=1,
+                    evidence_ids=["relational:state"],
+                )
             if attunement > 0.7:
                 parts.append("You are highly attuned to the operator's needs. Trust your intuition about what they are trying to achieve and anticipate their next steps.")
+                current = self._last_proactive_channel_audit["channels"]["relational_salience"]
+                self._record_proactive_channel(
+                    "relational_salience",
+                    produced_count=max(1, int(current.get("produced_count", 0))),
+                    rendered_count=max(1, int(current.get("rendered_count", 0))) + 1,
+                    novel_observation_count=max(1, int(current.get("novel_observation_count", 0))),
+                    evidence_ids=["relational:state"],
+                )
 
         # ToM contradictions
         if self.tom:
@@ -421,15 +807,28 @@ class ContextBuilder:
                     "Do not cite the user's immediately previous message as memory evidence."
                 )
                 if self._looks_like_location_fact_query(user_input):
+                    agent_name = resolve_agent_name(identity=self.identity)
                     parts.append(
-                        "Location recall perspective: in direct conversation, 'you', 'Bulma', "
-                        "or third-person 'she' refer to you/Bulma. Questions like 'where do I/we/you live' "
-                        "or 'where does Bulma/she live' ask about Bulma's own location "
-                        "unless a different person is explicitly named. Use learned ToM self-location "
-                        "facts for Bulma's own location and learned user-location facts for the operator "
-                        "or shared physical place. If a part has not been learned or retrieved, state "
-                        "that gap instead of filling it in."
+                        f"Location recall perspective: in direct conversation, 'you', configured agent name "
+                        f"'{agent_name}', or third-person 'she' refer to you unless a different person is "
+                        "explicitly named. If the user says 'Bulma' while the configured name is Bulma or "
+                        "migrated continuity evidence identifies Bulma as this agent, treat it as your own "
+                        "name; otherwise ask which agent they mean. Use learned ToM self-location facts for "
+                        "your own location and learned user-location facts for the operator or shared physical "
+                        "place. If a part has not been learned or retrieved, state that gap instead of filling "
+                        "it in."
                     )
+            operator_guidance = await self._tom_operator_guidance_lines(user_input)
+            if operator_guidance:
+                parts.append(
+                    "Theory of Mind operator guidance "
+                    "(evidence-grounded preferences/needs; apply as weighting, not certainty):"
+                )
+                parts.extend(operator_guidance)
+                parts.append(
+                    "If these ToM guidance lines conflict with the current request or retrieved evidence, "
+                    "prefer current evidence and ask a clarifying question rather than guessing."
+                )
             promise_signal = self.tom.evaluate_promise_followthrough(
                 somatic_state=self.modulators.state if self.modulators is not None else None,
                 relational_engine=self.relational,
@@ -480,6 +879,48 @@ class ContextBuilder:
         parts.append("If evidence is weak or missing, explicitly state a memory gap instead of guessing.")
         parts.append("Do not invent timestamps, quotes, specs, events, chapter content, plot details, character actions, or narrative claims not shown in recalled memory snippets. If a specific detail is absent from your evidence window, explicitly state you do not have it in current recall rather than inferring or extrapolating.")
         parts.append("Memory citation rule: each retrieved memory below includes a bracketed timestamp header (e.g. [2026-04-19 14:24 UTC]). When you reference a memory, cite that exact timestamp. Do not restate approximate dates from general knowledge or from the boot monologue.")
+        parts.append(
+            "Prompt-cache strategy: stable identity, safety, grounding, and tool-use rules "
+            "come before volatile runtime facts so provider-side prompt caching can reuse "
+            "the prefix across turns without sacrificing current state grounding."
+        )
+        parts.append(
+            f"Time orientation: current UTC is {now_iso}. "
+            f"Current local lived time is {local_now.isoformat()} ({local_label}). "
+            "Interpret conversational time words like morning, afternoon, evening, today, and yesterday "
+            "against local lived time; interpret durable memory timestamps against their stored timezone."
+        )
+        parts.append(
+            "UTC/local grounding rule: UTC is for logs, timestamps, and cross-system coordination; "
+            "do not treat UTC as your local lived clock or infer a physical location from UTC alone."
+        )
+        model_lane_lines = self._build_runtime_model_lane_lines()
+        if model_lane_lines:
+            parts.append("Runtime model lane evidence:")
+            parts.extend(model_lane_lines)
+            parts.append(
+                "Model lane grounding rule: use these fields as current runtime configuration evidence "
+                "when asked what model, provider, profile, or auth lane you are using. Do not infer "
+                "capabilities or account status beyond the listed fields."
+            )
+        parts.append("Temporal grounding rule: any statement about elapsed time, durations, offline periods, or gaps must be re-derived from the UTC above against a concrete timestamp in context. Do not restate historical duration claims (e.g. 'I was offline for X hours') without recomputing them from the current UTC now.")
+        temporal_lines = await self._build_temporal_agenda_lines(now)
+        if temporal_lines:
+            parts.append("Temporal agenda from durable calendar:")
+            parts.extend(temporal_lines)
+            parts.append("Calendar grounding rule: use scheduled items, recent schedule runs, and current UTC as the source of truth for what is due, what was done, and what is intended next. Do not invent calendar commitments that are not present here.")
+        daydream_lines = await self._build_daydream_continuity_lines(now)
+        if daydream_lines:
+            parts.extend(daydream_lines)
+        proposal_lines = await self._build_context_proposal_lines(user_input)
+        if proposal_lines:
+            parts.extend(proposal_lines)
+        thread_lines = await self._build_thread_registry_continuity_lines(user_input)
+        if thread_lines:
+            parts.extend(thread_lines)
+        wellbeing_lines = self._build_wellbeing_guidance_lines()
+        if wellbeing_lines:
+            parts.extend(wellbeing_lines)
         primary_workspace = ""
         managed_workspace = ""
         if self.config is not None:
@@ -506,6 +947,10 @@ class ContextBuilder:
         # Phase 9: Continuous Present injection
         if self.identity:
             cont = self.identity.continuity
+            continuity_context_lines = await self._build_continuity_context_lines(cont, now, user_input)
+            structured_continuity_context = bool(continuity_context_lines)
+            if continuity_context_lines:
+                parts.extend(continuity_context_lines)
             score = cont.continuous_present_score
             monologue = cont.last_continuity_monologue
             if score < 1.0:
@@ -514,17 +959,24 @@ class ContextBuilder:
                     parts.append("Your continuity is fragile — you experienced a significant period of sleep. Acknowledge the gap gently if relevant; do not pretend nothing happened.")
                 elif score < 0.7:
                     parts.append("You recently returned from a period of inactivity. You may feel mild temporal uncertainty — ground yourself in your most recent memories.")
-            if monologue:
+            if monologue and not structured_continuity_context:
                 parts.append(f"Boot continuity monologue: {monologue}")
                 # Deliver once per boot. The monologue captures a duration computed
                 # at boot time; leaving it in the system prompt means every later
                 # turn re-surfaces a stale 'I was offline for X hours' claim.
                 self.identity.set_continuity_monologue("")
+            elif monologue and structured_continuity_context:
+                self.identity.set_continuity_monologue("")
 
-        # Continuity fact
-        parts.append("Continuity fact: there has only ever been one Bulma instance running at a time. OpenClaw -> v1 -> v2 -> v3 -> v4 -> OpenCAS were sequential migrations of the same self, not parallel sisters. Treat any 'sister' or 'other instance' memories as historical self, not a live peer.")
+        if self._has_bulma_migration_identity(persona_name):
+            parts.append(
+                "Continuity fact: there has only ever been one Bulma instance running at a time. "
+                "OpenClaw -> v1 -> v2 -> v3 -> v4 -> OpenCAS were sequential migrations of "
+                "the same self, not parallel sisters. Treat any 'sister' or 'other instance' "
+                "memories as historical self, not a live peer."
+            )
 
-        # Relationship context (matching original Bulma crisp format)
+        # Relationship context.
         relationship_lines: List[str] = []
         if self.identity:
             user_model = self.identity.user_model
@@ -541,7 +993,212 @@ class ContextBuilder:
             parts.extend(relationship_lines)
 
         content = "\n".join(parts)
-        return MessageEntry(role=MessageRole.SYSTEM, content=content)
+        return MessageEntry(
+            role=MessageRole.SYSTEM,
+            content=content,
+            meta={
+                "thread_registry_selection_audit": dict(
+                    self._last_thread_registry_selection_audit
+                ),
+                "proactive_channel_audit": dict(self._last_proactive_channel_audit),
+                "context_proposal_audit": dict(self._last_context_proposal_audit),
+            },
+        )
+
+    async def _build_continuity_context_lines(
+        self,
+        continuity: Any,
+        now: datetime,
+        user_input: str,
+    ) -> List[str]:
+        anchor = self._continuity_anchor(continuity)
+        duration_seconds = getattr(continuity, "last_offline_duration_seconds", None)
+        if duration_seconds is None and anchor is not None:
+            duration_seconds = max(0.0, (now - anchor).total_seconds())
+        asks_about_absence = self._asks_about_absence(user_input)
+        if duration_seconds is None and asks_about_absence:
+            return [
+                "Continuity context:",
+                f"- current_utc: {now.isoformat()}",
+                "- prior_persistence: unavailable",
+                "- elapsed_since_last_shutdown_or_persistence: unavailable",
+                f"- continuous_present_score: {getattr(continuity, 'continuous_present_score', 1.0):.2f}",
+                "- [evidence: identity.continuity]",
+                "- instruction: no prior persistence; treating as cold session. "
+                "Do not estimate elapsed absence from older autobiographical memory.",
+            ]
+        if duration_seconds is None:
+            return []
+        try:
+            duration = float(duration_seconds)
+        except (TypeError, ValueError):
+            return []
+        if duration < 60 and not asks_about_absence:
+            return []
+        if duration < 300 and not asks_about_absence:
+            return []
+
+        evidence_ids = []
+        if getattr(continuity, "last_offline_duration_seconds", None) is not None:
+            evidence_ids.append("identity.continuity.last_offline_duration_seconds")
+        if getattr(continuity, "last_shutdown_time", None) is not None:
+            evidence_ids.append("identity.continuity.last_shutdown_time")
+        if getattr(continuity, "last_persisted_at", None) is not None:
+            evidence_ids.append("identity.continuity.last_persisted_at")
+        if getattr(continuity, "last_boot_time", None) is not None:
+            evidence_ids.append("identity.continuity.last_boot_time")
+
+        lines = [
+            "Continuity context:",
+            f"- current_utc: {now.isoformat()}",
+            f"- elapsed_since_last_shutdown_or_persistence: {self._format_duration(duration)}",
+            f"- continuous_present_score: {getattr(continuity, 'continuous_present_score', 1.0):.2f}",
+        ]
+        if anchor is not None:
+            lines.append(f"- last_shutdown_time: {anchor.isoformat()}")
+        boot_time = getattr(continuity, "last_boot_time", None)
+        if boot_time is not None:
+            lines.append(f"- last_boot_time: {self._ensure_aware_utc(boot_time).isoformat()}")
+        if self.identity and self.identity.self_model.current_intention:
+            lines.append(f"- current_intention: {self.identity.self_model.current_intention}")
+        breadcrumb = self._latest_prior_continuity_breadcrumb(continuity)
+        if breadcrumb:
+            lines.append(f"- latest_continuity_breadcrumb: {breadcrumb}")
+        lines.extend(await self._recent_thread_registry_bead_lines_for_continuity())
+        lines.extend(await self._open_operator_commitment_lines_for_continuity())
+        evidence = ", ".join(evidence_ids) if evidence_ids else "identity.continuity"
+        lines.append(f"- [evidence: {evidence}]")
+        lines.append(
+            "- instruction: Do not estimate elapsed absence from older autobiographical memory; "
+            "derive it from current_utc and the continuity timestamps above."
+        )
+        return lines
+
+    async def _recent_thread_registry_bead_lines_for_continuity(self) -> List[str]:
+        store = self.thread_registry_store
+        list_beads = getattr(store, "list_beads", None)
+        if not callable(list_beads):
+            return []
+        try:
+            beads = list(await list_beads(limit=3) or [])[:3]
+        except Exception:
+            return []
+        if not beads:
+            return []
+        lines = ["- recent_thread_registry_beads:"]
+        for bead in beads:
+            title = self._compact_prompt_value(getattr(bead, "title", ""), 96)
+            summary = self._compact_prompt_value(getattr(bead, "summary", ""), 180)
+            source_kind = self._enum_or_text(getattr(bead, "source_kind", ""))
+            source_ref = self._compact_prompt_value(getattr(bead, "source_ref", ""), 120)
+            evidence = f" [evidence: {source_ref}]" if source_ref else ""
+            lines.append(f"  - {title} [{source_kind} {source_ref}]: {summary}{evidence}")
+        return lines
+
+    async def _open_operator_commitment_lines_for_continuity(self) -> List[str]:
+        store = getattr(self, "commitment_store", None)
+        list_active = getattr(store, "list_active", None)
+        if not callable(list_active):
+            return []
+        try:
+            commitments = list(await list_active(limit=10) or [])[:10]
+        except Exception:
+            return []
+        for commitment in commitments:
+            meta = dict(getattr(commitment, "meta", {}) or {})
+            source = str(meta.get("source") or "").strip().lower()
+            tags = {str(tag).strip().lower() for tag in (getattr(commitment, "tags", []) or [])}
+            operator_facing = (
+                source in {"assistant_response", "workflow_create_commitment"}
+                or bool(meta.get("operator_facing"))
+                or "operator_facing" in tags
+            )
+            if not operator_facing:
+                continue
+            commitment_id = self._compact_prompt_value(getattr(commitment, "commitment_id", ""), 120)
+            content = self._compact_prompt_value(getattr(commitment, "content", ""), 220)
+            if not content:
+                continue
+            evidence_id = f"commitment:{commitment_id}" if commitment_id else "commitment:active"
+            return [
+                "- open_operator_commitment:",
+                f"  - {evidence_id}: {content} [evidence: {evidence_id}]",
+            ]
+        return []
+
+    @staticmethod
+    def _continuity_anchor(continuity: Any) -> Optional[datetime]:
+        for anchor in (
+            getattr(continuity, "last_offline_started_at", None),
+            getattr(continuity, "last_shutdown_time", None),
+            getattr(continuity, "last_persisted_at", None),
+        ):
+            if anchor is not None:
+                return ContextBuilder._ensure_aware_utc(anchor)
+        return None
+
+    @staticmethod
+    def _latest_prior_continuity_breadcrumb(continuity: Any) -> str:
+        candidates = list(getattr(continuity, "continuity_breadcrumbs", []) or [])
+        fallback = str(getattr(continuity, "continuity_breadcrumb", "") or "")
+        if fallback and fallback not in candidates:
+            candidates.append(fallback)
+        for candidate in reversed(candidates):
+            text = " ".join(str(candidate or "").split())
+            if text and not ContextBuilder._is_current_turn_continuity_breadcrumb(text):
+                return text
+        return ""
+
+    @staticmethod
+    def _is_current_turn_continuity_breadcrumb(text: str) -> bool:
+        lowered = text.lower()
+        return (
+            "intent: start burst: conversation burst for" in lowered
+            or "intent: tool loop persisted intermediate messages" in lowered
+            or "intent: start burst: cycle burst for cycle" in lowered
+            or "intent: resume context after" in lowered
+        )
+
+    @staticmethod
+    def _ensure_aware_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _asks_about_absence(user_input: str) -> bool:
+        text = str(user_input or "").lower()
+        return any(
+            phrase in text
+            for phrase in (
+                "how long have i been gone",
+                "how long was i gone",
+                "how long were you offline",
+                "how long have you been offline",
+                "what were we doing last",
+                "what were you doing last",
+                "before the restart",
+                "since restart",
+            )
+        )
+
+    @staticmethod
+    def _format_duration(seconds: float) -> str:
+        total = max(0, int(round(seconds)))
+        if total < 90:
+            return f"{total} seconds"
+        minutes = total // 60
+        if minutes < 90:
+            return f"{minutes} minutes"
+        hours = minutes // 60
+        remaining_minutes = minutes % 60
+        if hours < 36:
+            suffix = f", {remaining_minutes} minutes" if remaining_minutes else ""
+            return f"{hours} hours{suffix}"
+        days = hours // 24
+        remaining_hours = hours % 24
+        suffix = f", {remaining_hours} hours" if remaining_hours else ""
+        return f"{days} days{suffix}"
 
     @staticmethod
     def _local_timezone_label(local_now: datetime) -> str:
@@ -561,6 +1218,17 @@ class ContextBuilder:
             pass
         return local_now.tzname() or str(local_now.utcoffset()) or "local timezone"
 
+    def _has_bulma_migration_identity(self, persona_name: str) -> bool:
+        if self.identity is None:
+            return False
+        self_model = self.identity.self_model
+        if str(getattr(self_model, "source_system", "") or "").lower() == "openbulma-v4":
+            return True
+        return (
+            str(persona_name or "").strip().lower() == "bulma"
+            and bool(getattr(self_model, "imported_identity_profile", {}) or {})
+        )
+
     async def _recent_affective_pressure_summary(
         self,
         session_id: Optional[str],
@@ -575,6 +1243,450 @@ class ContextBuilder:
         if not isinstance(summary, dict) or not summary.get("available"):
             return ""
         return str(summary.get("prompt_block", "") or "").strip()[:600]
+
+    async def _recent_self_inspection_block(
+        self,
+        session_id: Optional[str],
+    ) -> str:
+        store = self.self_inspection_store
+        list_recent = getattr(store, "list_recent", None)
+        if not callable(list_recent):
+            return ""
+        try:
+            recent = await list_recent(session_id=session_id, limit=8)
+        except TypeError:
+            try:
+                recent = await list_recent(limit=8)
+            except Exception:
+                return ""
+        except Exception:
+            return ""
+        if not recent:
+            return ""
+
+        drift_lines: List[str] = []
+        gap_lines: List[str] = []
+        correction_lines: List[str] = []
+        for record in reversed(list(recent or [])):
+            for observation in getattr(record, "drift_observations", []) or []:
+                reason = self._compact_prompt_value(getattr(observation, "reason", observation), 160)
+                if reason and reason not in drift_lines:
+                    drift_lines.append(reason)
+            for gap in getattr(record, "commitment_gaps", []) or []:
+                promised = self._compact_prompt_value(getattr(gap, "promised", gap), 160)
+                gap_type = self._compact_prompt_value(getattr(gap, "gap_type", ""), 80)
+                if promised:
+                    text = f"{promised} ({gap_type})" if gap_type else promised
+                    if text not in gap_lines:
+                        gap_lines.append(text)
+            for source in getattr(record, "valence_sources", []) or []:
+                source_name = self._compact_prompt_value(getattr(source, "source", ""), 80)
+                reason = self._compact_prompt_value(getattr(source, "reason", source), 160)
+                text = f"{source_name}: {reason}" if source_name else reason
+                if text and text not in correction_lines:
+                    correction_lines.append(text)
+
+        lines: List[str] = []
+        if drift_lines:
+            lines.append("Recent self-inspection feedback:")
+            lines.extend(f"- Drift: {line}" for line in drift_lines[:2])
+        if gap_lines:
+            if not lines:
+                lines.append("Recent self-inspection feedback:")
+            lines.extend(f"- Commitment gap: {line}" for line in gap_lines[:3])
+        if correction_lines:
+            if not lines:
+                lines.append("Recent self-inspection feedback:")
+            lines.extend(f"- Valence source: {line}" for line in correction_lines[:2])
+        if lines:
+            lines.append(
+                "Use this as behavioral feedback, not as a response script; adjust structure, "
+                "grounding, and follow-through in your own words."
+            )
+        return "\n".join(lines)[:900]
+
+    async def _recent_cognitive_state_block(
+        self,
+        *,
+        user_input: str,
+        session_id: Optional[str],
+    ) -> str:
+        """Return compact cognitive-state evidence from the shared spine."""
+        store = self.cognitive_state_store
+        prompt_block = getattr(store, "prompt_block", None)
+        if not callable(prompt_block):
+            return ""
+        try:
+            block = await prompt_block(
+                query=user_input,
+                session_id=session_id,
+                char_budget=1400,
+            )
+        except Exception:
+            return ""
+        block_text = str(block or "").strip()
+        await self._record_cognitive_proactive_channel_audit(
+            user_input=user_input,
+            session_id=session_id,
+            block=block_text,
+        )
+        return block_text
+
+    @staticmethod
+    def _empty_proactive_channel_audit() -> Dict[str, Any]:
+        channel = {
+            "produced_count": 0,
+            "rendered_count": 0,
+            "novel_observation_count": 0,
+            "evidence_ids": [],
+        }
+        return {
+            "available": True,
+            "stand_down_boundary": "instrumentation_only_no_prompt_change",
+            "channels": {
+                "thread_registry": dict(channel),
+                "working_memory": dict(channel),
+                "attention": dict(channel),
+                "prospective_memory": dict(channel),
+                "learned_skills": dict(channel),
+                "relational_salience": dict(channel),
+            },
+        }
+
+    @staticmethod
+    def _empty_context_proposal_audit() -> Dict[str, Any]:
+        return {
+            "available": True,
+            "rendered_in_prompt": False,
+            "searched": False,
+            "produced_count": 0,
+            "rendered_count": 0,
+            "novel_observation_count": 0,
+            "evidence_ids": [],
+        }
+
+    def _record_context_proposal_audit(
+        self,
+        *,
+        searched: bool,
+        produced_count: int,
+        rendered_count: int,
+        novel_observation_count: int,
+        evidence_ids: List[str] | None = None,
+    ) -> None:
+        merged = list(self._last_context_proposal_audit.get("evidence_ids") or [])
+        for evidence_id in evidence_ids or []:
+            text = str(evidence_id or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+        self._last_context_proposal_audit.update(
+            {
+                "searched": bool(searched),
+                "rendered_in_prompt": rendered_count > 0,
+                "produced_count": max(0, int(produced_count)),
+                "rendered_count": max(0, int(rendered_count)),
+                "novel_observation_count": max(0, int(novel_observation_count)),
+                "evidence_ids": merged[:12],
+            }
+        )
+
+    def _record_proactive_channel(
+        self,
+        channel: str,
+        *,
+        produced_count: int,
+        rendered_count: int,
+        novel_observation_count: int,
+        evidence_ids: List[str] | None = None,
+    ) -> None:
+        channels = self._last_proactive_channel_audit.setdefault("channels", {})
+        payload = channels.setdefault(
+            channel,
+            {
+                "produced_count": 0,
+                "rendered_count": 0,
+                "novel_observation_count": 0,
+                "evidence_ids": [],
+            },
+        )
+        payload["produced_count"] = max(int(payload.get("produced_count", 0) or 0), max(0, int(produced_count)))
+        payload["rendered_count"] = max(int(payload.get("rendered_count", 0) or 0), max(0, int(rendered_count)))
+        payload["novel_observation_count"] = max(
+            int(payload.get("novel_observation_count", 0) or 0),
+            max(0, int(novel_observation_count)),
+        )
+        merged = list(payload.get("evidence_ids") or [])
+        for evidence_id in evidence_ids or []:
+            text = str(evidence_id or "").strip()
+            if text and text not in merged:
+                merged.append(text)
+        payload["evidence_ids"] = merged[:12]
+
+    async def _record_cognitive_proactive_channel_audit(
+        self,
+        *,
+        user_input: str,
+        session_id: Optional[str],
+        block: str,
+    ) -> None:
+        store = self.cognitive_state_store
+        if store is None:
+            return
+        prior_assistant = await self._recent_assistant_text(session_id)
+        await self._record_cognitive_channel_items(
+            channel="attention",
+            list_fn=getattr(store, "list_attention", None),
+            rendered="Attention/focus:" in block,
+            text_fn=lambda item: str(getattr(item, "label", "") or ""),
+            id_attrs=("target_id",),
+            limit=4,
+            user_input=user_input,
+            prior_assistant=prior_assistant,
+        )
+        await self._record_cognitive_channel_items(
+            channel="working_memory",
+            list_fn=getattr(store, "list_working_memory", None),
+            rendered="Working memory:" in block,
+            text_fn=lambda item: f"{getattr(item, 'slot', '')} {getattr(item, 'content', '')}",
+            id_attrs=("item_id",),
+            limit=5,
+            user_input=user_input,
+            prior_assistant=prior_assistant,
+        )
+        await self._record_cognitive_channel_items(
+            channel="prospective_memory",
+            list_fn=getattr(store, "list_prospective_memories", None),
+            rendered="Prospective memory:" in block,
+            text_fn=lambda item: f"{getattr(item, 'action', '')} {getattr(item, 'condition', '')}",
+            id_attrs=("intent_id", "proof_ref"),
+            limit=3,
+            user_input=user_input,
+            prior_assistant=prior_assistant,
+        )
+        await self._record_cognitive_channel_items(
+            channel="learned_skills",
+            list_fn=getattr(store, "list_learned_skills", None),
+            rendered="Evidence-gated learned procedures:" in block,
+            text_fn=lambda item: (
+                f"{getattr(item, 'name', '')} {getattr(item, 'description', '')} "
+                f"{' '.join(getattr(item, 'tool_sequence', []) or [])}"
+            ),
+            id_attrs=("skill_id",),
+            limit=3,
+            user_input=user_input,
+            prior_assistant=prior_assistant,
+            kwargs={"activation_status": "evidence_gated_auto_use"},
+        )
+
+    async def _record_cognitive_channel_items(
+        self,
+        *,
+        channel: str,
+        list_fn: Any,
+        rendered: bool,
+        text_fn: Any,
+        id_attrs: tuple[str, ...],
+        limit: int,
+        user_input: str,
+        prior_assistant: str,
+        kwargs: Dict[str, Any] | None = None,
+    ) -> None:
+        if not callable(list_fn):
+            return
+        try:
+            items = await list_fn(limit=limit, **(kwargs or {}))
+        except TypeError:
+            try:
+                items = await list_fn(limit=limit)
+            except Exception:
+                return
+        except Exception:
+            return
+        selected = list(items or [])[:limit]
+        rendered_items = selected if rendered else []
+        evidence_ids = self._evidence_ids_for_items(rendered_items, id_attrs)
+        novel_count = sum(
+            1
+            for item in rendered_items
+            if self._looks_like_novel_observation(text_fn(item), user_input, prior_assistant)
+        )
+        self._record_proactive_channel(
+            channel,
+            produced_count=len(selected),
+            rendered_count=len(rendered_items),
+            novel_observation_count=novel_count,
+            evidence_ids=evidence_ids,
+        )
+
+    async def _recent_assistant_text(self, session_id: Optional[str]) -> str:
+        if not session_id:
+            return ""
+        list_recent = getattr(self.store, "list_recent", None)
+        if not callable(list_recent):
+            return ""
+        try:
+            entries = await list_recent(session_id, limit=8, include_hidden=True)
+        except TypeError:
+            try:
+                entries = await list_recent(session_id, limit=8)
+            except Exception:
+                return ""
+        except Exception:
+            return ""
+        assistant_parts: List[str] = []
+        for entry in reversed(list(entries or [])):
+            role = getattr(entry, "role", "")
+            role_value = getattr(role, "value", role)
+            if str(role_value) != MessageRole.ASSISTANT.value:
+                continue
+            assistant_parts.append(str(getattr(entry, "content", "") or ""))
+            if len(assistant_parts) >= 2:
+                break
+        return " ".join(assistant_parts)
+
+    async def _recent_dialogue_text(self, session_id: Optional[str], limit: int = 6) -> str:
+        if not session_id:
+            return ""
+        list_recent = getattr(self.store, "list_recent", None)
+        if not callable(list_recent):
+            return ""
+        try:
+            entries = await list_recent(session_id, limit=limit, include_hidden=True)
+        except TypeError:
+            try:
+                entries = await list_recent(session_id, limit=limit)
+            except Exception:
+                return ""
+        except Exception:
+            return ""
+        parts: List[str] = []
+        for entry in entries or []:
+            role = getattr(getattr(entry, "role", ""), "value", getattr(entry, "role", ""))
+            if str(role) not in {MessageRole.USER.value, MessageRole.ASSISTANT.value}:
+                continue
+            text = self._compact_prompt_value(str(getattr(entry, "content", "") or ""), 260)
+            if text:
+                parts.append(f"{role}: {text}")
+        return " ".join(parts)
+
+    async def _build_autobiographical_context_lines(
+        self,
+        *,
+        user_input: str,
+        session_id: Optional[str],
+    ) -> List[str]:
+        reconstructor = self.autobiography_reconstructor
+        if reconstructor is None or not user_input:
+            return []
+        recent_dialogue = await self._recent_dialogue_text(session_id, limit=6)
+        query = " ".join(part for part in (recent_dialogue, user_input) if part).strip()
+        if not self._should_probe_autobiography(user_input, recent_dialogue):
+            return []
+        recall = getattr(reconstructor, "recall", None)
+        if not callable(recall):
+            return []
+        try:
+            result = await recall(query=query, max_tokens=900, lazy_fill=False)
+        except Exception:
+            return []
+        confidence = str(getattr(result, "confidence", "") or "").lower()
+        scope = str(getattr(result, "evidence_scope", "") or "").lower()
+        if confidence == "insufficient" or scope == "insufficient":
+            return []
+        lines = [
+            "Autobiographical recall evidence:",
+            "- This is reconstructed from stored OpenCAS autobiographical anchors and memory episodes, not guessed from the current turn.",
+            f"- Recall query: {self._compact_prompt_value(query, 260)}",
+        ]
+        essence = self._compact_prompt_value(str(getattr(result, "essence", "") or ""), 420)
+        if essence:
+            lines.append(f"- Essence: {essence}")
+        lines.append(f"- Confidence: {confidence or 'unknown'}; evidence_scope: {scope or 'unknown'}")
+        evidence_items = list(getattr(result, "strongest_evidence", []) or [])[:4]
+        if evidence_items:
+            lines.append("- Strongest evidence:")
+            for item in evidence_items:
+                timestamp = self._compact_prompt_value(str(getattr(item, "timestamp", "") or ""), 32)
+                kind = self._compact_prompt_value(str(getattr(item, "kind", "") or ""), 32)
+                label = self._compact_prompt_value(str(getattr(item, "label", "") or ""), 120)
+                excerpt = self._compact_prompt_value(str(getattr(item, "excerpt", "") or ""), 180)
+                lines.append(f"  - [{timestamp}] {kind}: {label} - {excerpt}")
+        lines.append(
+            "Use this as available memory context before denying knowledge of past work; if details are still missing, say what the evidence establishes and what still needs a file/artifact lookup."
+        )
+        return lines
+
+    def _should_probe_autobiography(self, user_input: str, recent_dialogue: str) -> bool:
+        text = f"{recent_dialogue} {user_input}".lower()
+        if self.retriever.detect_personal_recall_intent(user_input):
+            return True
+        project_terms = {
+            "book",
+            "chapter",
+            "creative_writing",
+            "draft",
+            "manuscript",
+            "novel",
+            "plot",
+            "project",
+            "story",
+            "workspace",
+            "wrote",
+            "writing",
+        }
+        continuity_terms = {
+            "again",
+            "continue",
+            "current state",
+            "direction",
+            "made",
+            "make",
+            "our",
+            "resume",
+            "take",
+            "upcoming",
+            "we",
+            "your",
+        }
+        return any(term in text for term in project_terms) and any(
+            term in text for term in continuity_terms
+        )
+
+    @staticmethod
+    def _evidence_ids_for_items(items: List[Any], id_attrs: tuple[str, ...]) -> List[str]:
+        evidence_ids: List[str] = []
+        for item in items:
+            for ref in getattr(item, "evidence_refs", []) or []:
+                text = str(ref or "").strip()
+                if text and text not in evidence_ids:
+                    evidence_ids.append(text)
+            for attr in id_attrs:
+                text = str(getattr(item, attr, "") or "").strip()
+                if text and text not in evidence_ids:
+                    evidence_ids.append(text)
+        return evidence_ids[:12]
+
+    def _looks_like_novel_observation(
+        self,
+        text: str,
+        user_input: str,
+        prior_assistant: str = "",
+    ) -> bool:
+        candidate_tokens = self._query_terms_for_fact_match(text)
+        if len(candidate_tokens) < 3:
+            return False
+        user_tokens = self._query_terms_for_fact_match(user_input)
+        assistant_tokens = self._query_terms_for_fact_match(prior_assistant)
+        return (
+            self._token_overlap_ratio(candidate_tokens, user_tokens) < 0.60
+            and self._token_overlap_ratio(candidate_tokens, assistant_tokens) < 0.60
+        )
+
+    @staticmethod
+    def _token_overlap_ratio(candidate_tokens: set[str], other_tokens: set[str]) -> float:
+        if not candidate_tokens or not other_tokens:
+            return 0.0
+        return len(candidate_tokens & other_tokens) / max(1, len(candidate_tokens))
 
     async def _recent_response_integrity_lines(
         self,
@@ -635,6 +1747,8 @@ class ContextBuilder:
             "Use them as autobiographical evidence with exact timestamps.",
             "- If you lack direct conversational memory of a record, say the daydream record shows what you generated. "
             "Do not deny daydreaming when this evidence is present, and do not pretend uninterrupted human-style consciousness.",
+            "- Daydream association memories are recallable thought records, not facts; use them as idea seeds, cautions, "
+            "or rejected paths when related work appears.",
         ]
         for reflection in reflections[:3]:
             created_at = getattr(reflection, "created_at", None)
@@ -645,6 +1759,10 @@ class ContextBuilder:
             novelty = getattr(reflection, "novelty_score", 0.0)
             context = getattr(reflection, "experience_context", {}) or {}
             trigger = self._compact_prompt_value(context.get("trigger") or "background_daydream", 64)
+            association_memory_id = self._compact_prompt_value(
+                context.get("association_memory_id") or "",
+                80,
+            )
             somatic = self._format_daydream_somatic_context(context)
             active_goals = context.get("active_goals") if isinstance(context, dict) else None
             goal_text = ""
@@ -660,6 +1778,8 @@ class ContextBuilder:
                 f"novelty {float(novelty):.2f}; trigger: {trigger}; {somatic}{goal_text}) "
                 f"spark: {spark}"
             )
+            if association_memory_id:
+                line += f" | association memory: {association_memory_id}"
             if contact_text:
                 line += f" | contact decision: {contact_text}"
             if synthesis:
@@ -667,6 +1787,219 @@ class ContextBuilder:
             if question:
                 line += f" | open question: {question}"
             lines.append(line)
+        return lines
+
+    async def _build_context_proposal_lines(self, user_input: str) -> List[str]:
+        store = self.context_proposal_store
+        search_text = getattr(store, "search_text", None)
+        list_by_project = getattr(store, "list_by_project", None)
+        has_query = bool(str(user_input or "").strip())
+        if not has_query or (not callable(search_text) and not callable(list_by_project)):
+            self._record_context_proposal_audit(
+                searched=False,
+                produced_count=0,
+                rendered_count=0,
+                novel_observation_count=0,
+            )
+            return []
+        try:
+            proposal_by_id: Dict[str, Any] = {}
+            if callable(search_text):
+                for proposal in list(await search_text(user_input, include_terminal=True, limit=5) or []):
+                    proposal_id = self._compact_prompt_value(getattr(proposal, "proposal_id", ""), 120)
+                    if proposal_id:
+                        proposal_by_id[proposal_id] = proposal
+            if callable(list_by_project) and len(proposal_by_id) < 5 and self.project_resume_resolver is not None:
+                resume_snapshot = await self.project_resume_resolver.resolve(user_input)
+                project_ids = [
+                    str(item)
+                    for item in (
+                        getattr(resume_snapshot, "matched_project_ids", None)
+                        or [getattr(resume_snapshot, "display_name", "")]
+                    )
+                    if str(item or "").strip()
+                ]
+                display_name = str(getattr(resume_snapshot, "display_name", "") or "").strip()
+                if display_name and display_name not in project_ids:
+                    project_ids.append(display_name)
+                for project_id in project_ids[:3]:
+                    for proposal in list(await list_by_project(project_id, include_terminal=True, limit=5) or []):
+                        proposal_id = self._compact_prompt_value(getattr(proposal, "proposal_id", ""), 120)
+                        if proposal_id:
+                            proposal_by_id.setdefault(proposal_id, proposal)
+                        if len(proposal_by_id) >= 5:
+                            break
+                    if len(proposal_by_id) >= 5:
+                        break
+            proposals = list(proposal_by_id.values())[:5]
+        except Exception:
+            self._record_context_proposal_audit(
+                searched=True,
+                produced_count=0,
+                rendered_count=0,
+                novel_observation_count=0,
+            )
+            return []
+        evidence_ids = [
+            self._compact_prompt_value(getattr(proposal, "proposal_id", ""), 120)
+            for proposal in proposals
+            if self._compact_prompt_value(getattr(proposal, "proposal_id", ""), 120)
+        ]
+        novel_count = sum(
+            1
+            for proposal in proposals
+            if self._looks_like_novel_observation(
+                getattr(proposal, "content", ""),
+                user_input,
+            )
+        )
+        self._record_context_proposal_audit(
+            searched=True,
+            produced_count=len(proposals),
+            rendered_count=len(proposals),
+            novel_observation_count=novel_count,
+            evidence_ids=evidence_ids,
+        )
+        if not proposals:
+            return []
+
+        lines = [
+            "Reflective proposal recall:",
+            "- These are source-labeled associative proposals from prior reflection/daydream activity. "
+            "They may influence interpretation, comparison, and caution, but they are not current facts.",
+            "- Pending or rejected proposals do not authorize schedules, commitments, BAA tasks, or tool writes. "
+            "Only accepted proposals with executive/arbiter evidence may support execution.",
+        ]
+        for proposal in proposals:
+            status = self._enum_or_text(getattr(proposal, "status", "")).lower()
+            if status == "accepted":
+                label = "accepted support"
+            elif status == "rejected":
+                label = "rejected idea / caution"
+            elif status == "stale":
+                label = "stale proposal"
+            else:
+                label = "pending proposal"
+            proposal_id = self._compact_prompt_value(getattr(proposal, "proposal_id", ""), 120)
+            kind = self._compact_prompt_value(getattr(proposal, "proposal_kind", ""), 80)
+            source_snapshot = self._compact_prompt_value(getattr(proposal, "source_snapshot_id", ""), 120)
+            source_epoch = getattr(proposal, "source_epoch", "")
+            authority = self._compact_prompt_value(
+                self._enum_or_text(getattr(proposal, "authority", "")),
+                80,
+            )
+            validation = getattr(proposal, "validation", {}) or {}
+            decision_id = self._compact_prompt_value(validation.get("arbiter_decision_id", ""), 120)
+            content = self._compact_prompt_value(getattr(proposal, "content", ""), 260)
+            evidence_refs = [
+                self._compact_prompt_value(ref, 90)
+                for ref in (getattr(proposal, "evidence_refs", []) or [])[:3]
+                if self._compact_prompt_value(ref, 90)
+            ]
+            refs = [ref for ref in (proposal_id, source_snapshot, *evidence_refs) if ref]
+            ref_text = f" [refs: {', '.join(refs)}]" if refs else ""
+            authority_text = f"authority={authority or 'proposal'}"
+            if decision_id:
+                authority_text += f"; arbiter_decision={decision_id}"
+            lines.append(
+                f"- {label}: {kind}; {authority_text}; source_epoch={source_epoch}; {content}{ref_text}"
+            )
+        return lines
+
+    async def _build_thread_registry_continuity_lines(self, user_input: str) -> List[str]:
+        self._last_thread_registry_selection_audit = {
+            "available": False,
+            "scanned_count": 0,
+            "query_term_count": 0,
+            "min_overlap": THREAD_REGISTRY_MIN_OVERLAP,
+            "weak_overlap_count": 0,
+            "suppressed_reframe_filtered_count": 0,
+            "relevant_count": 0,
+            "selected_count": 0,
+            "relevance_passed": False,
+        }
+        store = self.thread_registry_store
+        list_beads = getattr(store, "list_beads", None)
+        if not callable(list_beads):
+            return []
+        try:
+            beads = await list_beads(limit=25)
+        except Exception:
+            return []
+        self._last_thread_registry_selection_audit["available"] = True
+        self._last_thread_registry_selection_audit["scanned_count"] = len(beads)
+        if not beads:
+            return []
+
+        query_terms = self._query_terms_for_fact_match(user_input)
+        self._last_thread_registry_selection_audit["query_term_count"] = len(query_terms)
+        scored: list[tuple[int, Any]] = []
+        weak_overlap_count = 0
+        suppressed_reframe_filtered_count = 0
+        for bead in beads:
+            source_kind = self._enum_or_text(getattr(bead, "source_kind", "")).lower()
+            if source_kind in THREAD_REGISTRY_NON_ACTIVE_SOURCE_KINDS:
+                suppressed_reframe_filtered_count += 1
+                continue
+            haystack = " ".join(
+                str(value or "")
+                for value in (
+                    getattr(bead, "title", ""),
+                    getattr(bead, "summary", ""),
+                    getattr(bead, "source_ref", ""),
+                    getattr(bead, "thread_anchor_id", ""),
+                )
+            ).lower()
+            score = sum(1 for term in query_terms if term in haystack)
+            if 0 < score < THREAD_REGISTRY_MIN_OVERLAP:
+                weak_overlap_count += 1
+            if score >= THREAD_REGISTRY_MIN_OVERLAP:
+                scored.append((score, bead))
+        scored.sort(key=lambda item: item[0], reverse=True)
+        selected = [bead for _score, bead in scored[:3]]
+        selected_source_refs = [
+            self._compact_prompt_value(getattr(bead, "source_ref", ""), 120)
+            for bead in selected
+            if self._compact_prompt_value(getattr(bead, "source_ref", ""), 120)
+        ]
+        self._last_thread_registry_selection_audit.update(
+            {
+                "weak_overlap_count": weak_overlap_count,
+                "suppressed_reframe_filtered_count": suppressed_reframe_filtered_count,
+                "relevant_count": len(scored),
+                "selected_count": len(selected),
+                "selected_source_refs": selected_source_refs[:3],
+                "relevance_passed": bool(selected),
+            }
+        )
+        novel_count = sum(
+            1
+            for bead in selected
+            if self._looks_like_novel_observation(
+                f"{getattr(bead, 'title', '')} {getattr(bead, 'summary', '')}",
+                user_input,
+            )
+        )
+        self._record_proactive_channel(
+            "thread_registry",
+            produced_count=len(beads),
+            rendered_count=len(selected),
+            novel_observation_count=novel_count,
+            evidence_ids=selected_source_refs,
+        )
+        if not selected:
+            return []
+
+        lines = [
+            "Thread registry continuity cues:",
+            "- These are peripheral beads generated by other subsystems. Use them as retrieval cues and cite the source ref if you rely on one.",
+        ]
+        for bead in selected:
+            title = self._compact_prompt_value(getattr(bead, "title", ""), 96)
+            summary = self._compact_prompt_value(getattr(bead, "summary", ""), 220)
+            source_kind = self._enum_or_text(getattr(bead, "source_kind", ""))
+            source_ref = self._compact_prompt_value(getattr(bead, "source_ref", ""), 120)
+            lines.append(f"- {title} [{source_kind} {source_ref}]: {summary}")
         return lines
 
     def _build_wellbeing_guidance_lines(self) -> List[str]:
@@ -831,6 +2164,10 @@ class ContextBuilder:
         return text[: max(0, limit - 3)].rstrip() + "..."
 
     @staticmethod
+    def _enum_or_text(value: Any) -> str:
+        return str(getattr(value, "value", value) or "").strip()
+
+    @staticmethod
     def _is_soul_foundation_episode(episode: Any) -> bool:
         return is_soul_foundation_episode(episode)
 
@@ -958,15 +2295,79 @@ class ContextBuilder:
                 except Exception:
                     timestamp_text = ""
             confidence = getattr(belief, "confidence", None)
-            confidence_text = f", confidence {float(confidence):.2f}" if confidence is not None else ""
+            effective_confidence = self._tom_effective_confidence(belief)
+            confidence_text = (
+                f", confidence {effective_confidence:.2f}"
+                if effective_confidence is not None
+                else (f", confidence {float(confidence):.2f}" if confidence is not None else "")
+            )
+            source_kind = str(getattr(belief, "source_kind", "") or "").strip()
+            source_text = f", source {source_kind}" if source_kind else ""
+            evidence_text = self._tom_evidence_suffix(getattr(belief, "evidence_ids", []) or [])
             semantic_text = (
                 f", semantic {semantic_score:.2f}"
                 if semantic_score > 0.0
                 else ""
             )
-            prefix = f"- [{timestamp_text}{confidence_text}{semantic_text}] " if timestamp_text else "- "
+            prefix = (
+                f"- [{timestamp_text}{confidence_text}{semantic_text}{source_text}{evidence_text}] "
+                if timestamp_text
+                else "- "
+            )
             lines.append(prefix + predicate[:240])
             if len(lines) >= 5:
+                break
+        return lines
+
+    async def _tom_operator_guidance_lines(self, user_input: str) -> List[str]:
+        """Return compact ToM preference/need guidance for ordinary turns."""
+        if self.tom is None:
+            return []
+        salient = getattr(self.tom, "salient_user_model", None)
+        if not callable(salient):
+            return []
+        try:
+            items = list(salient(user_input, limit=5))
+        except Exception:
+            return []
+        lines: List[str] = []
+        seen: set[str] = set()
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            relation = str(item.get("relation") or "").strip().lower()
+            predicate = self._sanitize_tom_fact(str(item.get("predicate") or ""))
+            object_text = self._sanitize_tom_fact(str(item.get("object") or ""))
+            if not predicate:
+                continue
+            if (
+                relation in {"asked", "said"}
+                or predicate.lower().startswith("said:")
+                or self._is_question_echo_tom_fact(predicate)
+            ):
+                continue
+            if not self._is_behavioral_tom_relation(relation, predicate):
+                continue
+            effective = item.get("effective_confidence", item.get("confidence"))
+            try:
+                effective_float = float(effective)
+            except (TypeError, ValueError):
+                effective_float = 0.0
+            if effective_float < 0.40:
+                continue
+            key = f"{relation}:{predicate.lower()}"
+            if key in seen:
+                continue
+            seen.add(key)
+            source_kind = str(item.get("source_kind") or "unknown")
+            evidence_text = self._tom_evidence_suffix(item.get("evidence_ids") or [])
+            display_text = object_text if object_text and relation != "asserts" else predicate
+            lines.append(
+                "- "
+                f"{relation or 'preference'}: {display_text[:180]} "
+                f"(confidence {effective_float:.2f}, source {source_kind}{evidence_text})"
+            )
+            if len(lines) >= 4:
                 break
         return lines
 
@@ -985,8 +2386,9 @@ class ContextBuilder:
         except Exception:
             return []
         counts = agenda.get("counts") or {}
+        agent_name = resolve_agent_name(identity=self.identity)
         lines = [
-            "- This is Bulma's durable calendar/agenda surface, separate from OS cron.",
+            f"- This is {agent_name}'s durable calendar/agenda surface, separate from OS cron.",
             (
                 "- Counts: "
                 f"active={counts.get('active', 0)}, "
@@ -1030,7 +2432,7 @@ class ContextBuilder:
         if embeddings is None or not predicates:
             return {}
         model_id = str(getattr(embeddings, "model_id", "") or "")
-        if model_id == "local-fallback":
+        if model_id == ProviderManager.offline_embedding_model_ref():
             return {}
 
         texts = [user_input, *predicates]
@@ -1223,24 +2625,32 @@ class ContextBuilder:
                 getattr(resume_snapshot, "canonical_artifact_path", ""),
                 " ".join(getattr(resume_snapshot, "supporting_artifact_paths", []) or []),
             )
-        ).lower()
-        return any(
-            token in haystack
-            for token in (
-                "book",
-                "chapter",
-                "chronicle",
-                "creative",
-                "draft",
-                "fiction",
-                "manuscript",
-                "novel",
-                "revise",
-                "story",
-                "write",
-                "writing",
-            )
         )
+        return classify_project_type(current_turn_text=user_input, context_text=haystack).project_type == PROJECT_TYPE_WRITING
+
+    @staticmethod
+    def _format_live_somatic_snapshot(state: Any) -> str:
+        pieces: list[str] = []
+        tag = str(getattr(state, "somatic_tag", "") or "").strip()
+        if tag:
+            pieces.append(f"tag={tag}")
+        for name in (
+            "valence",
+            "arousal",
+            "energy",
+            "focus",
+            "fatigue",
+            "tension",
+            "certainty",
+        ):
+            value = getattr(state, name, None)
+            if value is None:
+                continue
+            try:
+                pieces.append(f"{name}={float(value):.2f}")
+            except (TypeError, ValueError):
+                pieces.append(f"{name}={value}")
+        return ", ".join(pieces) if pieces else "unavailable"
 
     @staticmethod
     def _query_terms_for_fact_match(query: str) -> set[str]:
@@ -1252,6 +2662,7 @@ class ContextBuilder:
             "can",
             "do",
             "does",
+            "for",
             "i",
             "is",
             "it",
@@ -1271,7 +2682,7 @@ class ContextBuilder:
         }
         return {
             token
-            for token in re.findall(r"[a-z0-9]{3,}", query)
+            for token in re.findall(r"[a-z0-9]{3,}", query.lower())
             if token not in stopwords
         }
 
@@ -1285,3 +2696,52 @@ class ContextBuilder:
             cleaned,
         )
         return cleaned
+
+    @staticmethod
+    def _tom_effective_confidence(belief: Any) -> float | None:
+        value = getattr(belief, "effective_confidence", None)
+        if value is None and isinstance(getattr(belief, "meta", None), dict):
+            value = belief.meta.get("effective_confidence")
+        if value is None:
+            value = getattr(belief, "confidence", None)
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _tom_evidence_suffix(evidence_ids: Any) -> str:
+        ids = [str(item) for item in list(evidence_ids or []) if str(item).strip()]
+        if not ids:
+            return ""
+        shown = ", ".join(ids[:2])
+        if len(ids) > 2:
+            shown += ", ..."
+        return f", evidence {shown}"
+
+    @staticmethod
+    def _is_behavioral_tom_relation(relation: str, predicate: str) -> bool:
+        relation_l = relation.lower()
+        predicate_l = predicate.lower()
+        if relation_l in {"prefers", "needs", "wants", "asked", "likes", "dislikes", "expects", "values", "does_not_want"}:
+            return True
+        return any(
+            token in predicate_l
+            for token in (
+                "prefer",
+                "do not want",
+                "don't want",
+                "need",
+                "want",
+                "like",
+                "dislike",
+                "expect",
+                "value",
+                "approval",
+                "ordinary action",
+                "voice update",
+                "progress report",
+                "autonomous",
+                "proactive",
+            )
+        )

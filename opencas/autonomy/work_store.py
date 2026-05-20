@@ -188,6 +188,26 @@ class WorkStore:
         rows = await cursor.fetchall()
         return [self._row_to_work(r) for r in rows]
 
+    async def list_by_commitment(
+        self,
+        commitment_id: str,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> List[WorkObject]:
+        """Return work objects that point at a commitment."""
+        assert self._db is not None
+        cursor = await self._db.execute(
+            """
+            SELECT * FROM work_objects
+            WHERE commitment_id = ?
+            ORDER BY updated_at DESC
+            LIMIT ? OFFSET ?
+            """,
+            (commitment_id, limit, offset),
+        )
+        rows = await cursor.fetchall()
+        return [self._row_to_work(r) for r in rows]
+
     async def list_by_origin(
         self,
         origin: str,

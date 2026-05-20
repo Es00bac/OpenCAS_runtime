@@ -58,6 +58,16 @@ async def test_consolidation_empty(deps):
 
 
 @pytest.mark.asyncio
+async def test_consolidation_reindexes_stale_embedding_backends(deps):
+    _store, embeds, _identity, engine = deps
+    embeds.cache.reindex_stale = AsyncMock(return_value={"vector_reindexed": 1})
+
+    await engine.run()
+
+    embeds.cache.reindex_stale.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_consolidation_clusters_and_creates_memories(deps):
     store, _embeds, _identity, engine = deps
     # Create episodes with similar content so they cluster
@@ -178,7 +188,6 @@ async def test_consolidation_skips_previously_rejected(deps, tmp_path):
     # Create another batch that clusters to the same episodes... actually the episodes are fixed.
     # Instead, mark the cluster as rejected and re-run on the same episodes.
     # The easiest way: create new episodes, get their cluster hash, reject it, then run again.
-    from opencas.consolidation.engine import NightlyConsolidationEngine
     episodes = await store.list_non_compacted_episodes(limit=100)
     cluster_hash = engine._cluster_hash(episodes[:3])
     await curation.record_rejection(cluster_hash, [str(e.episode_id) for e in episodes[:3]], "test")
@@ -745,3 +754,29 @@ async def test_sweep_belief_consistency_no_evidence_decays(deps, tmp_path):
     assert updated[0].belief_revision_score == round(0.3 - 0.1, 3)
 
     await tom_store.close()
+
+
+@pytest.mark.asyncio
+async def test_sweep_belief_consistency_logs_original_failure_without_typeerror(deps):
+    _store, _embeds, _identity, engine = deps
+
+    class RaisingTomStore:
+        async def list_beliefs(self, limit=1000):
+            raise RuntimeError("forced ToM list failure")
+
+    class RecordingTracer:
+        def __init__(self):
+            self.events = []
+
+        def log(self, kind, message, payload=None):
+            self.events.append((kind, message, payload or {}))
+
+    tracer = RecordingTracer()
+    engine.tom_store = RaisingTomStore()
+    engine.tracer = tracer
+
+    decayed = await engine._sweep_belief_consistency()
+
+    assert decayed == 0
+    assert tracer.events[-1][1] == "consolidation_belief_decay_failed"
+    assert tracer.events[-1][2]["decayed_count"] == 0

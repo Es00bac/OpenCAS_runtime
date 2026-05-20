@@ -48,6 +48,48 @@ async def test_retrieve_keyword_search(stores):
 
 
 @pytest.mark.asyncio
+async def test_retrieve_emits_memory_activation_events(tmp_path):
+    from opencas.memory import Episode, EpisodeKind
+
+    class RecordingTracer:
+        def __init__(self):
+            self.activations = []
+
+        def activate_memory_node(self, **payload):
+            self.activations.append(payload)
+
+    mem_store = MemoryStore(tmp_path / "memory.db")
+    await mem_store.connect()
+    cache = EmbeddingCache(tmp_path / "embeddings.db")
+    await cache.connect()
+    embed_service = EmbeddingService(cache=cache, model_id="local-fallback")
+    tracer = RecordingTracer()
+    retriever = MemoryRetriever(
+        memory=mem_store,
+        embeddings=embed_service,
+        tracer=tracer,
+    )
+    ep = Episode(
+        kind=EpisodeKind.ARTIFACT,
+        content="atlas pulse memory",
+        payload={"artifact": {"path": "workspace/atlas.md"}},
+    )
+    await mem_store.save_episode(ep)
+
+    await retriever.retrieve("atlas pulse", limit=3)
+
+    assert tracer.activations
+    assert tracer.activations[0]["node_id"] == f"episode:{ep.episode_id}"
+    assert tracer.activations[0]["activation_source"] == "retriever"
+    assert tracer.activations[0]["query"] == "atlas pulse"
+    assert tracer.activations[0]["extra"]["source_lane"] == "reflective"
+    assert tracer.activations[0]["extra"]["context_material"] == "artifact"
+
+    await mem_store.close()
+    await cache.close()
+
+
+@pytest.mark.asyncio
 async def test_retrieve_semantic_search(stores):
     mem_store, embed_service, retriever = stores
     # Create a memory and embed it so the cache has a vector
@@ -81,9 +123,141 @@ async def test_retrieve_rrf_fusion(stores):
     assert len(results) >= 1
 
 
+@pytest.mark.asyncio
+async def test_retrieve_seeds_exact_path_handles_from_episode_payload(stores):
+    mem_store, _embed_service, retriever = stores
+    from opencas.memory import Episode, EpisodeKind
+
+    artifact_path = "/mnt/xtra/OpenCAS/workspace/writing/4246/story_4246.md"
+    ep = Episode(
+        kind=EpisodeKind.ACTION,
+        content="tool fs_write_file completed successfully",
+        payload={
+            "tool_name": "fs_write_file",
+            "args": {"path": artifact_path},
+            "result_metadata": {"checksum": "abc123"},
+        },
+    )
+    await mem_store.save_episode(ep)
+
+    results = await retriever.retrieve(f"Did you make {artifact_path}?", limit=5)
+
+    assert results
+    assert results[0].source_type == "episode"
+    assert results[0].source_id == str(ep.episode_id)
+    assert artifact_path in results[0].content
+    assert "exact_handle_match" in results[0].content
+
+
+@pytest.mark.asyncio
+async def test_retrieve_rejects_prose_hex_as_exact_handle_without_checksum_cue(stores):
+    mem_store, _embed_service, retriever = stores
+    from opencas.memory import Episode, EpisodeKind
+
+    ep = Episode(
+        kind=EpisodeKind.OBSERVATION,
+        content="The cafebabecafebabe phrase was a metaphor in the operator's prose.",
+    )
+    await mem_store.save_episode(ep)
+
+    inspection = await retriever.inspect(
+        "What did cafebabecafebabe mean in that metaphor?",
+        limit=5,
+    )
+
+    assert inspection["meta"]["exact_handle_seed_count"] == 0
+    assert not any(
+        "exact_handle_match" in candidate["content"]
+        for candidate in inspection["candidates"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_retrieve_rejects_url_as_exact_filesystem_handle(stores):
+    mem_store, _embed_service, retriever = stores
+    from opencas.memory import Episode, EpisodeKind
+
+    ep = Episode(
+        kind=EpisodeKind.OBSERVATION,
+        content="The reference URL was https://example.com/writing/4246.",
+    )
+    await mem_store.save_episode(ep)
+
+    inspection = await retriever.inspect(
+        "What did https://example.com/writing/4246 refer to?",
+        limit=5,
+    )
+
+    assert inspection["meta"]["exact_handle_seed_count"] == 0
+    assert not any(
+        "exact_handle_match" in candidate["content"]
+        for candidate in inspection["candidates"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_retrieve_does_not_let_partial_path_phrase_displace_semantic_match(tmp_path):
+    mem_store = MemoryStore(tmp_path / "memory.db")
+    await mem_store.connect()
+    cache = EmbeddingCache(tmp_path / "embeddings.db")
+    await cache.connect()
+
+    async def embed_fn(text: str):
+        if "writing/4246" in text and "story project" in text:
+            return [1.0, 0.0, 0.0]
+        return [0.0, 1.0, 0.0]
+
+    embed_service = EmbeddingService(
+        cache=cache,
+        embed_fn=embed_fn,
+        model_id="test-semantic",
+    )
+    retriever = MemoryRetriever(memory=mem_store, embeddings=embed_service)
+    from opencas.memory import Episode, EpisodeKind
+
+    semantic_memory = Memory(
+        content=(
+            "writing/4246 story project origin context: the operator wanted "
+            "continuity around the Writing Project draft and its authorship evidence."
+        ),
+        salience=10.0,
+    )
+    semantic_record = await embed_service.embed(semantic_memory.content)
+    semantic_memory.embedding_id = semantic_record.source_hash
+    await mem_store.save_memory(semantic_memory)
+
+    artifact_path = "/mnt/xtra/OpenCAS/workspace/writing/4246/story_4246.md"
+    incidental_episode = Episode(
+        kind=EpisodeKind.ACTION,
+        content="tool fs_write_file completed successfully",
+        payload={
+            "tool_name": "fs_write_file",
+            "args": {"path": artifact_path},
+        },
+        salience=10.0,
+        confidence_score=1.0,
+    )
+    await mem_store.save_episode(incidental_episode)
+
+    inspection = await retriever.inspect(
+        "Tell me about writing/4246 as a story project.",
+        limit=3,
+        expand_graph=False,
+    )
+
+    assert inspection["meta"]["exact_handle_seed_count"] == 0
+    assert inspection["results"]
+    assert inspection["results"][0].source_type == "memory"
+    assert inspection["results"][0].source_id == str(semantic_memory.memory_id)
+    assert "story project origin context" in inspection["results"][0].content
+
+    await mem_store.close()
+    await cache.close()
+
+
 def test_apply_temporal_decay_identity_core():
     from opencas.context.retriever import MemoryRetriever
-    import math
+
     score = 1.0
     age_days = 180.0
     decayed = MemoryRetriever.apply_temporal_decay(score, age_days, half_life_days=180.0)

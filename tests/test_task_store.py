@@ -92,6 +92,34 @@ async def test_task_store_save_result_terminal(store: TaskStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_task_store_tolerates_legacy_cancelled_result_stage(store: TaskStore) -> None:
+    task = RepairTask(objective="legacy cancelled result")
+    await store.save(task)
+    assert store._db is not None
+    await store._db.execute(
+        """
+        UPDATE tasks SET
+            stage = 'failed',
+            status = 'cancelled',
+            success = 0,
+            result_stage = 'cancelled',
+            result_output = 'operator cancelled',
+            result_timestamp = ?
+        WHERE task_id = ?
+        """,
+        (task.updated_at.isoformat(), str(task.task_id)),
+    )
+    await store._db.commit()
+
+    result = await store.get_result(str(task.task_id))
+    assert result is not None
+    assert result.success is False
+    assert result.stage == ExecutionStage.FAILED
+    assert result.output == "operator cancelled"
+    assert await store.list_pending() == []
+
+
+@pytest.mark.asyncio
 async def test_baa_persists_tasks_on_submit(tmp_path: Path) -> None:
     db = tmp_path / "baa.db"
     store = TaskStore(db)

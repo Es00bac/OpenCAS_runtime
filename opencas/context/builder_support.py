@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import re
 from typing import Any, List, Tuple
 
 import numpy as np
@@ -134,21 +134,25 @@ def to_memory_entries(results: List[RetrievalResult]) -> List[MessageEntry]:
     """Convert retrieval results into memory-role message entries."""
     entries: List[MessageEntry] = []
     for result in results:
-        label = result.source_type.capitalize()
+        label = result.source_type.upper()
+        detail = ""
         ts_header = ""
         if result.source_type == "episode" and result.episode is not None:
             try:
                 ts = result.episode.created_at
-                ts_header = f"{ts.isoformat()[:19]} UTC | "
+                ts_header = f"{ts.isoformat()[:19]} UTC "
             except Exception:
                 pass
+            label = _episode_memory_label(result.episode)
+            detail = _episode_detail(result.episode)
         elif result.source_type == "memory" and result.memory is not None:
             try:
                 ts = result.memory.created_at
-                ts_header = f"{ts.isoformat()[:19]} UTC | "
+                ts_header = f"{ts.isoformat()[:19]} UTC "
             except Exception:
                 pass
-        content = f"[{label}] {ts_header}{result.content}"
+            label = "MEMORY"
+        content = f"[{label}] {ts_header}{detail} {result.content}".strip()
         entries.append(
             MessageEntry(
                 role=MessageRole.MEMORY,
@@ -157,3 +161,37 @@ def to_memory_entries(results: List[RetrievalResult]) -> List[MessageEntry]:
             )
         )
     return entries
+
+
+def _episode_memory_label(episode: Any) -> str:
+    raw_kind = getattr(episode, "kind", None)
+    kind = str(getattr(raw_kind, "value", raw_kind) or "").lower()
+    payload = getattr(episode, "payload", {}) or {}
+    role = str(payload.get("role") or "").lower() if isinstance(payload, dict) else ""
+    if kind in {"action", "artifact"} or (kind == "turn" and role == "assistant"):
+        return "SELF"
+    return "EPISODE"
+
+
+def _episode_detail(episode: Any) -> str:
+    raw_kind = getattr(episode, "kind", None)
+    kind = str(getattr(raw_kind, "value", raw_kind) or "episode").upper()
+    payload = getattr(episode, "payload", {}) or {}
+    role = str(payload.get("role") or "").strip() if isinstance(payload, dict) else ""
+    if kind == "ACTION":
+        tool = _episode_tool_name(episode)
+        return f"[ACTION][tool={tool}]" if tool else "[ACTION]"
+    if kind == "TURN" and role:
+        return f"[TURN][role={role}]"
+    return f"[{kind}]"
+
+
+def _episode_tool_name(episode: Any) -> str:
+    payload = getattr(episode, "payload", {}) or {}
+    if isinstance(payload, dict):
+        value = str(payload.get("tool_name") or payload.get("name") or "").strip()
+        if value:
+            return value
+    content = str(getattr(episode, "content", "") or "")
+    match = re.match(r"^tool\s+([A-Za-z0-9_:-]+)", content)
+    return match.group(1).rstrip(":") if match else ""

@@ -62,10 +62,14 @@ class ModelRoutingConfig(BaseModel):
                     "standard_model": fallback,
                     "high_model": fallback,
                     "extra_high_model": fallback,
-                    "light_reasoning_effort": fallback_effort,
-                    "standard_reasoning_effort": fallback_effort,
-                    "high_reasoning_effort": fallback_effort,
-                    "extra_high_reasoning_effort": fallback_effort,
+                    "light_reasoning_effort": self.light_reasoning_effort
+                    or ReasoningEffort.LOW,
+                    "standard_reasoning_effort": self.standard_reasoning_effort
+                    or fallback_effort,
+                    "high_reasoning_effort": self.high_reasoning_effort
+                    or fallback_effort,
+                    "extra_high_reasoning_effort": self.extra_high_reasoning_effort
+                    or fallback_effort,
                 }
             )
 
@@ -76,7 +80,7 @@ class ModelRoutingConfig(BaseModel):
             self.extra_high_model or high or standard or fallback or ""
         ).strip() or None
         standard_effort = self.standard_reasoning_effort or fallback_effort
-        light_effort = self.light_reasoning_effort or standard_effort
+        light_effort = self.light_reasoning_effort or ReasoningEffort.LOW
         high_effort = self.high_reasoning_effort or standard_effort
         extra_high_effort = (
             self.extra_high_reasoning_effort or high_effort or standard_effort
@@ -225,19 +229,59 @@ def _pick_available_model(
     ordered_available: list[str],
     available_models: set[str],
 ) -> Optional[str]:
-    ordered_candidates = [
-        default_model,
-        model_routing.standard_model,
-        model_routing.single_model,
-        model_routing.high_model,
-        model_routing.extra_high_model,
-        model_routing.light_model,
-    ]
+    if model_routing.mode == ModelRoutingMode.SINGLE:
+        ordered_candidates = [
+            model_routing.single_model,
+            model_routing.standard_model,
+            default_model,
+            model_routing.high_model,
+            model_routing.extra_high_model,
+            model_routing.light_model,
+        ]
+    else:
+        ordered_candidates = [
+            model_routing.standard_model,
+            default_model,
+            model_routing.single_model,
+            model_routing.high_model,
+            model_routing.extra_high_model,
+            model_routing.light_model,
+        ]
     for candidate in ordered_candidates:
         resolved = _resolve_available_model(candidate, ordered_available, available_models)
         if resolved:
             return resolved
     return ordered_available[0] if ordered_available else _clean_model_id(default_model)
+
+
+def _heal_legacy_single_mode_reasoning_broadcast(
+    routing: ModelRoutingConfig,
+) -> ModelRoutingConfig:
+    """Repair older single-mode state that broadcast one effort to every lane.
+
+    Before light-lane routing was latency-aware, persisted single-mode routing
+    materialized every per-lane effort from ``single_reasoning_effort``. That
+    makes a cheap ``complexity=light`` call indistinguishable from the standard
+    lane after restart. Treat the all-lanes-equal shape as legacy broadcast
+    state and restore the low-effort light lane while preserving stronger
+    standard/high lanes.
+    """
+
+    if routing.mode != ModelRoutingMode.SINGLE:
+        return routing
+    base = routing.single_reasoning_effort
+    if base is None or routing.light_reasoning_effort == ReasoningEffort.LOW:
+        return routing
+    if (
+        routing.light_reasoning_effort == base
+        and routing.standard_reasoning_effort == base
+        and routing.high_reasoning_effort == base
+        and routing.extra_high_reasoning_effort == base
+    ):
+        return routing.model_copy(
+            update={"light_reasoning_effort": ReasoningEffort.LOW}
+        )
+    return routing
 
 
 def sanitize_model_routing_state(
@@ -262,6 +306,7 @@ def sanitize_model_routing_state(
         available.add(clean)
     if not available:
         normalized = routing.normalized(_clean_model_id(default_model))
+        normalized = _heal_legacy_single_mode_reasoning_broadcast(normalized)
         return PersistedModelRoutingState(
             default_llm_model=_clean_model_id(default_model),
             model_routing=normalized,
@@ -278,6 +323,7 @@ def sanitize_model_routing_state(
             available,
         )
     normalized = routing.model_copy(update=updates).normalized(fallback)
+    normalized = _heal_legacy_single_mode_reasoning_broadcast(normalized)
     return PersistedModelRoutingState(
         default_llm_model=fallback,
         model_routing=normalized,

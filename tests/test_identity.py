@@ -1,6 +1,8 @@
 """Tests for the identity module."""
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 from opencas.identity import IdentityManager, IdentityStore
 
 
@@ -29,6 +31,25 @@ def test_identity_continuity_boot(tmp_path: Path) -> None:
 
     mgr.record_boot(session_id="sess-2")
     assert mgr.continuity.boot_count == 2
+
+
+def test_identity_boot_records_elapsed_offline_anchor(tmp_path: Path) -> None:
+    store = IdentityStore(tmp_path)
+    mgr = IdentityManager(store)
+    mgr.load()
+    prior = datetime.now(timezone.utc) - timedelta(minutes=12)
+    mgr.continuity.last_persisted_at = prior
+
+    mgr.record_boot(session_id="sess-after-restart")
+
+    assert mgr.continuity.last_offline_started_at == prior
+    assert mgr.continuity.last_offline_duration_seconds is not None
+    assert mgr.continuity.last_offline_duration_seconds >= 11 * 60
+    assert mgr.self_model.last_offline_started_at == prior
+    assert mgr.self_model.last_offline_duration_seconds is not None
+    assert mgr.self_model.last_offline_duration_seconds >= 11 * 60
+    assert mgr.continuity.last_boot_time is not None
+    assert mgr.continuity.continuous_present_score < 1.0
 
 
 def test_identity_user_trust(tmp_path: Path) -> None:

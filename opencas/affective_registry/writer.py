@@ -18,10 +18,9 @@ import fcntl
 import json
 import logging
 import os
-import struct
 import threading
 from pathlib import Path
-from typing import Iterator, List, Optional
+from typing import Any, Iterator, List, Optional
 
 from .models import AffectiveRegistryEntry, ExecutionPhase
 

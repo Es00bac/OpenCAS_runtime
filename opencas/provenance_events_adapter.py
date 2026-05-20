@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 from importlib import import_module
-from typing import Any, Dict, MutableMapping
+from typing import Any, Dict
 
 
 @lru_cache(maxsize=1)

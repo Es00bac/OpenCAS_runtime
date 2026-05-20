@@ -8,10 +8,16 @@ from typing import Any, Dict, List, Optional
 from fastapi import HTTPException
 from open_llm_auth.auth.manager import ProviderManager
 from open_llm_auth.config import AuthProfile, ModelDefinitionConfig, ProviderConfig
-from open_llm_auth.provider_catalog import get_builtin_provider_config, get_builtin_provider_models, normalize_provider_id
+from open_llm_auth.provider_catalog import get_builtin_provider_config, normalize_provider_id
 from open_llm_auth.provider_setup_catalog import get_provider_setup_preset
 
 from opencas.api.gateway_admin import load_active_gateway_config, reload_runtime_gateway, save_active_gateway_config
+from opencas.generation.policy import (
+    GenerationPolicyConfig,
+    LearnedGenerationPreset,
+    save_persisted_generation_policy,
+    upsert_learned_generation_preset,
+)
 from opencas.governance import PluginTrustLevel, PluginTrustScope, WebTrustLevel
 from opencas.model_routing import (
     ComplexityTier,
@@ -60,29 +66,71 @@ def merge_custom_models(existing: List[Any], custom_model_ids: List[str]) -> Lis
 
 
 def available_gateway_model_ids(cfg: Any) -> List[str]:
-    provider_map = cfg.all_provider_configs() if hasattr(cfg, "all_provider_configs") else {}
-    ordered: List[str] = []
+    refs: List[str] = []
     seen: set[str] = set()
 
-    def add_model_ref(provider_id: str, model_id: str) -> None:
-        clean = str(model_id or "").strip()
-        if not clean:
-            return
-        ref = clean if "/" in clean else f"{provider_id}/{clean}"
-        if ref in seen:
+    def add_ref(value: Any) -> None:
+        ref = str(value or "").strip()
+        if not ref or ref in seen:
             return
         seen.add(ref)
-        ordered.append(ref)
+        refs.append(ref)
 
+    try:
+        provider_map = cfg.all_provider_configs()
+    except Exception:
+        provider_map = {}
+    allowed_catalog_providers = {
+        str(provider_id or "").strip()
+        for provider_id in provider_map.keys()
+        if str(provider_id or "").strip()
+    }
+    allowed_catalog_providers.update(
+        str(provider_id or "").strip()
+        for provider_id in list(getattr(cfg, "active_provider_ids", []) or [])
+        if str(provider_id or "").strip()
+    )
+    if allowed_catalog_providers & {"codex-cli", "openai-codex"}:
+        allowed_catalog_providers.add("openai")
     for provider_id, provider_cfg in provider_map.items():
-        for model in getattr(provider_cfg, "models", None) or []:
-            add_model_ref(provider_id, getattr(model, "id", ""))
-        builtins = list(get_builtin_provider_models(provider_id))
-        preferred = [item for item in builtins if bool(item.get("reasoning"))]
-        preferred.extend(item for item in builtins if not bool(item.get("reasoning")))
-        for model in preferred:
-            add_model_ref(provider_id, model.get("id") or "")
-    return ordered
+        clean_provider = str(provider_id or "").strip()
+        if not clean_provider:
+            continue
+        provider_added = False
+        for model in list(getattr(provider_cfg, "models", []) or []):
+            model_id = str(getattr(model, "id", "") or "").strip()
+            if not model_id:
+                continue
+            ref = model_id if "/" in model_id else f"{clean_provider}/{model_id}"
+            add_ref(ref)
+            provider_added = True
+        if not provider_added:
+            try:
+                catalog_refs = ProviderManager.model_refs_for_config(cfg, require_credentials=False)
+            except Exception:
+                catalog_refs = []
+            for ref in catalog_refs:
+                if not str(ref).startswith(f"{clean_provider}/") or ref in seen:
+                    continue
+                add_ref(ref)
+    try:
+        catalog_refs = ProviderManager.model_refs_for_config(cfg)
+    except Exception:
+        catalog_refs = []
+    for ref in catalog_refs:
+        provider_id = str(ref).split("/", 1)[0]
+        if allowed_catalog_providers and provider_id not in allowed_catalog_providers:
+            continue
+        add_ref(ref)
+    default_model = str(getattr(cfg, "default_model", "") or "").strip()
+    if default_model and (default_model in seen or not refs):
+        add_ref(default_model)
+    if refs:
+        return refs
+    try:
+        return ProviderManager.model_refs_for_config(cfg)
+    except Exception:
+        return []
 
 
 def _emit_settings_provenance_event(
@@ -224,6 +272,76 @@ async def save_model_routing(runtime: Any, payload: Any) -> Dict[str, Any]:
         details={
             "default_llm_model": standard_model,
             "settings_path": str(settings_path),
+        },
+    )
+
+
+async def save_generation_policy(runtime: Any, payload: Any) -> Dict[str, Any]:
+    policy = GenerationPolicyConfig.model_validate(
+        payload.model_dump(mode="json") if hasattr(payload, "model_dump") else payload
+    ).normalized()
+    runtime.ctx.config.generation_policy = policy
+    llm = getattr(runtime.ctx, "llm", None)
+    if llm is not None and hasattr(llm, "set_generation_policy"):
+        llm.set_generation_policy(policy)
+    settings_path = save_persisted_generation_policy(
+        Path(runtime.ctx.config.state_dir),
+        policy,
+    )
+    response = {
+        "status": "ok",
+        "generation_policy": policy.model_dump(mode="json"),
+        "settings_path": str(settings_path),
+    }
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact="setting|config|generation-policy",
+        triggering_action="UPDATE",
+        parent_link_id=str(settings_path),
+        linked_link_ids=[str(settings_path)],
+        details={
+            "settings_path": str(settings_path),
+            "enabled": policy.enabled,
+            "profile_count": len(policy.profiles),
+            "learned_preset_count": len(policy.learned_preset_records),
+        },
+    )
+
+
+async def save_learned_generation_preset(runtime: Any, payload: Any) -> Dict[str, Any]:
+    preset = LearnedGenerationPreset.model_validate(
+        payload.model_dump(mode="json") if hasattr(payload, "model_dump") else payload
+    )
+    current = getattr(runtime.ctx.config, "generation_policy", None) or GenerationPolicyConfig()
+    policy = upsert_learned_generation_preset(current, preset)
+    runtime.ctx.config.generation_policy = policy
+    llm = getattr(runtime.ctx, "llm", None)
+    if llm is not None and hasattr(llm, "set_generation_policy"):
+        llm.set_generation_policy(policy)
+    settings_path = save_persisted_generation_policy(
+        Path(runtime.ctx.config.state_dir),
+        policy,
+    )
+    response = {
+        "status": "ok",
+        "preset": preset.model_dump(mode="json"),
+        "generation_policy": policy.model_dump(mode="json"),
+        "settings_path": str(settings_path),
+    }
+    return _emit_settings_provenance_event(
+        response,
+        event_type=ProvenanceEventType.MUTATION,
+        triggering_artifact="setting|config|generation-policy|learned-preset",
+        triggering_action="UPSERT",
+        parent_link_id=str(settings_path),
+        linked_link_ids=[str(settings_path), f"generation-preset:{preset.preset_id}"],
+        details={
+            "settings_path": str(settings_path),
+            "preset_id": preset.preset_id,
+            "work_type": preset.work_type,
+            "evidence_count": preset.evidence_count,
+            "success_rate": preset.success_rate,
         },
     )
 
@@ -464,9 +582,9 @@ async def test_provider_connection(runtime: Any, payload: Any) -> Dict[str, Any]
         ]
         if not model_ids:
             model_ids = [
-                str(model.get("id"))
-                for model in get_builtin_provider_models(provider_id)
-                if model.get("id")
+                ref.split("/", 1)[1]
+                for ref in ProviderManager.model_refs_for_config(cfg)
+                if ref.startswith(f"{provider_id}/")
             ]
         model_ref = f"{provider_id}/{model_ids[0]}" if model_ids else cfg.default_model or f"{provider_id}/assistant"
     try:

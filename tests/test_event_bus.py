@@ -4,7 +4,6 @@ import asyncio
 from pathlib import Path
 
 import pytest
-import pytest_asyncio
 
 from opencas.infra import BaaCompletedEvent, BaaProgressEvent, EventBus
 from opencas.execution import BoundedAssistantAgent, RepairTask

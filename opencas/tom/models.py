@@ -12,6 +12,7 @@ class BeliefSubject(str, Enum):
     SELF = "self"
     USER = "user"
     WORLD = "world"
+    AGENT = "agent"
 
 
 class Belief(BaseModel):
@@ -23,6 +24,15 @@ class Belief(BaseModel):
     predicate: str
     confidence: float = Field(default=1.0, ge=0.0, le=1.0)
     evidence_ids: List[str] = Field(default_factory=list)
+    relation: str = ""
+    object: str = ""
+    source_kind: str = "unknown"
+    source_strength: float = Field(default=0.5, ge=0.0, le=1.0)
+    valid_from: Optional[datetime] = None
+    valid_until: Optional[datetime] = None
+    decay_rate: float = Field(default=0.0, ge=0.0, le=1.0)
+    supersedes: List[UUID] = Field(default_factory=list)
+    contradicted_by: List[UUID] = Field(default_factory=list)
     belief_revision_score: float = Field(default=0.0)
     reinforcement_count: int = Field(default=0)
     last_reinforced: Optional[datetime] = None

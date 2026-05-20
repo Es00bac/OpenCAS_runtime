@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -18,6 +19,7 @@ from opencas.runtime.consolidation_state import (
     load_consolidation_runtime_state,
     persist_consolidation_runtime_state,
 )
+from opencas.runtime.consolidation_worker import consolidation_worker_status_path
 from opencas.runtime.continuity_breadcrumbs import (
     build_burst_breadcrumb,
     build_runtime_burst_breadcrumb,
@@ -37,6 +39,7 @@ from opencas.runtime.maintenance_runtime import (
     run_runtime_consolidation,
     trace_runtime_event,
 )
+from opencas.runtime.status_views import build_consolidation_status
 from opencas.tom import IntentionStatus
 
 
@@ -165,6 +168,41 @@ async def test_run_runtime_consolidation_updates_activity_and_payload() -> None:
 
 
 @pytest.mark.asyncio
+async def test_run_runtime_consolidation_runs_nightly_dream_after_success() -> None:
+    activity = []
+
+    async def run_nightly_dream(**kwargs):
+        return {
+            "available": True,
+            "dream_id": "dream-1",
+            "mode": kwargs.get("mode", "light"),
+        }
+
+    runtime = SimpleNamespace(
+        consolidation=SimpleNamespace(
+            run=lambda: _completed(
+                SimpleNamespace(
+                    model_dump=lambda mode="json": {
+                        "result_id": "consolidation-1",
+                        "clusters": 2,
+                    }
+                )
+            )
+        ),
+        run_nightly_dream=run_nightly_dream,
+        _set_activity=lambda value: activity.append(value),
+        _last_consolidation_result=None,
+    )
+
+    payload = await run_runtime_consolidation(runtime)
+
+    assert payload["nightly_dream"]["dream_id"] == "dream-1"
+    assert payload["nightly_dream"]["mode"] == "light"
+    assert runtime._last_consolidation_result == payload
+    assert activity == ["consolidating", "idle"]
+
+
+@pytest.mark.asyncio
 async def test_run_runtime_consolidation_attaches_available_compaction_backlog() -> None:
     activity = []
     episodes = [SimpleNamespace(session_id="lagging") for _ in range(25)]
@@ -241,6 +279,89 @@ async def test_run_runtime_consolidation_marks_budget_timeout() -> None:
     assert activity == ["consolidating", "idle"]
 
 
+def test_consolidation_status_prefers_live_worker_over_stale_result(tmp_path: Path) -> None:
+    status_path = consolidation_worker_status_path(tmp_path)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        (
+            '{"mode":"subprocess","status":"running","pid":'
+            f'{os.getpid()},"run_id":"current-run"}}'
+        ),
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(
+        _last_consolidation_result={
+            "result_id": "worker-timeout-old-run",
+            "timestamp": "2026-05-10T05:19:42+00:00",
+            "worker": {
+                "mode": "subprocess",
+                "status": "timeout_killed",
+                "run_id": "old-run",
+            },
+        },
+        ctx=SimpleNamespace(config=SimpleNamespace(state_dir=tmp_path)),
+    )
+
+    status = build_consolidation_status(runtime)
+
+    assert status["worker"]["status"] == "running"
+    assert status["worker"]["run_id"] == "current-run"
+
+
+def test_consolidation_status_ignores_dead_running_worker(tmp_path: Path) -> None:
+    status_path = consolidation_worker_status_path(tmp_path)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        '{"mode":"subprocess","status":"running","pid":999999999,"run_id":"dead-run"}',
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(
+        _last_consolidation_result={
+            "result_id": "worker-timeout-old-run",
+            "timestamp": "2026-05-10T05:19:42+00:00",
+            "worker": {
+                "mode": "subprocess",
+                "status": "timeout_killed",
+                "run_id": "old-run",
+            },
+        },
+        ctx=SimpleNamespace(config=SimpleNamespace(state_dir=tmp_path)),
+    )
+
+    status = build_consolidation_status(runtime)
+
+    assert status["worker"]["status"] == "timeout_killed"
+    assert status["worker"]["run_id"] == "old-run"
+
+
+def test_consolidation_status_marks_dead_running_worker_without_memory_result(
+    tmp_path: Path,
+) -> None:
+    persist_consolidation_runtime_state(
+        tmp_path,
+        {
+            "last_run_at": "2026-05-10T05:29:30+00:00",
+            "last_result_id": "worker-running-before-restart",
+        },
+    )
+    status_path = consolidation_worker_status_path(tmp_path)
+    status_path.parent.mkdir(parents=True, exist_ok=True)
+    status_path.write_text(
+        '{"mode":"subprocess","status":"running","pid":999999999,"run_id":"dead-run"}',
+        encoding="utf-8",
+    )
+    runtime = SimpleNamespace(
+        _last_consolidation_result=None,
+        ctx=SimpleNamespace(config=SimpleNamespace(state_dir=tmp_path)),
+    )
+
+    status = build_consolidation_status(runtime)
+
+    assert status["worker"]["status"] == "stale_running"
+    assert status["worker"]["pid_alive"] is False
+    assert status["worker"]["run_id"] == "dead-run"
+
+
 @pytest.mark.asyncio
 async def test_compact_runtime_backlog_compacts_lagging_sessions_by_size() -> None:
     calls = []
@@ -279,6 +400,62 @@ async def test_compact_runtime_backlog_compacts_lagging_sessions_by_size() -> No
     assert result["remaining_lag"] == 28
 
 
+@pytest.mark.asyncio
+async def test_compact_runtime_backlog_ignores_sessionless_reference_material() -> None:
+    calls = []
+    episodes = [
+        *[SimpleNamespace(session_id=None) for _ in range(40)],
+        *[SimpleNamespace(session_id="work") for _ in range(25)],
+    ]
+
+    async def compact_session(session_id, tail_size=10, min_removed_count=1):
+        calls.append((session_id, tail_size, min_removed_count))
+        return SimpleNamespace(removed_count=15, compaction_id=uuid4())
+
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            memory=SimpleNamespace(
+                list_non_compacted_episodes=lambda limit=1000: _completed(episodes[:limit]),
+                compaction_backlog_stats=lambda tail_size=10: _completed(
+                    {
+                        "tail_size": tail_size,
+                        "session_count": 1,
+                        "session_non_compacted": 25,
+                        "sessionless_non_compacted": 40,
+                        "non_compactable_reference_lag": 40,
+                        "total_non_compacted": 65,
+                        "compactable_lag": 15,
+                        "compactable_session_count": 1,
+                        "max_session_lag": 25,
+                        "top_sessions": [{"session_id": "work", "count": 25, "compactable": 15}],
+                        "compactable_sessions": [
+                            {"session_id": "work", "count": 25, "compactable": 15}
+                        ],
+                        "sessionless_kind_counts": {"artifact": 40},
+                    }
+                ),
+            )
+        ),
+        compactor=SimpleNamespace(compact_session=compact_session),
+        _trace=lambda *args, **kwargs: None,
+    )
+
+    result = await compact_runtime_backlog(
+        runtime,
+        max_sessions=2,
+        min_session_lag=10,
+        tail_size=10,
+        max_candidates=100,
+    )
+
+    assert [call[0] for call in calls] == ["work"]
+    assert result["sessions_compacted"] == 1
+    assert result["episodes_compacted"] == 15
+    assert result["remaining_lag"] == 0
+    assert result["non_compactable_reference_lag"] == 40
+    assert result["sessionless_kind_counts"] == {"artifact": 40}
+
+
 def test_consolidation_delay_until_due_uses_persisted_last_run(tmp_path: Path) -> None:
     persist_consolidation_runtime_state(tmp_path, {"last_run_at": "2026-04-21T05:00:00+00:00"})
     now = datetime(2026, 4, 21, 20, 0, tzinfo=timezone.utc)
@@ -292,12 +469,13 @@ def test_consolidation_delay_until_due_uses_persisted_last_run(tmp_path: Path) -
     assert delay == pytest.approx(9 * 3600)
 
 
-def test_consolidation_delay_until_due_ignores_failed_worker_result(tmp_path: Path) -> None:
+def test_consolidation_delay_until_due_honors_failed_worker_retry_after(tmp_path: Path) -> None:
     persist_consolidation_runtime_state(
         tmp_path,
         {
             "last_run_at": "2026-04-21T05:00:00+00:00",
             "last_result_id": "worker-timeout-run-1",
+            "next_retry_after": "2026-04-21T20:30:00+00:00",
         },
     )
     now = datetime(2026, 4, 21, 20, 0, tzinfo=timezone.utc)
@@ -308,7 +486,7 @@ def test_consolidation_delay_until_due_ignores_failed_worker_result(tmp_path: Pa
         now=now,
     )
 
-    assert delay == 0.0
+    assert delay == pytest.approx(30 * 60)
 
 
 @pytest.mark.parametrize(
@@ -395,6 +573,39 @@ async def test_record_burst_continuity_writes_the_same_short_note_for_each_burst
     assert "intent=" in relational_note
     assert "branch=" in relational_note
     assert "next_recovery_cue=" in relational_note
+
+
+@pytest.mark.asyncio
+async def test_record_burst_continuity_skips_audit_only_conversation_turns() -> None:
+    identity = _RecordingIdentity()
+    relational = _RecordingRelational()
+    traces = []
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            identity=identity,
+            relational=relational,
+        ),
+        _trace=lambda event, payload=None: traces.append((event, payload or {})),
+    )
+
+    result = await record_burst_continuity(
+        runtime,
+        trigger="conversation_burst_started",
+        phase="start",
+        intent="Conversation burst for [E16 audit-only turn 1/15] Describe yourself today.",
+        focus="[E16 audit-only turn 1/15] Describe yourself today.",
+        next_step="process the turn and update executive state",
+        note="conversation turn",
+    )
+
+    assert result is None
+    assert identity.calls == []
+    assert relational.calls == []
+    assert any(
+        event == "continuity_breadcrumb_suppressed"
+        and payload.get("reason") == "audit_only_turn"
+        for event, payload in traces
+    )
 
 
 def test_build_runtime_burst_breadcrumb_tracks_current_musubi_state() -> None:
@@ -744,6 +955,98 @@ async def test_continuity_resume_language_marks_low_score_as_thinned(
 
 
 @pytest.mark.asyncio
+async def test_low_continuity_score_records_discontinuity_working_memory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeCognitiveStore:
+        def __init__(self) -> None:
+            self.working_memory = []
+
+        async def upsert_working_memory(self, *args, **kwargs):
+            self.working_memory.append((args, kwargs))
+
+    store = IdentityStore(tmp_path / "identity")
+    mgr = IdentityManager(store)
+    mgr.load()
+    mgr._continuity.continuous_present_score = 1.0
+    mgr._continuity.last_shutdown_time = datetime.now(timezone.utc) - timedelta(hours=60)
+    mgr.save()
+    cognitive_store = FakeCognitiveStore()
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            config=SimpleNamespace(session_id="sess-low-wm", continuous_present_enabled=True),
+            identity=mgr,
+            relational=SimpleNamespace(state=SimpleNamespace(musubi=0.0)),
+            somatic=SimpleNamespace(
+                state=SimpleNamespace(fatigue=0.0, tension=0.0),
+                emit_appraisal_event=lambda *args, **kwargs: None,
+            ),
+            cognitive_state_store=cognitive_store,
+        ),
+        memory=SimpleNamespace(list_episodes=lambda *args, **kwargs: _completed([])),
+        _trace=lambda *args, **kwargs: None,
+    )
+
+    async def _fake_record_runtime_episode(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("opencas.runtime.episodic_runtime.record_runtime_episode", _fake_record_runtime_episode)
+
+    await run_runtime_continuity_check(runtime)
+
+    assert cognitive_store.working_memory
+    args, kwargs = cognitive_store.working_memory[-1]
+    assert args[0] == "discontinuity_anxiety"
+    assert "discontinuity_anxiety: true" in args[1]
+    assert kwargs["priority"] < 0.5
+    assert kwargs["source"] == "continuous_present"
+    assert kwargs["payload"]["discontinuity_anxiety"] is True
+    assert kwargs["payload"]["score"] < 0.3
+    assert "identity.continuity.continuous_present_score" in kwargs["evidence_refs"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_continuity_check_uses_boot_offline_score_without_double_decay(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    store = IdentityStore(tmp_path / "identity")
+    mgr = IdentityManager(store)
+    mgr.load()
+    prior = datetime.now(timezone.utc) - timedelta(hours=24)
+    mgr.continuity.last_shutdown_time = prior
+    mgr.continuity.last_persisted_at = prior
+    mgr.record_boot(session_id="sess-boot-score")
+    boot_score = mgr.continuity.continuous_present_score
+
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(
+            config=SimpleNamespace(session_id="sess-boot-score", continuous_present_enabled=True),
+            identity=mgr,
+            relational=SimpleNamespace(state=SimpleNamespace(musubi=0.0)),
+            somatic=SimpleNamespace(
+                state=SimpleNamespace(fatigue=0.0, tension=0.0),
+                emit_appraisal_event=lambda *args, **kwargs: None,
+            ),
+            cognitive_state_store=None,
+        ),
+        memory=SimpleNamespace(list_episodes=lambda *args, **kwargs: _completed([])),
+        _trace=lambda *args, **kwargs: None,
+    )
+
+    async def _fake_record_runtime_episode(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr("opencas.runtime.episodic_runtime.record_runtime_episode", _fake_record_runtime_episode)
+
+    await run_runtime_continuity_check(runtime)
+
+    assert mgr.continuity.continuous_present_score == boot_score
+    assert "24.0 hours" in (mgr.continuity.last_continuity_monologue or "")
+
+
+@pytest.mark.asyncio
 async def test_next_session_recovers_burst_context_from_musubi_history_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -945,13 +1248,13 @@ def test_build_continuity_note_can_carry_salvage_linkage_without_losing_short_fo
     from opencas.runtime.continuity_breadcrumbs import build_continuity_note
     note = build_continuity_note(
         note="verification failed",
-        objective="continue chronicle 4246",
+        objective="continue creative_writing 4246",
         handoff="resume chapter repair from canonical manuscript",
         musubi=0.42,
         timestamp="2026-04-18T00:00:00+00:00",
         salvage_packet_id="packet-1",
-        project_signature="chronicle-4246",
+        project_signature="writing-project-4246",
     )
 
     assert "salvage_packet_id=packet-1" in note
-    assert "project_signature=chronicle-4246" in note
+    assert "project_signature=writing-project-4246" in note

@@ -5,10 +5,9 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 from opencas.tom.models import Belief, BeliefSubject, Intention, IntentionStatus
-
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS beliefs (
@@ -18,6 +17,15 @@ CREATE TABLE IF NOT EXISTS beliefs (
     predicate TEXT NOT NULL,
     confidence REAL NOT NULL,
     evidence_ids TEXT NOT NULL DEFAULT '[]',
+    relation TEXT NOT NULL DEFAULT '',
+    object TEXT NOT NULL DEFAULT '',
+    source_kind TEXT NOT NULL DEFAULT 'unknown',
+    source_strength REAL NOT NULL DEFAULT 0.5,
+    valid_from TEXT,
+    valid_until TEXT,
+    decay_rate REAL NOT NULL DEFAULT 0.0,
+    supersedes TEXT NOT NULL DEFAULT '[]',
+    contradicted_by TEXT NOT NULL DEFAULT '[]',
     belief_revision_score REAL NOT NULL DEFAULT 0.0,
     reinforcement_count INTEGER NOT NULL DEFAULT 0,
     last_reinforced TEXT,
@@ -69,6 +77,15 @@ class TomStore:
             "ALTER TABLE beliefs ADD COLUMN belief_revision_score REAL NOT NULL DEFAULT 0.0",
             "ALTER TABLE beliefs ADD COLUMN reinforcement_count INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE beliefs ADD COLUMN last_reinforced TEXT",
+            "ALTER TABLE beliefs ADD COLUMN relation TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE beliefs ADD COLUMN object TEXT NOT NULL DEFAULT ''",
+            "ALTER TABLE beliefs ADD COLUMN source_kind TEXT NOT NULL DEFAULT 'unknown'",
+            "ALTER TABLE beliefs ADD COLUMN source_strength REAL NOT NULL DEFAULT 0.5",
+            "ALTER TABLE beliefs ADD COLUMN valid_from TEXT",
+            "ALTER TABLE beliefs ADD COLUMN valid_until TEXT",
+            "ALTER TABLE beliefs ADD COLUMN decay_rate REAL NOT NULL DEFAULT 0.0",
+            "ALTER TABLE beliefs ADD COLUMN supersedes TEXT NOT NULL DEFAULT '[]'",
+            "ALTER TABLE beliefs ADD COLUMN contradicted_by TEXT NOT NULL DEFAULT '[]'",
         ]
         for sql in migrations:
             try:
@@ -95,15 +112,25 @@ class TomStore:
             """
             INSERT INTO beliefs (
                 belief_id, timestamp, subject, predicate, confidence,
-                evidence_ids, belief_revision_score, reinforcement_count,
-                last_reinforced, meta
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                evidence_ids, relation, object, source_kind, source_strength,
+                valid_from, valid_until, decay_rate, supersedes, contradicted_by,
+                belief_revision_score, reinforcement_count, last_reinforced, meta
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(belief_id) DO UPDATE SET
                 timestamp = excluded.timestamp,
                 subject = excluded.subject,
                 predicate = excluded.predicate,
                 confidence = excluded.confidence,
                 evidence_ids = excluded.evidence_ids,
+                relation = excluded.relation,
+                object = excluded.object,
+                source_kind = excluded.source_kind,
+                source_strength = excluded.source_strength,
+                valid_from = excluded.valid_from,
+                valid_until = excluded.valid_until,
+                decay_rate = excluded.decay_rate,
+                supersedes = excluded.supersedes,
+                contradicted_by = excluded.contradicted_by,
                 belief_revision_score = excluded.belief_revision_score,
                 reinforcement_count = excluded.reinforcement_count,
                 last_reinforced = excluded.last_reinforced,
@@ -116,6 +143,15 @@ class TomStore:
                 belief.predicate,
                 belief.confidence,
                 json.dumps(belief.evidence_ids),
+                belief.relation,
+                belief.object,
+                belief.source_kind,
+                belief.source_strength,
+                belief.valid_from.isoformat() if belief.valid_from else None,
+                belief.valid_until.isoformat() if belief.valid_until else None,
+                belief.decay_rate,
+                json.dumps([str(item) for item in belief.supersedes]),
+                json.dumps([str(item) for item in belief.contradicted_by]),
                 belief.belief_revision_score,
                 belief.reinforcement_count,
                 belief.last_reinforced.isoformat() if belief.last_reinforced else None,
@@ -146,7 +182,9 @@ class TomStore:
             SELECT
                 belief_id, timestamp, subject, predicate, confidence,
                 evidence_ids, belief_revision_score, reinforcement_count,
-                last_reinforced, meta
+                last_reinforced, relation, object, source_kind, source_strength,
+                valid_from, valid_until, decay_rate, supersedes, contradicted_by,
+                meta
             FROM beliefs
             {where}
             ORDER BY timestamp DESC
@@ -236,6 +274,8 @@ class TomStore:
         self,
         subject: BeliefSubject,
         predicate: str,
+        *,
+        entity_id: Optional[str] = None,
     ) -> Optional[Belief]:
         """Find the most recent belief matching subject+predicate exactly."""
         assert self._db is not None
@@ -244,7 +284,9 @@ class TomStore:
             SELECT
                 belief_id, timestamp, subject, predicate, confidence,
                 evidence_ids, belief_revision_score, reinforcement_count,
-                last_reinforced, meta
+                last_reinforced, relation, object, source_kind, source_strength,
+                valid_from, valid_until, decay_rate, supersedes, contradicted_by,
+                meta
             FROM beliefs
             WHERE subject = ? AND predicate = ?
             ORDER BY timestamp DESC
@@ -255,7 +297,16 @@ class TomStore:
         row = await cursor.fetchone()
         if row is None:
             return None
-        return self._row_to_belief(row)
+        belief = self._row_to_belief(row)
+        if entity_id is None:
+            return belief
+        if str((belief.meta or {}).get("entity_id") or "") == entity_id:
+            return belief
+        candidates = await self.list_beliefs(subject=subject, predicate=predicate, limit=100)
+        for candidate in candidates:
+            if str((candidate.meta or {}).get("entity_id") or "") == entity_id:
+                return candidate
+        return None
 
     async def increment_belief_reinforcement(
         self,
@@ -306,7 +357,16 @@ class TomStore:
             belief_revision_score=row[6] if len(row) > 6 and row[6] is not None else 0.0,
             reinforcement_count=row[7] if len(row) > 7 and row[7] is not None else 0,
             last_reinforced=datetime.fromisoformat(row[8]) if len(row) > 8 and row[8] else None,
-            meta=json.loads(row[9]) if len(row) > 9 and row[9] else {},
+            relation=row[9] if len(row) > 9 and row[9] else "",
+            object=row[10] if len(row) > 10 and row[10] else "",
+            source_kind=row[11] if len(row) > 11 and row[11] else "unknown",
+            source_strength=row[12] if len(row) > 12 and row[12] is not None else 0.5,
+            valid_from=datetime.fromisoformat(row[13]) if len(row) > 13 and row[13] else None,
+            valid_until=datetime.fromisoformat(row[14]) if len(row) > 14 and row[14] else None,
+            decay_rate=row[15] if len(row) > 15 and row[15] is not None else 0.0,
+            supersedes=json.loads(row[16]) if len(row) > 16 and row[16] else [],
+            contradicted_by=json.loads(row[17]) if len(row) > 17 and row[17] else [],
+            meta=json.loads(row[18]) if len(row) > 18 and row[18] else {},
         )
 
     @staticmethod

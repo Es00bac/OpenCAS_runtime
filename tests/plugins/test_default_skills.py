@@ -2,13 +2,11 @@
 
 from pathlib import Path
 
-import pytest
-
+from opencas.plugins import SkillRegistry, load_builtin_skills
+from opencas.plugins.skills.doc_skill import _generate_docstring, _run_docs
 from opencas.plugins.skills.git_skill import _git_commit, _git_review_pr
 from opencas.plugins.skills.test_skill import _run_test
-from opencas.plugins.skills.doc_skill import _generate_docstring, _run_docs
 from opencas.tools import ToolRegistry
-from opencas.plugins import SkillRegistry, load_builtin_skills
 
 
 def test_git_commit(tmp_path: Path) -> None:
@@ -78,6 +76,11 @@ def test_builtin_skills_load_from_package() -> None:
     assert "git_skill" in skill_ids
     assert "test_skill" in skill_ids
     assert "doc_skill" in skill_ids
+    assert "google_workspace_skill" in skill_ids
+    gws_skill = registry.get("google_workspace_skill")
+    assert gws_skill is not None
+    assert "google_workspace_calendar_schedule" in gws_skill.capabilities
+    assert "google_workspace_calendar_dedupe" in gws_skill.capabilities
 
 
 def test_builtin_skills_register_tools() -> None:

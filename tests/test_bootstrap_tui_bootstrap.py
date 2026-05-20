@@ -167,6 +167,21 @@ def test_build_bootstrap_config_covers_current_bootstrap_surface():
     assert config.sandbox.allowed_roots == [Path("/tmp/workspace"), Path("/tmp/shared")]
 
 
+def test_tui_and_config_default_approval_mode_agree() -> None:
+    from opencas.bootstrap.config import BootstrapConfig
+
+    assert BootstrapConfig().approval_mode == WizardState().approval_mode
+
+
+def test_build_bootstrap_config_accepts_yolo_alias() -> None:
+    state = WizardState()
+    state.approval_mode = "yolo"
+
+    config = build_bootstrap_config(state)
+
+    assert config.approval_mode == "fully_autonomous"
+
+
 def test_build_bootstrap_config_ignores_stale_provider_fields_in_auto_mode():
     state = WizardState()
     state.provider_mode = "auto"

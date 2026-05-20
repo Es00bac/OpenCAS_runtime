@@ -8,6 +8,7 @@ from typing import Any
 from opencas.cognition import CognitionGrounding, GroundingKind, GroundingSource
 from opencas.cognition.self_inspection import SelfInspectionRecord
 
+from .drift import pending_drift_drain_count, split_drift_observations
 from .models import WellbeingAssessment, WellbeingState
 
 
@@ -22,6 +23,7 @@ class WellbeingEngine:
         recent_inspections = await _list_recent_self_inspections(runtime)
         gap_records = await _list_commitment_gap_records(runtime)
         recent_daydreams = await _list_recent_daydreams(runtime)
+        recent_outcomes = await _list_recent_maintenance_outcomes(runtime)
         tom_result = _check_tom(runtime)
         relational_state = _relational_state(runtime)
 
@@ -32,7 +34,7 @@ class WellbeingEngine:
         grounding.extend(truth_grounding)
         promise_load, promise_grounding = _promise_load(active_commitments, gap_records)
         grounding.extend(promise_grounding)
-        drift_load, drift_grounding = _drift_load(recent_inspections)
+        drift_load, drift_grounding, drift_meta = _drift_load(recent_inspections)
         grounding.extend(drift_grounding)
         curiosity, curiosity_grounding = _curiosity(recent_daydreams)
         grounding.extend(curiosity_grounding)
@@ -71,6 +73,8 @@ class WellbeingEngine:
                 "self_inspection_record_count": len(recent_inspections),
                 "commitment_gap_record_count": len(gap_records),
                 "recent_daydream_count": len(recent_daydreams),
+                "drift_drain_pending": pending_drift_drain_count(recent_outcomes),
+                **drift_meta,
             },
         )
         return WellbeingAssessment(state=state, grounding=grounding)
@@ -134,6 +138,19 @@ async def _list_recent_daydreams(runtime: Any) -> list[Any]:
         return []
     try:
         return list(await _maybe_await(list_recent(limit=10)))
+    except Exception:
+        return []
+
+
+async def _list_recent_maintenance_outcomes(runtime: Any) -> list[Any]:
+    store = getattr(runtime, "wellbeing_store", None)
+    if store is None:
+        return []
+    list_outcomes = getattr(store, "list_maintenance_outcomes", None)
+    if not callable(list_outcomes):
+        return []
+    try:
+        return list(await _maybe_await(list_outcomes(limit=100)))
     except Exception:
         return []
 
@@ -223,12 +240,10 @@ def _promise_load(active_commitments: list[Any], gap_records: list[SelfInspectio
     return round(value, 3), grounding
 
 
-def _drift_load(records: list[SelfInspectionRecord]) -> tuple[float, list[CognitionGrounding]]:
-    observations = [
-        observation
-        for record in records
-        for observation in getattr(record, "drift_observations", []) or []
-    ]
+def _drift_load(
+    records: list[SelfInspectionRecord],
+) -> tuple[float, list[CognitionGrounding], dict[str, Any]]:
+    observations, addressed_count = split_drift_observations(records)
     value = min(1.0, len(observations) * 0.42)
     grounding: list[CognitionGrounding] = []
     if value > 0:
@@ -237,13 +252,19 @@ def _drift_load(records: list[SelfInspectionRecord]) -> tuple[float, list[Cognit
                 kind=GroundingKind.DERIVED,
                 source=GroundingSource.RUNTIME,
                 subject="drift_load",
-                claim=f"recent_drift_observations={len(observations)}",
+                claim=(
+                    f"recent_drift_observations={len(observations)}, "
+                    f"addressed_drift_observations={addressed_count}"
+                ),
                 evidence_ids=[str(record.record_id) for record in records[:5]],
                 confidence=0.74,
                 allowed_surface="internal",
             )
         )
-    return round(value, 3), grounding
+    return round(value, 3), grounding, {
+        "recent_drift_observation_count": len(observations),
+        "addressed_drift_observation_count": addressed_count,
+    }
 
 
 def _curiosity(recent_daydreams: list[Any]) -> tuple[float, list[CognitionGrounding]]:

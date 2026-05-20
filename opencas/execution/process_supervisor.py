@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import os
-import signal
 import shlex
 import subprocess
 import threading
@@ -12,7 +11,9 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
-from uuid import UUID, uuid4
+from uuid import uuid4
+
+from opencas.tools.environment import build_tool_execution_env
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,7 @@ class ProcessSupervisor:
                 stderr=subprocess.PIPE,
                 stdin=subprocess.PIPE,
                 text=True,
+                env=build_tool_execution_env(),
             )
         except Exception as exc:
             logger.exception("Failed to start process")

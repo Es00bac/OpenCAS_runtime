@@ -7,27 +7,31 @@ plugin lifecycle, and MCP registration logic inline.
 
 from __future__ import annotations
 
+import inspect
 import re
 import shlex
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from opencas.autonomy.models import ActionRequest, ActionRiskTier, ApprovalLevel
+from opencas.autonomy.mode_utils import normalize_approval_mode
+from opencas.autonomy.models import ActionRequest, ActionRiskTier, ApprovalLevel, ApprovalMode
+from opencas.cognition import CognitiveEventKind, recommended_counterfactual
 from opencas.governance import (
-    AutoReviewMode,
     classify_web_action,
-    normalize_auto_review_mode,
     normalize_web_domain,
 )
-from opencas.infra import POST_ACTION_DECISION, POST_TOOL_EXECUTE, PRE_TOOL_EXECUTE
+from opencas.infra import POST_ACTION_DECISION
 from opencas.platform import CapabilityDescriptor, CapabilitySource, CapabilityStatus
-from opencas.somatic import AppraisalEventType
+from opencas.projects.execution_contracts import new_project_tool_block_reason
 from opencas.provenance_events_adapter import (
     ProvenanceEventType,
     emit_provenance_event,
 )
+from opencas.somatic import AppraisalEventType
 
 if TYPE_CHECKING:
+    from opencas.tools.context import ToolUseContext
+
     from .agent_loop import AgentRuntime
 
 
@@ -387,6 +391,7 @@ async def execute_runtime_tool(
     *,
     session_id: Optional[str] = None,
     task_id: Optional[str] = None,
+    audit_only: bool = False,
 ) -> Dict[str, Any]:
     """Execute a tool through the registry after self-approval."""
     entry = runtime.tools.get(name)
@@ -400,11 +405,15 @@ async def execute_runtime_tool(
             "output": f"Tool {name} is disabled because its plugin is disabled.",
         }
 
+    request_payload = _build_tool_request_payload(runtime, name, args)
+    resolved_session_id = session_id or getattr(getattr(runtime.ctx, "config", None), "session_id", None)
+    if resolved_session_id:
+        request_payload["session_id"] = resolved_session_id
     request = ActionRequest(
         tier=entry.risk_tier,
         description=f"tool {name}: {entry.description}",
         tool_name=name,
-        payload=_build_tool_request_payload(runtime, name, args),
+        payload=request_payload,
     )
     approval = await handle_runtime_action(
         runtime,
@@ -413,85 +422,101 @@ async def execute_runtime_tool(
         task_id=task_id,
         tool_name=name,
         args=args,
+        audit_only=audit_only,
     )
     if not approval["approved"]:
-        if entry.risk_tier != ActionRiskTier.READONLY:
+        if not audit_only and entry.risk_tier != ActionRiskTier.READONLY:
             runtime.ctx.somatic.bump_from_work(intensity=0.05, success=False)
-        await runtime.ctx.somatic.emit_appraisal_event(
-            AppraisalEventType.TOOL_REJECTED,
-            source_text=f"tool {name} rejected",
-            trigger_event_id=str(request.action_id),
-            meta={"tool_name": name, "args": args},
-        )
+        if not audit_only:
+            await runtime.ctx.somatic.emit_appraisal_event(
+                AppraisalEventType.TOOL_REJECTED,
+                source_text=f"tool {name} rejected",
+                trigger_event_id=str(request.action_id),
+                meta={"tool_name": name, "args": args},
+            )
+            await _record_cognitive_tool_result(
+                runtime,
+                name=name,
+                args=args,
+                success=False,
+                output=f"Tool execution blocked: {approval['decision'].reasoning}",
+                metadata={"decision": getattr(approval.get("decision"), "level", "")},
+                session_id=session_id,
+                task_id=task_id,
+            )
         return {
             "success": False,
             "output": f"Tool execution blocked: {approval['decision'].reasoning}",
             "decision": approval["decision"],
         }
 
-    hook_bus = getattr(runtime.ctx, "hook_bus", None)
+    contract_block_reason = await _task_contract_tool_block_reason(
+        runtime,
+        task_id=task_id,
+        tool_name=name,
+        args=args,
+    )
+    if contract_block_reason:
+        return {
+            "success": False,
+            "output": f"Tool execution blocked: {contract_block_reason}",
+            "metadata": {
+                "project_contract_blocked": True,
+                "reason": contract_block_reason,
+            },
+        }
+
     hook_context: Dict[str, Any] = {
-        "tool_name": name,
-        "args": args,
-        "risk_tier": entry.risk_tier.value,
         "session_id": session_id or getattr(getattr(runtime.ctx, "config", None), "session_id", None),
         "task_id": task_id,
     }
-    if hook_bus is not None:
-        pre_hook = hook_bus.run(PRE_TOOL_EXECUTE, hook_context)
-        if not pre_hook.allowed:
-            failure = {
-                "success": False,
-                "output": f"Tool execution blocked: {pre_hook.reason}",
-                "metadata": {"hook_blocked": True, "reason": pre_hook.reason},
-            }
-            post_context = {
-                **hook_context,
-                "result_success": False,
-                "result_output": failure["output"],
-                "result_metadata": failure["metadata"],
-            }
-            post_hook = hook_bus.run(POST_TOOL_EXECUTE, post_context)
-            if post_hook.mutated_context is not None:
-                failure["metadata"] = dict(post_hook.mutated_context.get("result_metadata") or failure["metadata"])
-            return failure
-        if pre_hook.mutated_context is not None:
-            hook_context = pre_hook.mutated_context
-            args = dict(hook_context.get("args") or args)
-
-    result = await runtime.tools.execute_async(name, args)
-    await _record_web_trust_outcome(runtime, request.payload, result.success)
-    if entry.risk_tier != ActionRiskTier.READONLY:
+    result = await runtime.tools.execute_async(
+        name,
+        args,
+        audit_only=audit_only,
+        hook_context=hook_context,
+    )
+    if not audit_only:
+        await _record_web_trust_outcome(runtime, request.payload, result.success)
+        await _record_trust_tool_outcome(
+            runtime,
+            tool_name=name,
+            tier=entry.risk_tier,
+            success=bool(result.success),
+            metadata=dict(result.metadata or {}),
+        )
+    if not audit_only and entry.risk_tier != ActionRiskTier.READONLY:
         runtime.ctx.somatic.bump_from_work(intensity=0.1, success=result.success)
-    await runtime.ctx.somatic.emit_appraisal_event(
-        AppraisalEventType.TOOL_EXECUTED,
-        source_text=_tool_appraisal_source_text(name, result.output),
-        trigger_event_id=str(request.action_id),
-        meta={"tool_name": name, "success": result.success},
-    )
-    if result.success:
-        if hook_bus is not None:
-            post_context = {
-                **hook_context,
-                "result_success": True,
-                "result_output": result.output,
-                "result_metadata": dict(result.metadata or {}),
-            }
-            post_hook = hook_bus.run(POST_TOOL_EXECUTE, post_context)
-            if post_hook.mutated_context is not None:
-                result.metadata = dict(post_hook.mutated_context.get("result_metadata") or result.metadata or {})
+    if not audit_only:
+        await runtime.ctx.somatic.emit_appraisal_event(
+            AppraisalEventType.TOOL_EXECUTED,
+            source_text=_tool_appraisal_source_text(name, result.output),
+            trigger_event_id=str(request.action_id),
+            meta={"tool_name": name, "success": result.success},
+        )
     result.metadata = dict(result.metadata or {})
-    affective_pressure = await _record_affective_tool_result(
-        runtime,
-        name=name,
-        result=result,
-        action_id=str(request.action_id),
-        session_id=session_id,
-        task_id=task_id,
-    )
-    if affective_pressure:
-        result.metadata["affective_pressure"] = affective_pressure
-    if result.success:
+    if not audit_only:
+        affective_pressure = await _record_affective_tool_result(
+            runtime,
+            name=name,
+            result=result,
+            action_id=str(request.action_id),
+            session_id=session_id,
+            task_id=task_id,
+        )
+        if affective_pressure:
+            result.metadata["affective_pressure"] = affective_pressure
+        await _record_cognitive_tool_result(
+            runtime,
+            name=name,
+            args=args,
+            success=bool(result.success),
+            output=str(result.output or ""),
+            metadata=dict(result.metadata or {}),
+            session_id=session_id,
+            task_id=task_id,
+        )
+    if result.success and not audit_only:
         result.metadata = dict(result.metadata or {})
         resolved_goals = await runtime.executive.check_goal_resolution(result.output)
         provenance_events = list(result.metadata.get("provenance_events") or [])
@@ -517,12 +542,41 @@ async def execute_runtime_tool(
                 trigger_event_id=str(request.action_id),
             )
         result.metadata["provenance_events"] = provenance_events
-    runtime._sync_executive_snapshot()
+    if not audit_only:
+        runtime._sync_executive_snapshot()
     return {
         "success": result.success,
         "output": result.output,
         "metadata": result.metadata,
     }
+
+
+async def _task_contract_tool_block_reason(
+    runtime: "AgentRuntime",
+    *,
+    task_id: Optional[str],
+    tool_name: str,
+    args: Dict[str, Any],
+) -> Optional[str]:
+    if not task_id:
+        return None
+    task = None
+    baa = getattr(runtime, "baa", None)
+    live_tasks = getattr(baa, "_live_tasks", None)
+    if isinstance(live_tasks, dict):
+        task = live_tasks.get(str(task_id))
+    if task is None:
+        store = getattr(baa, "store", None)
+        get_task = getattr(store, "get", None)
+        if callable(get_task):
+            try:
+                task = await get_task(str(task_id))
+            except Exception:
+                task = None
+    meta = getattr(task, "meta", None)
+    if not isinstance(meta, dict):
+        return None
+    return new_project_tool_block_reason(meta, tool_name=tool_name, args=args)
 
 
 def _tool_appraisal_source_text(name: str, output: str, *, max_chars: int = 1200) -> str:
@@ -533,6 +587,144 @@ def _tool_appraisal_source_text(name: str, output: str, *, max_chars: int = 1200
     if text:
         return f"tool {name} output: {text}"
     return f"tool {name} executed with empty output"
+
+
+async def _record_cognitive_tool_result(
+    runtime: "AgentRuntime",
+    *,
+    name: str,
+    args: Dict[str, Any],
+    success: bool,
+    output: str,
+    metadata: Dict[str, Any],
+    session_id: Optional[str],
+    task_id: Optional[str],
+) -> None:
+    """Feed tool outcomes into working memory and surprise/counterfactual loops."""
+
+    store = getattr(runtime, "cognitive_state_store", None) or getattr(
+        getattr(runtime, "ctx", None),
+        "cognitive_state_store",
+        None,
+    )
+    if store is None:
+        return
+    status = "succeeded" if success else "failed"
+    compact_args = _compact_tool_args(args)
+    output_text = " ".join(str(output or "").split())
+    if len(output_text) > 220:
+        output_text = output_text[:220].rstrip() + "..."
+    content = f"Last tool result: {name} {status}."
+    if compact_args:
+        content += f" Key args: {compact_args}."
+    if output_text:
+        content += f" Output: {output_text}"
+    evidence_refs = [f"tool:{name}"]
+    if task_id:
+        evidence_refs.append(f"task:{task_id}")
+    counterfactual = {}
+    if not success:
+        available_tools = []
+        tool_registry = getattr(runtime, "tools", None)
+        list_tools = getattr(tool_registry, "list_tools", None)
+        if callable(list_tools):
+            try:
+                available_tools = [str(getattr(entry, "name", "")) for entry in list_tools()]
+            except Exception:
+                available_tools = []
+        counterfactual = recommended_counterfactual(
+            objective=str((metadata or {}).get("objective") or task_id or ""),
+            failure_summary=f"{name} failed. {output_text}",
+            prior_tool=name,
+            available_tools=available_tools,
+            prior_attempts=int((metadata or {}).get("attempt") or 1),
+        )
+        recommended = counterfactual.get("recommended") or {}
+        strategy = str(recommended.get("strategy") or "").strip()
+        action = str(recommended.get("action") or "").strip()
+        if strategy and action:
+            content += f" Recommended counterfactual: {strategy} - {action}"
+    try:
+        await store.upsert_working_memory(
+            "last_tool_result",
+            content,
+            priority=0.74 if not success else 0.56,
+            source="tool_runtime",
+            evidence_refs=evidence_refs,
+            payload={
+                "tool_name": name,
+                "success": success,
+                "metadata": _metadata_summary(metadata),
+                "task_id": task_id,
+                "counterfactual": counterfactual,
+            },
+        )
+        if not success:
+            await store.record_event(
+                CognitiveEventKind.SURPRISE,
+                f"Tool {name} failed or was blocked; avoid repeating without a changed hypothesis",
+                content=content,
+                source="tool_runtime",
+                session_id=session_id,
+                confidence=0.76,
+                salience=1.5,
+                evidence_refs=evidence_refs,
+                payload={
+                    "tool_name": name,
+                    "args": _metadata_summary(args),
+                    "metadata": _metadata_summary(metadata),
+                    "task_id": task_id,
+                    "counterfactual": counterfactual,
+                },
+            )
+            recommended = counterfactual.get("recommended") or {}
+            await store.upsert_working_memory(
+                "counterfactual_retry",
+                (
+                    f"{name} just failed or was blocked. Recommended changed hypothesis: "
+                    f"{recommended.get('strategy', 'change_tool_or_arguments')}. "
+                    f"{recommended.get('action', _DEFAULT_COUNTERFACTUAL_ACTION)}"
+                ),
+                priority=0.82,
+                source="tool_runtime",
+                evidence_refs=evidence_refs,
+                payload={"tool_name": name, "task_id": task_id, "counterfactual": counterfactual},
+            )
+    except Exception:
+        return
+
+
+_DEFAULT_COUNTERFACTUAL_ACTION = "Change tool, path, arguments, or prerequisite evidence before retrying."
+
+
+def _compact_tool_args(args: Dict[str, Any], *, max_items: int = 3, max_chars: int = 120) -> str:
+    parts: list[str] = []
+    for key, value in list(args.items())[:max_items]:
+        if isinstance(value, (dict, list)):
+            text = f"{type(value).__name__}[{len(value)}]"
+        else:
+            text = str(value)
+        text = " ".join(text.split())
+        if len(text) > max_chars:
+            text = text[:max_chars].rstrip() + "..."
+        parts.append(f"{key}={text}")
+    return ", ".join(parts)
+
+
+def _metadata_summary(value: Any, *, max_items: int = 8) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return {}
+    summary: Dict[str, Any] = {}
+    for key, item in list(value.items())[:max_items]:
+        if isinstance(item, (str, int, float, bool)) or item is None:
+            summary[str(key)] = item
+        elif isinstance(item, (list, tuple, set)):
+            summary[str(key)] = f"{type(item).__name__}[{len(item)}]"
+        elif isinstance(item, dict):
+            summary[str(key)] = f"dict[{len(item)}]"
+        else:
+            summary[str(key)] = type(item).__name__
+    return summary
 
 
 async def _record_affective_tool_result(
@@ -602,6 +794,44 @@ async def disable_runtime_plugin(
     lifecycle = getattr(runtime.ctx, "plugin_lifecycle", None)
     if lifecycle is not None:
         await lifecycle.disable(plugin_id)
+    if plugin_id == "desktop_context":
+        await _disable_desktop_context_live_service(runtime)
+
+
+async def _disable_desktop_context_live_service(runtime: "AgentRuntime") -> None:
+    """Synchronize the built-in desktop-context service with plugin lifecycle state."""
+
+    service = getattr(runtime, "desktop_context", None)
+    configure = getattr(service, "configure", None)
+    if not callable(configure):
+        return
+    updates = {
+        "enabled": False,
+        "media_commentary_mode_enabled": False,
+        "proactive_video_commentary_enabled": False,
+        "live_transcription_enabled": False,
+        "tts_enabled": False,
+        "play_audio": False,
+        "media_commentary_requested_at": None,
+        "media_commentary_source": None,
+        "media_commentary_request": None,
+        "media_commentary_request_source": None,
+        "media_commentary_request_text": None,
+    }
+    try:
+        result = configure(**updates)
+        if inspect.isawaitable(result):
+            await result
+    except Exception as exc:
+        trace = getattr(runtime, "_trace", None)
+        if callable(trace):
+            try:
+                trace(
+                    "desktop_context_plugin_disable_sync_failed",
+                    {"plugin_id": "desktop_context", "error": str(exc)},
+                )
+            except Exception:
+                pass
 
 
 async def submit_runtime_repair(
@@ -621,6 +851,7 @@ async def handle_runtime_action(
     task_id: Optional[str] = None,
     tool_name: Optional[str] = None,
     args: Optional[Dict[str, Any]] = None,
+    audit_only: bool = False,
 ) -> Dict[str, Any]:
     """Evaluate an action through the self-approval ladder."""
     args = args or {}
@@ -629,7 +860,8 @@ async def handle_runtime_action(
     auto_review = getattr(runtime, "auto_review", None) or getattr(runtime, "auto_review_policy", None)
     if auto_review is not None and hasattr(auto_review, "review"):
         decision, auto_review_meta = await auto_review.review(request, decision)
-    await runtime.approval.maybe_record(decision, request, decision.score)
+    if not audit_only:
+        await runtime.approval.maybe_record(decision, request, decision.score)
     trace = getattr(runtime, "_trace", None)
     if callable(trace):
         trace(
@@ -646,7 +878,14 @@ async def handle_runtime_action(
     ) else "tool"
     target_id = (
         str(args.get("file_path") or args.get("path") or "").strip()
-        or str(args.get("session_id") or args.get("process_id") or args.get("plan_id") or args.get("schedule_id") or args.get("commitment_id") or "").strip()
+        or str(
+            args.get("session_id")
+            or args.get("process_id")
+            or args.get("plan_id")
+            or args.get("schedule_id")
+            or args.get("commitment_id")
+            or ""
+        ).strip()
     )
     scope_key = "workspace" if target_kind == "file" and target_id else "default"
     artifact = f"{target_kind}|{scope_key}|{target_id or tool_name or request.tool_name or 'action'}"
@@ -690,7 +929,7 @@ async def handle_runtime_action(
             ).to_dict()
     )
     hook_bus = getattr(runtime.ctx, "hook_bus", None)
-    if hook_bus is not None:
+    if hook_bus is not None and not audit_only:
         hook_bus.run(
             POST_ACTION_DECISION,
             {
@@ -925,18 +1164,61 @@ def _build_tool_request_payload(
         "browser_snapshot",
     }:
         request_payload.update(_classify_browser_session_target(runtime, name, args))
+    request_payload.update(_ordinary_action_payload(name, request_payload))
     request_payload.update(_approval_mode_payload(runtime, request_payload))
     return request_payload
+
+
+def _ordinary_action_payload(name: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    permission_class = str(payload.get("command_permission_class", "")).lower()
+    effective_permission_class = str(payload.get("command_effective_permission_class", "")).lower()
+    command_family = str(payload.get("command_family", "")).lower()
+    command_scope = str(payload.get("command_scope", "")).lower()
+    write_scope = str(payload.get("write_scope", "")).lower()
+    read_only_tools = {
+        "fs_read_file",
+        "fs_list_dir",
+        "glob_search",
+        "grep_search",
+        "artifact_lookup",
+        "workflow_status",
+        "memory_search",
+        "search_memories",
+        "recall_autobiography",
+        "self_inspection_query",
+        "initiative_contact_status",
+        "schedule_list",
+        "proof_summary",
+        "browser_snapshot",
+        "browser_wait",
+    }
+    network_read_tools = {"web_fetch", "web_search", "browser_navigate"}
+    if name in read_only_tools:
+        return {"ordinary_action": True, "ordinary_action_reason": "read_only_tool"}
+    if name in network_read_tools:
+        return {"ordinary_action": True, "ordinary_action_reason": f"network_read:{name}"}
+    if write_scope in {"managed_workspace", "plans", "project_workspace"}:
+        return {"ordinary_action": True, "ordinary_action_reason": f"workspace_write:{write_scope}"}
+    if permission_class == "read_only":
+        return {"ordinary_action": True, "ordinary_action_reason": "read_only_command"}
+    if (
+        command_scope in {"managed_workspace", "project_workspace"}
+        and command_family in {"safe", "interactive_session"}
+        and (effective_permission_class or permission_class) in {"read_only", "bounded_write"}
+    ):
+        return {
+            "ordinary_action": True,
+            "ordinary_action_reason": f"safe_{command_scope}_command",
+        }
+    return {}
 
 
 def _approval_mode_payload(runtime: "AgentRuntime", payload: Dict[str, Any]) -> Dict[str, Any]:
     config = getattr(getattr(runtime, "ctx", None), "config", None)
     try:
-        mode = normalize_auto_review_mode(getattr(config, "approval_mode", AutoReviewMode.DEFAULT.value))
+        mode = normalize_approval_mode(getattr(config, "approval_mode", ApprovalMode.DEFAULT.value))
     except ValueError:
-        mode = AutoReviewMode.DEFAULT
-    if mode is not AutoReviewMode.AUTO_REVIEW:
-        return {}
+        mode = ApprovalMode.DEFAULT
     return {
         "approval_mode": mode.value,
         "approval_channel": payload.get("approval_channel") or "on_request",
@@ -960,6 +1242,33 @@ async def _record_web_trust_outcome(
         action_class=str(action_class),
         success=success,
     )
+
+
+async def _record_trust_tool_outcome(
+    runtime: "AgentRuntime",
+    *,
+    tool_name: str,
+    tier: ActionRiskTier,
+    success: bool,
+    metadata: Dict[str, Any],
+) -> None:
+    trust_engine = getattr(runtime, "trust_engine", None)
+    if trust_engine is None:
+        trust_engine = getattr(getattr(runtime, "ctx", None), "trust_engine", None)
+    if trust_engine is None:
+        return
+    try:
+        if success:
+            await trust_engine.record_success(tool_name=tool_name, tier=tier)
+        else:
+            is_recoverable = not bool(metadata.get("values_violation"))
+            await trust_engine.record_failure(
+                tool_name=tool_name,
+                tier=tier,
+                is_recoverable=is_recoverable,
+            )
+    except Exception:
+        return
 
 
 def _classify_web_request_target(
@@ -1044,6 +1353,14 @@ def _classify_workspace_write_scope(
     except ValueError:
         pass
 
+    scope = _workspace_scope_for_path(runtime, resolved)
+    if scope is not None:
+        scope_name, root = scope
+        return {
+            "write_scope": scope_name,
+            f"{scope_name}_root": str(root),
+        }
+
     return {"write_scope": "other"}
 
 
@@ -1070,14 +1387,13 @@ def _classify_shell_command_scope(
             pass
 
     for candidate in candidates:
-        try:
-            candidate.relative_to(managed_root)
-        except ValueError:
+        scope = _workspace_scope_for_path(runtime, candidate)
+        if scope is None:
             continue
-
+        scope_name, scope_root = scope
         payload = {
-            "command_scope": "managed_workspace",
-            "managed_workspace_root": str(managed_root),
+            "command_scope": scope_name,
+            f"{scope_name}_root": str(scope_root),
         }
         remainder = _command_after_leading_cd(command)
         if remainder:
@@ -1095,6 +1411,34 @@ def _classify_shell_command_scope(
         return payload
 
     return {}
+
+
+def _workspace_scope_for_path(
+    runtime: "AgentRuntime",
+    path: Path,
+) -> Optional[tuple[str, Path]]:
+    config = runtime.ctx.config
+    managed_root = config.agent_workspace_root()
+    try:
+        path.relative_to(managed_root)
+        return "managed_workspace", managed_root
+    except ValueError:
+        pass
+
+    try:
+        workspace_roots = list(config.all_workspace_roots())
+    except Exception:
+        workspace_roots = []
+    for root in workspace_roots:
+        root = Path(root).expanduser().resolve()
+        if root == managed_root:
+            continue
+        try:
+            path.relative_to(root)
+            return "project_workspace", root
+        except ValueError:
+            continue
+    return None
 
 
 def _extract_leading_cd_prefix(command: str) -> Optional[str]:

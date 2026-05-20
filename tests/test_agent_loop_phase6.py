@@ -1,12 +1,13 @@
 """Integration tests for Phase 6 Plugin/Skill Infrastructure in AgentRuntime."""
 
 from pathlib import Path
+from types import SimpleNamespace
 import pytest
 import pytest_asyncio
 
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
 from opencas.runtime.agent_loop import AgentRuntime
-from opencas.tools.models import ToolResult
+from opencas.runtime.tool_runtime import disable_runtime_plugin
 
 
 @pytest_asyncio.fixture
@@ -65,6 +66,48 @@ async def test_disabled_plugin_tool_is_blocked(runtime: AgentRuntime, tmp_path: 
     await runtime.enable_plugin("blocker_plugin")
     result_enabled = await runtime.execute_tool("blocked_tool", {})
     assert "disabled" not in result_enabled["output"].lower()
+
+
+@pytest.mark.asyncio
+async def test_disabling_desktop_context_plugin_disables_live_service() -> None:
+    lifecycle_calls = []
+
+    class _FakeLifecycle:
+        async def disable(self, plugin_id: str) -> None:
+            lifecycle_calls.append(plugin_id)
+
+    class _FakeDesktopContext:
+        def __init__(self) -> None:
+            self.calls = []
+
+        def configure(self, **updates):
+            self.calls.append(updates)
+            return {"config": dict(updates)}
+
+    desktop_context = _FakeDesktopContext()
+    runtime = SimpleNamespace(
+        ctx=SimpleNamespace(plugin_lifecycle=_FakeLifecycle()),
+        desktop_context=desktop_context,
+    )
+
+    await disable_runtime_plugin(runtime, "desktop_context")
+
+    assert lifecycle_calls == ["desktop_context"]
+    assert desktop_context.calls == [
+        {
+            "enabled": False,
+            "media_commentary_mode_enabled": False,
+            "proactive_video_commentary_enabled": False,
+            "live_transcription_enabled": False,
+            "tts_enabled": False,
+            "play_audio": False,
+            "media_commentary_requested_at": None,
+            "media_commentary_source": None,
+            "media_commentary_request": None,
+            "media_commentary_request_source": None,
+            "media_commentary_request_text": None,
+        }
+    ]
 
 
 @pytest.mark.asyncio

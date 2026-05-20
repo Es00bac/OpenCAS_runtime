@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
 
 import aiosqlite
+
+from opencas.proof_chain import receipt_meta_from_task
 
 from .models import ExecutionReceipt, PhaseRecord, RepairResult, RepairTask
 
@@ -23,12 +26,17 @@ CREATE TABLE IF NOT EXISTS receipts (
     created_at TEXT NOT NULL,
     completed_at TEXT,
     success INTEGER NOT NULL,
-    output TEXT NOT NULL DEFAULT ''
+    output TEXT NOT NULL DEFAULT '',
+    meta TEXT NOT NULL DEFAULT '{}'
 );
 
 CREATE INDEX IF NOT EXISTS idx_receipts_task_id ON receipts(task_id);
 CREATE INDEX IF NOT EXISTS idx_receipts_created_at ON receipts(created_at);
 """
+
+_MIGRATIONS: List[str] = [
+    "ALTER TABLE receipts ADD COLUMN meta TEXT NOT NULL DEFAULT '{}'",
+]
 
 
 class ExecutionReceiptStore:
@@ -43,6 +51,7 @@ class ExecutionReceiptStore:
         self._db = await aiosqlite.connect(str(self.path))
         self._db.row_factory = aiosqlite.Row
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
         return self
 
@@ -50,6 +59,15 @@ class ExecutionReceiptStore:
         if self._db:
             await self._db.close()
             self._db = None
+
+    async def _migrate(self) -> None:
+        for sql in _MIGRATIONS:
+            try:
+                assert self._db is not None
+                await self._db.execute(sql)
+                await self._db.commit()
+            except sqlite3.OperationalError:
+                pass
 
     async def save(self, task: RepairTask, result: RepairResult) -> ExecutionReceipt:
         """Persist a receipt from a completed task and result."""
@@ -72,14 +90,15 @@ class ExecutionReceiptStore:
             completed_at=result.timestamp,
             success=result.success,
             output=result.output,
+            meta=receipt_meta_from_task(task),
         )
         await self._db.execute(
             """
             INSERT INTO receipts (
                 receipt_id, task_id, objective, plan, phases,
                 verification_result, checkpoint_commit, created_at,
-                completed_at, success, output
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                completed_at, success, output, meta
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 str(receipt.receipt_id),
@@ -93,6 +112,7 @@ class ExecutionReceiptStore:
                 receipt.completed_at.isoformat() if receipt.completed_at else None,
                 int(receipt.success),
                 receipt.output,
+                json.dumps(receipt.meta),
             ),
         )
         await self._db.commit()
@@ -106,8 +126,8 @@ class ExecutionReceiptStore:
             INSERT INTO receipts (
                 receipt_id, task_id, objective, plan, phases,
                 verification_result, checkpoint_commit, created_at,
-                completed_at, success, output
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                completed_at, success, output, meta
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(receipt_id) DO UPDATE SET
                 task_id = excluded.task_id,
                 objective = excluded.objective,
@@ -118,7 +138,8 @@ class ExecutionReceiptStore:
                 created_at = excluded.created_at,
                 completed_at = excluded.completed_at,
                 success = excluded.success,
-                output = excluded.output
+                output = excluded.output,
+                meta = excluded.meta
             """,
             (
                 str(receipt.receipt_id),
@@ -132,6 +153,7 @@ class ExecutionReceiptStore:
                 receipt.completed_at.isoformat() if receipt.completed_at else None,
                 int(receipt.success),
                 receipt.output,
+                json.dumps(receipt.meta),
             ),
         )
         await self._db.commit()
@@ -203,4 +225,5 @@ class ExecutionReceiptStore:
             completed_at=datetime.fromisoformat(row["completed_at"]) if row["completed_at"] else None,
             success=bool(row["success"]),
             output=row["output"] or "",
+            meta=json.loads(row["meta"]) if row["meta"] else {},
         )

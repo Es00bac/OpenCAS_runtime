@@ -85,6 +85,42 @@ async def test_rebuild_boosts_existing_edges(builder_deps) -> None:
 
 
 @pytest.mark.asyncio
+async def test_rebuild_decays_only_edges_for_processed_candidates(builder_deps) -> None:
+    store, builder = builder_deps
+    now = datetime.now(timezone.utc)
+    ep1 = Episode(kind=EpisodeKind.TURN, content="candidate", created_at=now)
+    ep2 = Episode(kind=EpisodeKind.TURN, content="candidate neighbor", created_at=now)
+    ep3 = Episode(kind=EpisodeKind.TURN, content="untouched", created_at=now)
+    ep4 = Episode(kind=EpisodeKind.TURN, content="untouched neighbor", created_at=now)
+    for ep in [ep1, ep2, ep3, ep4]:
+        await store.save_episode(ep)
+    await store.save_edge(
+        EpisodeEdge(
+            source_id=str(ep1.episode_id),
+            target_id=str(ep2.episode_id),
+            kind=EdgeKind.SEMANTIC,
+            confidence=0.8,
+        )
+    )
+    await store.save_edge(
+        EpisodeEdge(
+            source_id=str(ep3.episode_id),
+            target_id=str(ep4.episode_id),
+            kind=EdgeKind.SEMANTIC,
+            confidence=0.7,
+        )
+    )
+    builder.indexer.candidates = AsyncMock(return_value=[])
+
+    await builder.rebuild([ep1], decay=0.5, prune_threshold=0.0)
+
+    candidate_edge = (await store.get_edges_for(str(ep1.episode_id)))[0]
+    untouched_edge = (await store.get_edges_for(str(ep3.episode_id)))[0]
+    assert candidate_edge.confidence == pytest.approx(0.4, abs=1e-3)
+    assert untouched_edge.confidence == pytest.approx(0.7, abs=1e-3)
+
+
+@pytest.mark.asyncio
 async def test_rebuild_prunes_weak_edges(builder_deps) -> None:
     store, builder = builder_deps
     now = datetime.now(timezone.utc)

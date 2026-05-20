@@ -73,6 +73,110 @@ async def test_contextual_self_commitments_persist_to_commitments_and_tom(
 
 
 @pytest.mark.asyncio
+async def test_assistant_role_acceptance_persists_capability_audited_commitment(
+    runtime: AgentRuntime,
+) -> None:
+    session_id = runtime.ctx.config.session_id or "promise-phase7"
+    user_turn = (
+        "I need to develop a productive routine, do things to get some money "
+        "flowing in one way or another, preferably not employed by anyone else. "
+        "Can you be my assistant, figuring out a business model that I can "
+        "realistically pull off?"
+    )
+    assistant_turn = (
+        "Yes. I can be that assistant.\n\n"
+        "I've got this tracked as an active working-memory item now."
+    )
+
+    commitments = await runtime._capture_self_commitments(
+        assistant_turn,
+        session_id,
+        user_input=user_turn,
+    )
+
+    assert len(commitments) == 1
+    saved = commitments[0]
+    assert saved.status == CommitmentStatus.ACTIVE
+    assert saved.content == (
+        "Support the operator with developing a productive routine and realistic "
+        "non-employee income/business model"
+    )
+    assert saved.meta["normalization_source"] == "contextual_assistant_acceptance"
+    assert saved.meta["capability_audit"]["status"] == "supported"
+    assert "workflow_create_commitment" in saved.meta["capability_audit"]["available_tools"]
+    assert "workflow_create_schedule" in saved.meta["capability_audit"]["available_tools"]
+    assert "cognitive_focus_set" in saved.meta["capability_audit"]["available_tools"]
+    assert "mcp_register_server_tools" in saved.meta["capability_audit"]["available_tools"]
+    attention = await runtime.ctx.cognitive_state_store.list_attention(limit=8)
+    prospective = await runtime.ctx.cognitive_state_store.list_prospective_memories(limit=8)
+    assert any("income/business model" in item.label for item in attention)
+    assert any("Proactively follow through" in item.action for item in prospective)
+
+
+@pytest.mark.asyncio
+async def test_broader_help_acceptance_persists_as_ongoing_income_mission(
+    runtime: AgentRuntime,
+) -> None:
+    session_id = runtime.ctx.config.session_id or "promise-phase7"
+    user_turn = (
+        "Will you help me start making income? This is a high priority mission, "
+        "not a one-off task. I need proactive support on a complex multi-step project."
+    )
+    assistant_turn = "Yes. I'll help, and I will treat it as ongoing support."
+
+    commitments = await runtime._capture_self_commitments(
+        assistant_turn,
+        session_id,
+        user_input=user_turn,
+    )
+
+    assert len(commitments) == 1
+    saved = commitments[0]
+    assert saved.status == CommitmentStatus.ACTIVE
+    assert "start making income" in saved.content.lower()
+    attention = await runtime.ctx.cognitive_state_store.list_attention(limit=8)
+    working = await runtime.ctx.cognitive_state_store.list_working_memory(limit=8)
+    prospective = await runtime.ctx.cognitive_state_store.list_prospective_memories(limit=8)
+    assert any("Mission support:" in item.label for item in attention)
+    assert any(str(saved.commitment_id)[:8] in item.slot for item in working)
+    assert any(str(saved.commitment_id) in " ".join(item.evidence_refs) for item in prospective)
+
+
+@pytest.mark.asyncio
+async def test_cognitive_maintenance_backfills_existing_income_support_commitment(
+    runtime: AgentRuntime,
+) -> None:
+    existing = Commitment(
+        content=(
+            "Support Jarrod in developing a productive routine and a realistic "
+            "non-employee income/business model"
+        ),
+        status=CommitmentStatus.ACTIVE,
+        priority=8.0,
+        tags=[
+            "jarrod_support",
+            "routine",
+            "income",
+            "business_model",
+            "non_employee",
+            "follow_through",
+        ],
+        meta={"source": "workflow_create_commitment"},
+    )
+    await runtime.commitment_store.save(existing)
+
+    result = await runtime.run_cognitive_maintenance()
+
+    assert result["commitment_followthrough_seeds"] >= 1
+    attention = await runtime.ctx.cognitive_state_store.list_attention(limit=8)
+    working = await runtime.ctx.cognitive_state_store.list_working_memory(limit=8)
+    prospective = await runtime.ctx.cognitive_state_store.list_prospective_memories(limit=8)
+    assert any("income/business model" in item.label for item in attention)
+    assert any(str(existing.commitment_id)[:8] in item.slot for item in working)
+    assert any(str(existing.commitment_id) in " ".join(item.evidence_refs) for item in prospective)
+
+
+@pytest.mark.asyncio
 async def test_explicit_source_grounding_promise_persists(runtime: AgentRuntime) -> None:
     session_id = runtime.ctx.config.session_id or "promise-phase7"
 
@@ -281,6 +385,6 @@ async def test_promise_lifecycle_qualification_scenario(runtime: AgentRuntime) -
         for route in chat_router.routes
         if getattr(route, "path", None) == "/api/chat/context-summary"
     )
-    summary = await context_summary(session_id=session_id, task_limit=6)
+    summary = await context_summary(session_id=session_id, task_limit=6, include_details=True)
     assert summary.consolidation["commitments_extracted_from_chat"] == 1
     assert summary.executive["recommend_pause"] is False

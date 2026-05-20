@@ -1,11 +1,11 @@
-import aiosqlite
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Any, List, Optional
+
+import aiosqlite
 
 from .models import (
-    WorkspaceChecksumRecord,
-    WorkspaceGistAttempt,
     WorkspaceGistLookupResult,
     WorkspaceGistRecord,
     WorkspacePathRecord,
@@ -128,6 +128,62 @@ class WorkspaceStore:
     def utcnow(self) -> datetime:
         return datetime.now(timezone.utc)
 
+    @staticmethod
+    def sync_upsert_path_and_checksum(
+        db_path: Path | str,
+        *,
+        snapshot: Any,
+        checksum: str,
+    ) -> None:
+        """Synchronously materialize the structural index rows for one file."""
+        path = Path(db_path)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        now = datetime.now(timezone.utc).isoformat()
+        with sqlite3.connect(str(path)) as db:
+            db.executescript(_SCHEMA)
+            db.execute(
+                """INSERT INTO workspace_paths
+                   (abs_path, rel_path, parent_dir, file_name, extension, exists_flag, file_kind,
+                    size_bytes, mtime_ns, current_checksum, first_seen_at, last_seen_at, last_scan_id)
+                   VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, NULL)
+                   ON CONFLICT(abs_path) DO UPDATE SET
+                   exists_flag = 1,
+                   size_bytes = excluded.size_bytes,
+                   mtime_ns = excluded.mtime_ns,
+                   file_kind = excluded.file_kind,
+                   current_checksum = excluded.current_checksum,
+                   last_seen_at = excluded.last_seen_at,
+                   last_scan_id = excluded.last_scan_id
+                """,
+                (
+                    str(snapshot.abs_path),
+                    str(snapshot.rel_path),
+                    str(snapshot.parent_dir),
+                    snapshot.file_name,
+                    snapshot.extension,
+                    snapshot.file_kind,
+                    snapshot.size_bytes,
+                    snapshot.mtime_ns,
+                    checksum,
+                    now,
+                    now,
+                ),
+            )
+            db.execute(
+                """INSERT INTO workspace_checksums
+                   (checksum, size_bytes, file_kind, mime_type, content_text_status,
+                    content_preview, content_embedding_ref, content_embedding_model,
+                    content_embedding_dim, first_seen_at, last_seen_at)
+                   VALUES (?, ?, ?, NULL, 'pending', NULL, NULL, NULL, NULL, ?, ?)
+                   ON CONFLICT(checksum) DO UPDATE SET
+                   last_seen_at = excluded.last_seen_at,
+                   size_bytes = excluded.size_bytes,
+                   file_kind = excluded.file_kind
+                """,
+                (checksum, snapshot.size_bytes, snapshot.file_kind, now, now),
+            )
+            db.commit()
+
     # Scans
     async def create_scan(self, root_path: str) -> int:
         assert self._db is not None
@@ -205,6 +261,59 @@ class WorkspaceStore:
             last_scan_id=r["last_scan_id"],
             last_error=r["last_error"],
         )
+
+    async def get_paths_by_checksum(
+        self,
+        checksum: str,
+        *,
+        limit: int = 25,
+    ) -> List[WorkspacePathRecord]:
+        assert self._db is not None
+        cursor = await self._db.execute(
+            """
+            SELECT * FROM workspace_paths
+            WHERE current_checksum = ? AND exists_flag = 1
+            ORDER BY last_seen_at DESC
+            LIMIT ?
+            """,
+            (checksum, limit),
+        )
+        rows = await cursor.fetchall()
+        out: List[WorkspacePathRecord] = []
+        for r in rows:
+            out.append(
+                WorkspacePathRecord(
+                    abs_path=Path(r["abs_path"]),
+                    rel_path=Path(r["rel_path"]) if r["rel_path"] else None,
+                    parent_dir=Path(r["parent_dir"]),
+                    file_name=r["file_name"],
+                    extension=r["extension"],
+                    exists_flag=bool(r["exists_flag"]),
+                    file_kind=r["file_kind"],
+                    size_bytes=r["size_bytes"],
+                    mtime_ns=r["mtime_ns"],
+                    current_checksum=r["current_checksum"],
+                    first_seen_at=datetime.fromisoformat(r["first_seen_at"]),
+                    last_seen_at=datetime.fromisoformat(r["last_seen_at"]),
+                    last_scan_id=r["last_scan_id"],
+                    last_error=r["last_error"],
+                )
+            )
+        return out
+
+    async def latest_completed_scan(self) -> Optional[dict[str, Any]]:
+        assert self._db is not None
+        cursor = await self._db.execute(
+            """
+            SELECT *
+            FROM workspace_scans
+            WHERE finished_at IS NOT NULL
+            ORDER BY finished_at DESC
+            LIMIT 1
+            """
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
 
     async def upsert_path_snapshot(self, snapshot, checksum: Optional[str] = None, scan_id: Optional[int] = None) -> None:
         assert self._db is not None

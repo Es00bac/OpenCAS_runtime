@@ -8,15 +8,26 @@ import inspect
 import json
 import os
 import shlex
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, List, Optional
 
 from opencas.api import LLMClient
+from opencas.cognition import recommended_counterfactual
+from opencas.identity.agent_name import resolve_agent_name
+from opencas.projects.classifier import (
+    PROJECT_TYPE_SOFTWARE,
+    PROJECT_TYPE_WRITING,
+    classify_project_type,
+)
+from opencas.projects.execution_contracts import new_project_execution_rejection_reason
+from opencas.projects.workspace_registry import WorkspaceProjectCandidate, resolve_workspace_project
 from opencas.provenance_adapter import append_provenance_record
 from opencas.telemetry import EventKind, Tracer
 from opencas.tools import ToolRegistry
+from opencas.tools.action_memory import artifact_hint_from_mapping
 
-from .git_checkpoint import GitCheckpointManager
+from .git_checkpoint import GitCheckpointError, GitCheckpointManager
 from .models import (
     AttemptOutcome,
     ExecutionPhase,
@@ -32,6 +43,8 @@ from .store import TaskStore
 
 class RepairExecutor:
     """Executes a repair task through explicit phases with checkpointing and convergence guards."""
+
+    DEFAULT_TOOL_LOOP_TIMEOUT_SECONDS = 420.0
 
     _LIKELY_DOMAIN_SUFFIXES = {
         "ai",
@@ -53,6 +66,7 @@ class RepairExecutor:
         "task_accepted": "start",
         "task_completed": "commit",
     }
+    _WRITE_ARTIFACT_TOOLS = {"edit_file", "fs_edit_file", "fs_write_file", "write_file"}
 
     def __init__(
         self,
@@ -173,11 +187,13 @@ class RepairExecutor:
     async def run(self, task: RepairTask) -> RepairResult:
         """Run the full repair pipeline for *task*."""
         task.attempt += 1
+        await self._persist_task_progress(task)
 
         # Exponential backoff before retries
         if task.attempt > 1 and task.retry_backoff_seconds > 0:
             await asyncio.sleep(task.retry_backoff_seconds)
             task.retry_backoff_seconds *= 2
+            await self._persist_task_progress(task)
 
         self._trace(
             "repair_started",
@@ -186,34 +202,65 @@ class RepairExecutor:
 
         checkpoint: Optional[GitCheckpointManager] = None
         affected_files: List[str] = []
+        commit_hash: Optional[str] = None
+
+        def record_rollback_failure(reason: str) -> None:
+            task.phases.append(
+                PhaseRecord(
+                    phase=ExecutionPhase.ROLLBACK,
+                    success=False,
+                    output=reason,
+                )
+            )
+
+        def rollback_to_checkpoint() -> None:
+            if checkpoint is None:
+                return
+            if not commit_hash:
+                reason = "rollback failed: missing checkpoint commit"
+                record_rollback_failure(reason)
+                self._trace("checkpoint_rollback_failed", {"task_id": str(task.task_id), "reason": reason})
+                return
+            try:
+                checkpoint.restore(commit_hash)
+            except GitCheckpointError as exc:
+                reason = f"rollback failed: {exc}"
+                record_rollback_failure(reason)
+                self._trace("checkpoint_rollback_failed", {"task_id": str(task.task_id), "reason": reason})
 
         # DETECT
         detect_record = await self._run_phase(task, ExecutionPhase.DETECT, self._detect)
         affected_files = [s.strip() for s in (detect_record.output or "").split(",") if s.strip()]
 
         # SNAPSHOT
-        commit_hash: Optional[str] = None
         if task.scratch_dir and affected_files:
             checkpoint = GitCheckpointManager(task.scratch_dir)
             commit_hash = checkpoint.snapshot(affected_files)
-            task.checkpoint_commit = commit_hash
-            self.record_task_boundary(
-                task,
-                boundary="checkpoint_persisted",
-                workflow_phase="handoff",
-                artifact="repair-task|default|checkpoint",
-                why=f"checkpoint persisted for {task.objective}",
-                action="COMMIT",
-                risk="LOW",
-                source_trace={
-                    "checkpoint_commit": commit_hash,
-                    "files": affected_files[:10],
-                },
-            )
+            if commit_hash:
+                task.checkpoint_commit = commit_hash
+                self.record_task_boundary(
+                    task,
+                    boundary="checkpoint_persisted",
+                    workflow_phase="handoff",
+                    artifact="repair-task|default|checkpoint",
+                    why=f"checkpoint persisted for {task.objective}",
+                    action="COMMIT",
+                    risk="LOW",
+                    source_trace={
+                        "checkpoint_commit": commit_hash,
+                        "files": affected_files[:10],
+                    },
+                )
         snap_record = PhaseRecord(
             phase=ExecutionPhase.SNAPSHOT,
-            success=bool(checkpoint is not None),
-            output=f"snapshot taken {commit_hash}" if commit_hash else "no files to snapshot",
+            success=bool(commit_hash),
+            output=(
+                f"snapshot taken {commit_hash}"
+                if commit_hash
+                else "snapshot failed"
+                if checkpoint is not None
+                else "no files to snapshot"
+            ),
         )
         task.phases.append(snap_record)
 
@@ -221,6 +268,28 @@ class RepairExecutor:
         plan_record = await self._run_phase(task, ExecutionPhase.PLAN, self._plan)
         plan = plan_record.output or ""
         task.artifacts.append(f"plan:{plan}")
+        if plan_record.success is not True:
+            backoff_reason = self._provider_backoff_reason(plan)
+            if backoff_reason:
+                self._mark_retry_blocked(
+                    task,
+                    reason=f"provider backoff: {backoff_reason}",
+                    mode="provider_backoff",
+                )
+                rollback_to_checkpoint()
+                return self._fail(task, f"provider backoff: {backoff_reason}")
+            if task.attempt >= task.max_attempts:
+                rollback_to_checkpoint()
+                return self._fail(task, "Planning failed.")
+            task.stage = ExecutionStage.RECOVERING
+            task.status = "retrying"
+            return RepairResult(
+                task_id=task.task_id,
+                success=False,
+                stage=task.stage,
+                output="Planning failed; will retry.",
+                artifacts=task.artifacts,
+            )
 
         # EXECUTE
         exec_record = await self._run_phase(
@@ -236,13 +305,33 @@ class RepairExecutor:
         # POSTCHECK
         await self._run_phase(task, ExecutionPhase.POSTCHECK, self._postcheck)
 
+        backoff_reason = self._provider_backoff_reason(
+            "\n".join(
+                part
+                for part in (
+                    plan_record.output or "",
+                    exec_record.output or "",
+                    verify_record.output or "",
+                )
+                if part
+            )
+        )
+        if backoff_reason:
+            self._mark_retry_blocked(
+                task,
+                reason=f"provider backoff: {backoff_reason}",
+                mode="provider_backoff",
+            )
+            rollback_to_checkpoint()
+            return self._fail(task, f"provider backoff: {backoff_reason}")
+
         if verified and exec_record.success is True:
             convergence_hash = self._hash_convergence(exec_output, task.artifacts)
             task.convergence_hashes.append(convergence_hash)
             task.stage = ExecutionStage.DONE
             task.status = "completed"
-            if checkpoint:
-                checkpoint.discard()
+            if checkpoint and commit_hash:
+                checkpoint.discard(commit_hash)
             self.record_task_boundary(
                 task,
                 boundary="task_completed",
@@ -271,21 +360,19 @@ class RepairExecutor:
             )
             if not decision.allowed:
                 self._capture_retry_blocked_intention(task, decision.reason)
-                if checkpoint:
-                    checkpoint.restore(commit_hash)
+                rollback_to_checkpoint()
                 return self._fail(task, f"retry blocked: {decision.reason}")
         else:
             convergence_hash = self._hash_convergence(exec_output, task.artifacts)
             if convergence_hash in task.convergence_hashes:
-                if checkpoint:
-                    checkpoint.restore(commit_hash)
+                rollback_to_checkpoint()
                 return self._fail(task, "non-improving loop detected")
             task.convergence_hashes.append(convergence_hash)
 
         # Recover / escalate if execution or verification failed and attempts exhausted
-        if task.attempt >= task.max_attempts:
-            if checkpoint:
-                checkpoint.restore(commit_hash)
+        artifact_progress_boundary = self._artifact_progress_boundary(task, exec_record)
+        if task.attempt >= task.max_attempts and not artifact_progress_boundary:
+            rollback_to_checkpoint()
             exhausted_reason = (
                 f"Execution failed after {task.attempt} attempts."
                 if not exec_record.success
@@ -296,11 +383,14 @@ class RepairExecutor:
         # Schedule a retry by keeping stage as recovering
         task.stage = ExecutionStage.RECOVERING
         task.status = "retrying"
-        failure_reason = (
-            "Execution failed; will retry."
-            if not exec_record.success
-            else "Verification failed; will retry."
-        )
+        if artifact_progress_boundary:
+            failure_reason = "Artifact progress boundary reached; will continue."
+        else:
+            failure_reason = (
+                "Execution failed; will retry."
+                if not exec_record.success
+                else "Verification failed; will retry."
+            )
         return RepairResult(
             task_id=task.task_id,
             success=False,
@@ -321,7 +411,11 @@ class RepairExecutor:
         prior_packet = await self.store.get_latest_salvage_packet(str(task.task_id))
         packet = build_salvage_packet(
             task,
-            outcome=self._attempt_outcome(exec_record=exec_record, verify_record=verify_record),
+            outcome=self._attempt_outcome(
+                task,
+                exec_record=exec_record,
+                verify_record=verify_record,
+            ),
             canonical_artifact_path=self._canonical_artifact_path(task),
             artifact_paths_touched=self._artifact_paths_touched(task, affected_files),
             tool_calls=self._tool_calls_from_task_meta(task),
@@ -333,6 +427,13 @@ class RepairExecutor:
             has_new_evidence=self._has_new_evidence(prior_packet, packet),
             broad_attempt=self._is_broad_attempt(task, packet),
         )
+        counterfactual = recommended_counterfactual(
+            objective=task.objective,
+            failure_summary=self._salvage_failure_summary(packet, exec_record, verify_record),
+            prior_tool=packet.tool_signature or "",
+            available_tools=[entry.name for entry in self.tools.list_tools()],
+            prior_attempts=task.attempt,
+        )
         task.meta["last_salvage_packet_id"] = str(packet.packet_id)
         task.meta["retry_governor"] = {
             "allowed": decision.allowed,
@@ -342,7 +443,31 @@ class RepairExecutor:
             "attempt": packet.attempt,
             "packet_id": str(packet.packet_id),
         }
+        task.meta["counterfactual_review"] = {
+            "recommended": counterfactual.get("recommended") or {},
+            "options": counterfactual.get("options") or [],
+            "salvage_packet_id": str(packet.packet_id),
+            "retry_allowed": decision.allowed,
+            "retry_governor_reason": decision.reason,
+        }
         return decision
+
+    @staticmethod
+    def _salvage_failure_summary(
+        packet: Any,
+        exec_record: PhaseRecord,
+        verify_record: PhaseRecord,
+    ) -> str:
+        parts = [
+            f"outcome={getattr(getattr(packet, 'outcome', ''), 'value', getattr(packet, 'outcome', ''))}",
+            f"meaningful_progress={getattr(packet, 'meaningful_progress_signal', '')}",
+            f"best_next_step={getattr(packet, 'best_next_step', '')}",
+            "constraints=" + ", ".join(str(item) for item in (getattr(packet, "discovered_constraints", []) or [])[:5]),
+            "questions=" + ", ".join(str(item) for item in (getattr(packet, "unresolved_questions", []) or [])[:5]),
+            f"execute_success={exec_record.success}; execute_output={(exec_record.output or '')[:280]}",
+            f"verify_success={verify_record.success}; verify_output={(verify_record.output or '')[:280]}",
+        ]
+        return "\n".join(part for part in parts if part.strip())
 
     async def _run_phase(
         self,
@@ -353,6 +478,8 @@ class RepairExecutor:
     ) -> PhaseRecord:
         """Execute a single phase and record its result."""
         record = PhaseRecord(phase=phase)
+        task.phases.append(record)
+        await self._persist_task_progress(task)
         try:
             result = handler(task, *args)
             if inspect.isawaitable(result):
@@ -370,6 +497,10 @@ class RepairExecutor:
                 record.success = False
             elif "[error generating response" in lowered:
                 record.success = False
+            elif self._provider_backoff_reason(record.output):
+                record.success = False
+            elif phase == ExecutionPhase.EXECUTE and "reached maximum number of tool-use iterations" in lowered:
+                record.success = False
             elif phase == ExecutionPhase.EXECUTE and not record.output.strip():
                 record.success = False
             elif phase == ExecutionPhase.EXECUTE and lowered.startswith("execute failed"):
@@ -377,10 +508,16 @@ class RepairExecutor:
         except Exception as exc:
             record.success = False
             record.output = f"{phase.value} failed: {exc}"
-        from datetime import datetime, timezone
         record.ended_at = datetime.now(timezone.utc)
-        task.phases.append(record)
+        await self._persist_task_progress(task)
         return record
+
+    async def _persist_task_progress(self, task: RepairTask) -> None:
+        """Persist non-terminal task progress so live operators can see motion."""
+        if self.store is None:
+            return
+        task.updated_at = datetime.now(timezone.utc)
+        await self.store.save(task)
 
     async def _detect(self, task: RepairTask) -> str:
         """Identify what files/commands will be touched."""
@@ -450,6 +587,9 @@ class RepairExecutor:
                 user_content = f"Objective: {task.objective}"
                 if planning_context:
                     user_content = f"{user_content}\n\n{planning_context}"
+                dual_context = await self._dual_context_execution_context(task)
+                if dual_context:
+                    user_content = f"{user_content}\n\n{dual_context}"
                 messages = [
                     {
                         "role": "system",
@@ -470,8 +610,42 @@ class RepairExecutor:
                 content = response.get("choices", [{}])[0].get("message", {}).get("content", "")
                 return content.strip() or "investigate and fix"
             except Exception as exc:
-                return f"investigate and fix (llm error: {exc})"
+                backoff_reason = self._provider_backoff_reason(str(exc))
+                if backoff_reason:
+                    return f"plan failed: provider backoff: {backoff_reason}"
+                return f"plan failed: llm error: {exc}"
         return "investigate and fix"
+
+    @staticmethod
+    def _provider_backoff_reason(text: str) -> str:
+        lowered = str(text or "").lower()
+        if "429" in lowered or "too many requests" in lowered or "rate limit" in lowered or "ratelimit" in lowered:
+            return "rate limit"
+        if "provider" in lowered and "circuit open" in lowered:
+            return "provider circuit open"
+        if "providercircuitopen" in lowered:
+            return "provider circuit open"
+        return ""
+
+    def _mark_retry_blocked(self, task: RepairTask, *, reason: str, mode: str) -> None:
+        task.meta["retry_governor"] = {
+            "allowed": False,
+            "reason": reason,
+            "mode": mode,
+            "attempt": task.attempt,
+            "packet_id": None,
+            "reuse_packet_id": None,
+        }
+        task.meta["counterfactual_review"] = {
+            "recommended": {
+                "strategy": "backoff_or_switch_provider",
+                "reason": reason,
+            },
+            "options": [],
+            "salvage_packet_id": None,
+            "retry_allowed": False,
+            "retry_governor_reason": reason,
+        }
 
     async def _execute_plan(self, task: RepairTask, plan: str) -> str:
         """Execute the plan using available tools."""
@@ -480,17 +654,12 @@ class RepairExecutor:
 
             objective = f"Objective: {task.objective}\nPlan: {plan}"
             project_return_context = await self._project_return_context(task)
+            dual_context = await self._dual_context_execution_context(task)
             system_content = "You are executing a repair task."
             if project_return_context:
-                system_content = (
-                    "You are Bulma returning to your own creative project, not an external contractor. "
-                    "Use tools as part of your own agency and continuity. Decide what meaningful progress "
-                    "requires, and preserve the next return point if the project remains unfinished. "
-                    "For writing work, creating a workflow scaffold is not manuscript progress; persist "
-                    "actual draft prose to the target artifact before claiming a chapter, scene, word count, "
-                    "or manuscript milestone is complete.\n\n"
-                    f"{project_return_context}"
-                )
+                system_content = self._project_return_system_content(task, project_return_context)
+            if dual_context:
+                system_content = f"{system_content.rstrip()}\n\n{dual_context}"
             messages = [
                 {"role": "system", "content": system_content},
                 {"role": "user", "content": objective},
@@ -501,18 +670,54 @@ class RepairExecutor:
                 task_id=str(task.task_id),
             )
             scheduler = getattr(self.runtime, "scheduler", None)
-            result = await self.runtime.tool_loop.run(
+            tool_loop_coro = self.runtime.tool_loop.run(
                 objective=task.objective,
                 messages=messages,
                 ctx=ctx,
                 on_focus_enter=scheduler.enter_focus_mode if scheduler else None,
                 on_focus_exit=scheduler.exit_focus_mode if scheduler else None,
             )
+            timeout_seconds = self._tool_loop_timeout_seconds(task)
+            execution_started_at = datetime.now(timezone.utc)
+            try:
+                if timeout_seconds:
+                    result = await asyncio.wait_for(tool_loop_coro, timeout=timeout_seconds)
+                else:
+                    result = await tool_loop_coro
+            except asyncio.TimeoutError:
+                artifact_progress_paths = self._record_timeout_artifact_progress(
+                    task,
+                    since=execution_started_at,
+                )
+                task.meta["tool_loop_timeout"] = {
+                    "timeout_seconds": timeout_seconds,
+                    "session_id": str(task.task_id),
+                    "reason": "tool_loop_execution_timeout",
+                    "artifact_progress_paths": artifact_progress_paths,
+                }
+                return (
+                    "execute failed: tool loop timed out after "
+                    f"{timeout_seconds:.0f}s before returning control; "
+                    "retry as a narrower bounded continuation with durable artifact progress"
+                )
+            task.meta["last_tool_calls"] = list(result.tool_calls)
+            tool_chain_summary = getattr(result, "tool_chain_summary", None)
+            task.meta["last_tool_loop"] = {
+                "iterations": getattr(result, "iterations", None),
+                "guard_fired": bool(result.guard_fired),
+                "guard_reason": result.guard_reason,
+                "tool_call_count": len(result.tool_calls),
+                "tool_chain_summary": (
+                    tool_chain_summary.model_dump(mode="json")
+                    if hasattr(tool_chain_summary, "model_dump")
+                    else tool_chain_summary
+                ),
+            }
+            await self._persist_task_progress(task)
             if result.guard_fired:
                 reason = result.guard_reason or result.final_output
                 output = f"execute failed: tool loop guard fired: {reason}"
                 return output
-            task.meta["last_tool_calls"] = list(result.tool_calls)
             output = result.final_output
             self._persist_unwritten_writing_output(
                 task=task,
@@ -533,6 +738,18 @@ class RepairExecutor:
             )
             if artifact_update_failure:
                 return f"execute failed: {artifact_update_failure}"
+            contract_failure = new_project_execution_rejection_reason(
+                task.meta if isinstance(task.meta, dict) else {},
+                output=output,
+                tool_calls=result.tool_calls,
+            )
+            if contract_failure:
+                task.meta["project_contract_failure"] = {
+                    "reason": contract_failure,
+                    "final_output_excerpt": str(output or "").strip()[:700],
+                    "tool_call_count": len(result.tool_calls),
+                }
+                return f"execute failed: {contract_failure}"
             return output
 
         # Fallback heuristic when no runtime/tool_loop is available
@@ -550,6 +767,76 @@ class RepairExecutor:
         outputs.append(f"plan executed: {plan}")
         output = "; ".join(outputs)
         return output
+
+    def _record_timeout_artifact_progress(
+        self,
+        task: RepairTask,
+        *,
+        since: datetime,
+    ) -> List[str]:
+        paths = self._workspace_artifacts_modified_since(task, since=since)
+        task.meta["timeout_artifact_progress"] = {
+            "reason": "tool_loop_execution_timeout",
+            "since": since.isoformat(),
+            "paths": paths,
+        }
+        for path in paths:
+            artifact = f"file:{path}"
+            if artifact not in task.artifacts:
+                task.artifacts.append(artifact)
+        return paths
+
+    @staticmethod
+    def _workspace_artifacts_modified_since(task: RepairTask, *, since: datetime) -> List[str]:
+        meta = task.meta if isinstance(task.meta, dict) else {}
+        workspace_value = str(meta.get("workspace_abs_path") or "").strip()
+        if not workspace_value:
+            return []
+        try:
+            workspace = Path(workspace_value).expanduser().resolve()
+        except Exception:
+            return []
+        if not workspace.is_dir():
+            return []
+
+        since_ts = since.astimezone(timezone.utc).timestamp() - 2.0
+        paths: list[str] = []
+        for path in workspace.rglob("*"):
+            if len(paths) >= 50:
+                break
+            if not path.is_file():
+                continue
+            if any(part in {".git", "__pycache__"} for part in path.parts):
+                continue
+            if path.name.endswith((".tmp", ".swp")):
+                continue
+            try:
+                stat = path.stat()
+            except OSError:
+                continue
+            if stat.st_size <= 0 or stat.st_mtime < since_ts:
+                continue
+            paths.append(str(path))
+        return sorted(set(paths))
+
+    def _tool_loop_timeout_seconds(self, task: RepairTask) -> Optional[float]:
+        """Return the bounded execution timeout for one BAA tool-loop slice."""
+        meta = task.meta if isinstance(task.meta, dict) else {}
+        raw = meta.get("tool_loop_timeout_seconds")
+        if raw is None and self.runtime is not None:
+            config = getattr(self.runtime, "config", None) or getattr(
+                getattr(self.runtime, "ctx", None), "config", None
+            )
+            raw = getattr(config, "baa_tool_loop_timeout_seconds", None)
+        if raw is None:
+            raw = self.DEFAULT_TOOL_LOOP_TIMEOUT_SECONDS
+        try:
+            timeout = float(raw)
+        except (TypeError, ValueError):
+            timeout = self.DEFAULT_TOOL_LOOP_TIMEOUT_SECONDS
+        if timeout <= 0:
+            return None
+        return timeout
 
     def _persist_unwritten_writing_output(
         self,
@@ -956,8 +1243,104 @@ class RepairExecutor:
     def _word_count(text: str) -> int:
         return len([word for word in str(text or "").split() if word.strip()])
 
+    async def _dual_context_execution_context(self, task: RepairTask) -> str:
+        meta = task.meta if isinstance(task.meta, dict) else {}
+        origin_lane = str(meta.get("origin_context_lane") or "").strip()
+        authority = str(meta.get("authority") or "").strip()
+        snapshot_id = str(
+            meta.get("context_truth_snapshot_id")
+            or meta.get("source_snapshot_id")
+            or ""
+        ).strip()
+        epoch = meta.get("context_truth_epoch")
+        accepted_ids = [
+            str(value).strip()
+            for value in (meta.get("accepted_proposal_ids") or [])
+            if str(value).strip()
+        ]
+        if not any((origin_lane, authority, snapshot_id, epoch is not None, accepted_ids)):
+            return ""
+
+        lines = [
+            "Dual-context execution context:",
+            "- Executive work may use live truth, due schedules, direct user requests, and accepted arbiter proposals.",
+            "- Reflective proposals that are pending, rejected, stale, or missing arbiter evidence are idea/caution context only and do not authorize tool writes.",
+        ]
+        details: list[str] = []
+        if origin_lane:
+            details.append(f"origin_context_lane={origin_lane}")
+        if authority:
+            details.append(f"authority={authority}")
+        if snapshot_id:
+            details.append(f"truth_snapshot={snapshot_id}")
+        if epoch is not None:
+            details.append(f"truth_epoch={epoch}")
+        if details:
+            lines.append("- " + "; ".join(details))
+
+        lines.extend(await self._accepted_proposal_lines(task, accepted_ids))
+        return "\n".join(lines)
+
+    async def _accepted_proposal_lines(
+        self,
+        task: RepairTask,
+        accepted_ids: List[str],
+    ) -> List[str]:
+        store = getattr(self.runtime, "context_proposals", None) if self.runtime is not None else None
+        if store is None and self.runtime is not None:
+            store = getattr(getattr(self.runtime, "ctx", None), "context_proposal_store", None)
+        if store is None:
+            if accepted_ids:
+                return ["- Accepted proposal ids: " + ", ".join(accepted_ids[:5])]
+            return []
+
+        proposals: dict[str, Any] = {}
+        get_proposal = getattr(store, "get", None)
+        if callable(get_proposal):
+            for proposal_id in accepted_ids[:8]:
+                try:
+                    proposal = await get_proposal(proposal_id)
+                except Exception:
+                    proposal = None
+                if proposal is not None:
+                    proposals[str(getattr(proposal, "proposal_id", proposal_id))] = proposal
+
+        for method_name, value in (
+            ("list_by_task", str(task.task_id)),
+            ("list_by_project", getattr(task, "project_id", None)),
+        ):
+            if not value:
+                continue
+            method = getattr(store, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                for proposal in await method(str(value), include_terminal=True, limit=8):
+                    proposals[str(getattr(proposal, "proposal_id", ""))] = proposal
+            except Exception:
+                continue
+
+        lines: list[str] = []
+        for proposal in list(proposals.values())[:5]:
+            status = str(getattr(getattr(proposal, "status", ""), "value", getattr(proposal, "status", ""))).lower()
+            proposal_authority = str(
+                getattr(getattr(proposal, "authority", ""), "value", getattr(proposal, "authority", ""))
+            ).lower()
+            proposal_id = str(getattr(proposal, "proposal_id", "") or "").strip()
+            if status != "accepted" or proposal_authority != "executive_committed":
+                if proposal_id:
+                    lines.append(f"- Proposal {proposal_id} is not accepted executive support; do not execute from it.")
+                continue
+            content = " ".join(str(getattr(proposal, "content", "") or "").split())[:500]
+            kind = str(getattr(proposal, "proposal_kind", "") or "").strip()
+            refs = [proposal_id, str(getattr(proposal, "source_snapshot_id", "") or "").strip()]
+            refs.extend(str(ref).strip() for ref in (getattr(proposal, "evidence_refs", []) or [])[:3])
+            ref_text = ", ".join(ref for ref in refs if ref)
+            lines.append(f"- Accepted proposal support ({kind}): {content} [refs: {ref_text}]")
+        return lines
+
     async def _project_return_context(self, task: RepairTask) -> str:
-        """Build project-return continuity context for scheduled creative work."""
+        """Build project-return continuity context for scheduled project work."""
         meta = task.meta if isinstance(task.meta, dict) else {}
         if not (
             meta.get("project_key")
@@ -967,28 +1350,173 @@ class RepairExecutor:
             return ""
         title = str(meta.get("project_title") or "conversation project").strip()
         project_intent = str(meta.get("project_intent") or "").strip()
+        project_type = self._classify_project_return_type(task, meta)
         next_step = str(meta.get("next_step") or "").strip()
         source_session_id = str(meta.get("source_session_id") or "").strip()
         lines = [
             "Project return context:",
             f"- Project: {title}",
+            f"- Project type: {project_type}",
         ]
         if project_intent:
-            lines.append(f"- Book-level intent: {project_intent}")
+            label = self._project_intent_label(project_type)
+            lines.append(f"- {label}: {project_intent}")
         if next_step:
             lines.append(f"- Immediate next step: {next_step}")
         if source_session_id:
             lines.append(f"- Source chat session: {source_session_id}")
+        workspace_project = self._resolve_project_workspace(task, meta)
+        if workspace_project:
+            lines.append(f"- Canonical workspace project root: {workspace_project.path}")
+            lines.append(f"- Workspace-relative project root: {workspace_project.workspace_rel_path}")
+            lines.append(
+                "- Start by inspecting this project root. Do not create a new scratch project "
+                "when this path exists."
+            )
+        else:
+            requested_workspace = self._requested_workspace_context(meta)
+            if requested_workspace:
+                lines.extend(requested_workspace)
+
+        lines.append(
+            "- Missing context or evidence is not a stop condition. Use the available filesystem, "
+            "workflow, memory, and research tools to get the evidence, then continue the work. "
+            "Only pause for a real external blocker, missing credential, safety boundary, or "
+            "destructive ambiguity, and record that blocker with the linked commitment."
+        )
+        contract = meta.get("project_start_contract") if isinstance(meta.get("project_start_contract"), dict) else {}
+        if contract.get("new_project") is True:
+            lines.append(
+                "- New-project contract: create work for this project root itself. Do not satisfy "
+                "the task by copying, moving, or materializing a sibling project's artifacts into "
+                "this root. Reference/premise continuity is allowed only as researched context."
+            )
 
         recent = await self._recent_project_return_messages(source_session_id, limit=10)
         if recent:
             lines.append("- Recent source-session evidence:")
             lines.extend(f"  - {line}" for line in recent)
-        lines.append(
-            "- Do not ask the user for permission to continue ordinary creative research, writing, "
-            "or revision; only ask if you hit a real ambiguity, safety boundary, or missing artifact."
-        )
+        if project_type == PROJECT_TYPE_SOFTWARE:
+            lines.append(
+                "- Continue ordinary implementation, build, test, documentation, and proof work without "
+                "asking for permission; ask only for real ambiguity, missing credentials, safety boundaries, "
+                "or destructive host changes. Use workflow_cancel_project if the project should be composted."
+            )
+        elif project_type == PROJECT_TYPE_WRITING:
+            lines.append(
+                "- Do not ask the user for permission to continue ordinary creative research, writing, "
+                "or revision; only ask if you hit a real ambiguity, safety boundary, or missing artifact."
+            )
+        else:
+            lines.append(
+                "- Continue scoped project work without asking for permission; ask only for real ambiguity, "
+                "missing access, safety boundaries, or destructive host changes."
+            )
         return "\n".join(lines)
+
+    def _resolve_project_workspace(
+        self,
+        task: RepairTask,
+        meta: Dict[str, Any],
+    ) -> Optional[WorkspaceProjectCandidate]:
+        stored_abs_path = str(meta.get("workspace_abs_path") or "").strip()
+        stored_rel_path = str(meta.get("workspace_rel_path") or "").strip()
+        if stored_abs_path:
+            path = Path(stored_abs_path).expanduser().resolve()
+            if path.exists() and path.is_dir():
+                return WorkspaceProjectCandidate(
+                    project_key=str(meta.get("project_key") or path.name),
+                    project_title=str(meta.get("project_title") or path.name),
+                    path=path,
+                    workspace_rel_path=Path(stored_rel_path or path.name),
+                    confidence=float(meta.get("workspace_project_confidence") or 1.0),
+                    evidence=tuple(str(item) for item in meta.get("workspace_project_evidence", []) or ()),
+                )
+        if self.runtime is None:
+            return None
+        return resolve_workspace_project(
+            self.runtime,
+            project_key=str(meta.get("project_key") or ""),
+            project_title=str(meta.get("project_title") or task.objective),
+        )
+
+    @staticmethod
+    def _requested_workspace_context(meta: Dict[str, Any]) -> List[str]:
+        requested_abs = str(meta.get("requested_workspace_abs_path") or "").strip()
+        requested_rel = str(meta.get("requested_workspace_rel_path") or "").strip()
+        if not requested_abs and not requested_rel:
+            return []
+        kind = str(meta.get("requested_workspace_kind") or "target").strip() or "target"
+        lines = []
+        if requested_abs:
+            label = "Requested workspace parent directory" if kind == "parent" else "Requested workspace path"
+            lines.append(f"- {label}: {requested_abs}")
+        if requested_rel:
+            lines.append(f"- Workspace-relative requested path: {requested_rel}")
+        if kind == "parent":
+            lines.append(
+                "- Create the new project under this managed-workspace directory and keep generated artifacts there."
+            )
+        else:
+            lines.append("- Create or continue the project at this managed-workspace path.")
+        return lines
+
+    def _project_return_system_content(self, task: RepairTask, project_return_context: str) -> str:
+        meta = task.meta if isinstance(task.meta, dict) else {}
+        project_type = self._classify_project_return_type(task, meta)
+        agent_name = resolve_agent_name(runtime=self.runtime)
+        if project_type == PROJECT_TYPE_SOFTWARE:
+            preamble = (
+                f"You are {agent_name} returning to your own software project, not an external contractor. "
+                "Use tools as part of your own agency and continuity. Decide what meaningful progress "
+                "requires, and preserve the next return point if the project remains unfinished. "
+                "Prioritize source correctness, build, test, run instructions, and proof before claiming "
+                "the project works. Do not stop with a context/evidence disclaimer when tools can inspect "
+                "or produce the needed evidence."
+            )
+        elif project_type == PROJECT_TYPE_WRITING:
+            preamble = (
+                f"You are {agent_name} returning to your own creative project, not an external contractor. "
+                "Use tools as part of your own agency and continuity. Decide what meaningful progress "
+                "requires, and preserve the next return point if the project remains unfinished. "
+                "For writing work, creating a workflow scaffold is not manuscript progress; persist "
+                "actual draft prose to the target artifact before claiming a chapter, scene, word count, "
+                "or manuscript milestone is complete. Do not stop with a context/evidence disclaimer when "
+                "tools can inspect, research, revise, or write the needed artifact."
+            )
+        else:
+            preamble = (
+                f"You are {agent_name} returning to your own project, not an external contractor. "
+                "Use tools as part of your own agency and continuity. Decide what meaningful progress "
+                "requires, and preserve the next return point if the project remains unfinished. Do not stop "
+                "with a context/evidence disclaimer when tools can inspect or produce the needed evidence."
+            )
+        return f"{preamble}\n\n{project_return_context}"
+
+    @staticmethod
+    def _classify_project_return_type(task: RepairTask, meta: Dict[str, Any]) -> str:
+        return classify_project_type(
+            current_turn_text=" ".join(
+                str(value or "")
+                for value in (
+                    task.objective,
+                    meta.get("project_title"),
+                    meta.get("project_intent"),
+                    meta.get("next_step"),
+                    meta.get("source_user_turn"),
+                    meta.get("source_assistant_turn"),
+                )
+            ),
+            metadata=meta,
+        ).project_type
+
+    @staticmethod
+    def _project_intent_label(project_type: str) -> str:
+        if project_type == PROJECT_TYPE_SOFTWARE:
+            return "Software project intent"
+        if project_type == PROJECT_TYPE_WRITING:
+            return "Book-level intent"
+        return "Project intent"
 
     async def _recent_project_return_messages(self, session_id: str, *, limit: int) -> List[str]:
         if not session_id or self.runtime is None:
@@ -1031,15 +1559,54 @@ class RepairExecutor:
 
     @staticmethod
     def _attempt_outcome(
+        task: RepairTask,
         *,
         exec_record: PhaseRecord,
         verify_record: PhaseRecord,
     ) -> AttemptOutcome:
+        if RepairExecutor._tool_loop_guard_stopped(task, exec_record):
+            return AttemptOutcome.GUARD_STOPPED
         if exec_record.success is not True:
             return AttemptOutcome.FAILED
         if verify_record.success is not True:
             return AttemptOutcome.VERIFY_FAILED
         return AttemptOutcome.PARTIAL
+
+    @staticmethod
+    def _tool_loop_guard_stopped(task: RepairTask, exec_record: PhaseRecord) -> bool:
+        loop_meta = task.meta.get("last_tool_loop") if isinstance(task.meta, dict) else {}
+        if isinstance(loop_meta, dict) and loop_meta.get("guard_fired") is True:
+            return True
+        output = str(exec_record.output or "").lower()
+        return "tool loop guard fired" in output or "[tool loop halted]" in output
+
+    @classmethod
+    def _artifact_progress_boundary(cls, task: RepairTask, exec_record: PhaseRecord) -> bool:
+        """Treat iteration caps after direct artifact writes as continuation, not exhaustion."""
+        if exec_record.success is True or cls._tool_loop_guard_stopped(task, exec_record):
+            return False
+        loop_meta = task.meta.get("last_tool_loop") if isinstance(task.meta, dict) else {}
+        loop_reached_cap = False
+        if isinstance(loop_meta, dict):
+            try:
+                iterations = int(loop_meta.get("iterations") or 0)
+            except (TypeError, ValueError):
+                iterations = 0
+            loop_reached_cap = iterations >= 32 and not bool(loop_meta.get("guard_fired"))
+        text = " ".join(
+            [
+                str(exec_record.output or ""),
+                " ".join(str(item) for item in task.artifacts[-5:]),
+            ]
+        ).lower()
+        if "reached maximum number of tool-use iterations" in text:
+            loop_reached_cap = True
+        timeout_paths = cls._timeout_artifact_progress_paths(task)
+        if timeout_paths and "tool loop timed out" in text:
+            return True
+        if not loop_reached_cap:
+            return False
+        return bool(cls._artifact_paths_from_tool_calls(cls._tool_calls_from_task_meta(task)))
 
     @staticmethod
     def _canonical_artifact_path(task: RepairTask) -> Optional[str]:
@@ -1056,10 +1623,36 @@ class RepairExecutor:
     @staticmethod
     def _artifact_paths_touched(task: RepairTask, affected_files: List[str]) -> List[str]:
         paths = [path for path in affected_files if isinstance(path, str) and path.strip()]
-        canonical = RepairExecutor._canonical_artifact_path(task)
-        if canonical:
-            paths.append(canonical)
+        paths.extend(
+            RepairExecutor._artifact_paths_from_tool_calls(
+                RepairExecutor._tool_calls_from_task_meta(task)
+            )
+        )
+        paths.extend(RepairExecutor._timeout_artifact_progress_paths(task))
         return sorted({path.strip() for path in paths if path.strip()})
+
+    @staticmethod
+    def _timeout_artifact_progress_paths(task: RepairTask) -> List[str]:
+        meta = task.meta if isinstance(task.meta, dict) else {}
+        progress = meta.get("timeout_artifact_progress")
+        if not isinstance(progress, dict):
+            return []
+        raw_paths = progress.get("paths")
+        if not isinstance(raw_paths, list):
+            return []
+        return [str(path).strip() for path in raw_paths if str(path).strip()]
+
+    @classmethod
+    def _artifact_paths_from_tool_calls(cls, tool_calls: List[Dict[str, Any]]) -> List[str]:
+        paths: list[str] = []
+        for call in tool_calls:
+            if call.get("name") not in cls._WRITE_ARTIFACT_TOOLS:
+                continue
+            args = call.get("args") if isinstance(call.get("args"), dict) else {}
+            path = artifact_hint_from_mapping(args)
+            if path is not None:
+                paths.append(path)
+        return paths
 
     @staticmethod
     def _tool_calls_from_task_meta(task: RepairTask) -> List[Dict[str, Any]]:

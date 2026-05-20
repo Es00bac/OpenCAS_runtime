@@ -11,6 +11,7 @@ from opencas.autonomy import WorkObject, WorkStage
 from opencas.autonomy.project_orchestrator import ProjectOrchestrator
 from opencas.autonomy.work_store import WorkStore
 from opencas.execution import BoundedAssistantAgent, RepairTask
+from opencas.identity.agent_name import resolve_agent_name
 from opencas.telemetry import EventKind, Tracer
 
 from .models import (
@@ -46,6 +47,7 @@ class AgenticHarness:
         project_orchestrator: Optional[ProjectOrchestrator] = None,
         project_resume_resolver: Optional[Any] = None,
         shadow_registry: Optional[Any] = None,
+        identity: Optional[Any] = None,
     ) -> None:
         self.store = store
         self.llm = llm
@@ -55,6 +57,7 @@ class AgenticHarness:
         self.project_orchestrator = project_orchestrator
         self.project_resume_resolver = project_resume_resolver
         self.shadow_registry = shadow_registry
+        self.identity = identity
 
     async def create_notebook(
         self,
@@ -413,7 +416,7 @@ class AgenticHarness:
         if loop.completion_criteria:
             context_lines.append(
                 "Completion criteria already known: " + "; ".join(loop.completion_criteria)
-            )
+        )
         prompt = (
             "Draft your own outcome contract for this objective. "
             "Do not choose from a canned contract list; infer what would count as done "
@@ -423,12 +426,13 @@ class AgenticHarness:
             + "\n".join(context_lines)
         )
         try:
+            agent_name = resolve_agent_name(identity=self.identity)
             response = await self.llm.chat_completion(
                 [
                     {
                         "role": "system",
                         "content": (
-                            "You are Bulma drafting an outcome contract for your own "
+                            f"You are {agent_name} drafting an outcome contract for your own "
                             "autonomous work before execution begins."
                         ),
                     },

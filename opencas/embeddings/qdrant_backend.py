@@ -129,6 +129,7 @@ class QdrantVectorBackend:
         limit: int = 10,
         model_id: Optional[str] = None,
         project_id: Optional[str] = None,
+        task_type: Optional[str] = None,
         with_scores: bool = False,
     ) -> List[str] | List[Tuple[str, float]]:
         """Return ordered list of source_hash hits from Qdrant.
@@ -153,6 +154,13 @@ class QdrantVectorBackend:
                     FieldCondition(
                         key="project_id",
                         match=MatchValue(value=project_id),
+                    )
+                )
+            if task_type:
+                conditions.append(
+                    FieldCondition(
+                        key="task_type",
+                        match=MatchValue(value=task_type),
                     )
                 )
             query_filter = Filter(must=conditions) if conditions else None

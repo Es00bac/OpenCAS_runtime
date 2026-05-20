@@ -2,6 +2,7 @@
 
 from typing import Optional
 
+from opencas.autonomy.authorization import authorization_scope_for_conversation
 from opencas.autonomy.models import ApprovalLevel
 from opencas.autonomy.self_approval import SelfApprovalLadder
 from opencas.infra.hook_bus import HookBus
@@ -51,12 +52,16 @@ class ConversationalRefusalGate:
         if hook_refusal is not None:
             return hook_refusal
 
-        violations = await self.values_engine.check_alignment_semantic(
-            request.text,
-            llm,
-            session_id=request.session_id,
-            capability_context=capability_context,
-        )
+        if bool((request.meta or {}).get("audit_only")):
+            violations = []
+        else:
+            violations = await self.values_engine.check_alignment_semantic(
+                request.text,
+                llm,
+                session_id=request.session_id,
+                capability_context=capability_context,
+                request_meta=request.meta,
+            )
         if violations:
             worst = max(violations, key=lambda v: v.weight)
             return RefusalDecision(
@@ -116,7 +121,14 @@ class ConversationalRefusalGate:
         self,
         request: ConversationalRequest,
     ) -> RefusalDecision | None:
-        approval = self.approval.evaluate_conversational(request.text)
+        authorization_pass = self._evaluate_conversational_authorization(request)
+        if authorization_pass is not None:
+            return authorization_pass
+
+        approval = self.approval.evaluate_conversational(
+            request.text,
+            session_id=request.session_id,
+        )
         if approval.level == ApprovalLevel.MUST_ESCALATE:
             return RefusalDecision(
                 request_id=request.request_id,
@@ -132,3 +144,31 @@ class ConversationalRefusalGate:
                 ],
             )
         return None
+
+    def _evaluate_conversational_authorization(
+        self,
+        request: ConversationalRequest,
+    ) -> RefusalDecision | None:
+        store = getattr(self.approval, "authorization_store", None)
+        if store is None:
+            return None
+        scope = authorization_scope_for_conversation(request.text)
+        if scope is None:
+            return None
+        action_class, target_scope = scope
+        authorization = store.find_valid(
+            action_class,
+            target_scope,
+            session_id=request.session_id,
+        )
+        if authorization is None:
+            return None
+        return RefusalDecision(
+            request_id=request.request_id,
+            refused=False,
+            reasoning=(
+                f"standing_authorization:{action_class}:{target_scope}; "
+                f"authorization_id={authorization.authorization_id}; "
+                f"evidence={authorization.evidence_episode_id or 'none'}"
+            ),
+        )

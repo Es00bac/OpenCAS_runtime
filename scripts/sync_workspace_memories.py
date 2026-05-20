@@ -30,14 +30,23 @@ async def main():
 
     workspace_root = config.agent_workspace_root()
 
-    # Sync the workspace-local Chronicles directory.
-    chronicles_dir = workspace_root / "Chronicles"
-    if chronicles_dir.exists():
-        print(f"Syncing {chronicles_dir} ...")
-        result = await bridge.sync_directory(chronicles_dir)
-        print(f"Chronicles sync result: {result}")
-    else:
-        print(f"Chronicles directory not found: {chronicles_dir}")
+    # Reflective context (self notes, prototypes, research, daydream digests, refusal
+    # reflections) only becomes searchable when ingested through the bridge.
+    # Without these sweeps, retrieval cannot surface Bulma's own reflections during
+    # later work — which was the regression that motivated this script's expansion.
+    sync_dirs = [
+        workspace_root / "Chronicles",
+        workspace_root / "self",
+        workspace_root / "reflections",
+        workspace_root / "daydream-lab",
+    ]
+    for target in sync_dirs:
+        if not target.exists():
+            print(f"Missing directory (skipped): {target}")
+            continue
+        print(f"Syncing {target} ...")
+        result = await bridge.sync_directory(target)
+        print(f"  result: {result}")
 
     # Also sync top-level markdown files in the managed workspace.
     md_files = [p for p in workspace_root.glob("*.md") if p.is_file()]

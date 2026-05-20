@@ -12,7 +12,7 @@ from opencas.bootstrap.responsibility import (
     BOOTSTRAP_RESPONSIBILITY_WARNING,
     load_bootstrap_responsibility_ack,
 )
-from opencas.model_routing import PersistedModelRoutingState, ModelRoutingConfig, save_persisted_model_routing_state
+from opencas.model_routing import PersistedModelRoutingState, ModelRoutingConfig, ReasoningEffort, save_persisted_model_routing_state
 
 
 def test_embeddinggemma_request_dimension_is_pinned() -> None:
@@ -86,7 +86,7 @@ async def test_bootstrap_pipeline(tmp_path: Path) -> None:
     assert ctx.llm is not None
     assert ctx.llm.default_model == config.default_llm_model
     assert ctx.embeddings.model_id == "google/embeddinggemma-300m"
-    assert ctx.embeddings._embed_batch_fn is None
+    assert ctx.embeddings._embed_batch_fn is not None
     assert ctx.embeddings.expected_dimension == 768
 
     # Verify telemetry recorded bootstrap stages
@@ -113,6 +113,44 @@ async def test_bootstrap_context_close_cancels_background_tasks(tmp_path: Path) 
 
     assert all(task.done() for task in ctx.background_tasks)
     assert ctx.workspace_index._scan_task is None
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_failure_closes_resources_opened_before_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def _fail_services(*_args, **_kwargs):
+        raise RuntimeError("service bootstrap failed")
+
+    monkeypatch.setattr(
+        "opencas.bootstrap.pipeline.initialize_runtime_services",
+        _fail_services,
+    )
+    pipeline = BootstrapPipeline(BootstrapConfig(state_dir=tmp_path))
+
+    try:
+        with pytest.raises(RuntimeError, match="service bootstrap failed"):
+            await pipeline.run()
+
+        assert pipeline._memory is not None
+        assert pipeline._tasks is not None
+        assert pipeline._embeddings is not None
+        assert pipeline._somatic is not None
+        assert pipeline._memory._db is None
+        assert pipeline._tasks._db is None
+        assert pipeline._embeddings.cache._db is None
+        assert pipeline._somatic.store is not None
+        assert pipeline._somatic.store._db is None
+    finally:
+        if pipeline._memory is not None:
+            await pipeline._memory.close()
+        if pipeline._tasks is not None:
+            await pipeline._tasks.close()
+        if pipeline._embeddings is not None:
+            await pipeline._embeddings.cache.close()
+        if pipeline._somatic is not None and pipeline._somatic.store is not None:
+            await pipeline._somatic.store.close()
 
 
 @pytest.mark.asyncio
@@ -359,6 +397,82 @@ def test_build_bootstrap_config_loads_persisted_model_routing(tmp_path: Path) ->
     assert config.baa_heartbeat_interval == 120
 
 
+def test_model_routing_sanitizer_prefers_single_route_over_stale_default() -> None:
+    from opencas.model_routing import sanitize_model_routing_state
+
+    sanitized = sanitize_model_routing_state(
+        "kimi-coding/k2p6",
+        ModelRoutingConfig(
+            mode="single",
+            single_model="openai/gpt-5.5",
+            standard_model="openai/gpt-5.5",
+            high_model="openai/gpt-5.5",
+            extra_high_model="openai/gpt-5.5",
+        ),
+        ["kimi-coding/k2p6", "codex-cli/gpt-5.5", "openai/gpt-5.5"],
+    )
+
+    assert sanitized.default_llm_model == "openai/gpt-5.5"
+    assert sanitized.model_routing.single_model == "openai/gpt-5.5"
+    assert sanitized.model_routing.standard_model == "openai/gpt-5.5"
+
+
+def test_model_routing_sanitizer_heals_legacy_single_mode_light_high_effort() -> None:
+    from opencas.model_routing import sanitize_model_routing_state
+
+    sanitized = sanitize_model_routing_state(
+        "openai/gpt-5.5",
+        ModelRoutingConfig(
+            mode="single",
+            single_model="openai/gpt-5.5",
+            light_model="openai/gpt-5.5",
+            standard_model="openai/gpt-5.5",
+            high_model="openai/gpt-5.5",
+            extra_high_model="openai/gpt-5.5",
+            single_reasoning_effort=ReasoningEffort.HIGH,
+            light_reasoning_effort=ReasoningEffort.HIGH,
+            standard_reasoning_effort=ReasoningEffort.HIGH,
+            high_reasoning_effort=ReasoningEffort.HIGH,
+            extra_high_reasoning_effort=ReasoningEffort.HIGH,
+        ),
+        ["openai/gpt-5.5"],
+    )
+
+    assert sanitized.model_routing.light_reasoning_effort == ReasoningEffort.LOW
+    assert sanitized.model_routing.standard_reasoning_effort == ReasoningEffort.HIGH
+
+
+def test_materialized_model_refs_include_active_builtin_cli_provider(tmp_path: Path) -> None:
+    from open_llm_auth.config import load_config
+    from opencas.__main__ import _ordered_materialized_model_refs
+
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "defaultModel": "kimi-coding/k2p6",
+                "providers": {},
+                "authProfiles": {
+                    "kimi-coding:default": {
+                        "provider": "kimi-coding",
+                        "type": "api_key",
+                        "key": "test",
+                    }
+                },
+                "authOrder": {"kimi-coding": ["kimi-coding:default"]},
+                "activeProviderIds": ["codex-cli", "kimi-coding"],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    refs = _ordered_materialized_model_refs(load_config(config_path=config_path))
+
+    assert "codex-cli/gpt-5.5" in refs
+    assert "openai/gpt-5.5" in refs
+    assert "kimi-coding/k2p6" in refs
+
+
 def test_build_bootstrap_config_heals_stale_persisted_model_routing(tmp_path: Path) -> None:
     state_dir = tmp_path / "state"
     provider_material = state_dir / "provider_material"
@@ -554,7 +668,8 @@ def test_cli_bootstrap_config_preserves_default_embedding_model_when_flag_omitte
     config = _build_bootstrap_config(args, persisted_telegram)
 
     assert config.default_llm_model is None
-    assert config.embedding_model_id == "google/embeddinggemma-300m"
+    assert config.embedding_model_id is None
+    assert pipeline_support.resolve_embedding_model(config, None) == "google/embeddinggemma-300m"
 
 
 def test_cli_bootstrap_config_accepts_qdrant_backend_flags(tmp_path: Path) -> None:
@@ -642,7 +757,8 @@ def test_cli_bootstrap_config_prefers_materialized_bundle_default_model(tmp_path
     config = _build_bootstrap_config(args, persisted_telegram)
 
     assert config.default_llm_model == "kimi-coding/k2p5"
-    assert config.embedding_model_id == "google/embeddinggemma-300m"
+    assert config.embedding_model_id is None
+    assert pipeline_support.resolve_embedding_model(config, None) == "google/embeddinggemma-300m"
 
 
 def test_pipeline_defaults_to_local_gemma_embedding_model(tmp_path: Path) -> None:

@@ -96,6 +96,35 @@ def test_workspace_rebuild_prioritizes_user_facing_commitment_linked_work() -> N
     assert linked_item.meta["user_facing_commitment"] is True
 
 
+def test_workspace_treats_workflow_commitments_as_user_facing_without_project_bias() -> None:
+    income = Commitment(
+        content="Support practical income experiments",
+        priority=8.0,
+        tags=["income", "follow_through"],
+        meta={"source": "workflow_create_commitment"},
+    )
+    audiobook = Commitment(
+        content="Create an audiobook from the active manuscript",
+        priority=8.0,
+        tags=["writing", "audiobook"],
+        meta={"source": "workflow_create_commitment", "project_type": "writing"},
+    )
+
+    workspace = ExecutiveWorkspace.rebuild(
+        commitments=[income, audiobook],
+        work_objects=[],
+    )
+
+    assert workspace.active_commitment_count == 2
+    assert workspace.user_facing_commitment_count == 2
+    assert workspace.commitment_pressure > 0
+    assert all(item.affinity == WorkspaceAffinity.OPERATOR for item in workspace.queue)
+    assert {item.content for item in workspace.queue} == {
+        "Support practical income experiments",
+        "Create an audiobook from the active manuscript",
+    }
+
+
 @pytest.mark.asyncio
 async def test_workspace_rebuild_keeps_deferred_user_facing_commitment_visible(identity: IdentityManager) -> None:
     deferred = Commitment(
@@ -107,6 +136,12 @@ async def test_workspace_rebuild_keeps_deferred_user_facing_commitment_visible(i
             "blocked_reason": "executive_fatigue",
             "resume_policy": "auto_on_executive_recovery",
         },
+    )
+    deferred_without_policy = Commitment(
+        content="Return after operator rest without explicit policy",
+        status=CommitmentStatus.BLOCKED,
+        priority=7.7,
+        meta={"source": "assistant_response", "blocked_reason": "executive_operator_rest"},
     )
     background_work = WorkObject(
         content="low-value novelty work",
@@ -132,7 +167,7 @@ async def test_workspace_rebuild_keeps_deferred_user_facing_commitment_visible(i
     )
 
     workspace = ExecutiveWorkspace.rebuild(
-        commitments=[deferred],
+        commitments=[deferred, deferred_without_policy],
         work_objects=[background_work],
         somatic_modulators=SomaticModulators(SomaticState(fatigue=0.86, tension=0.7, certainty=0.45)),
         relational=rel,
@@ -140,11 +175,18 @@ async def test_workspace_rebuild_keeps_deferred_user_facing_commitment_visible(i
     )
 
     deferred_item = next(item for item in workspace.queue if item.content == "Return to the scheduler resume path")
+    legacy_deferred_item = next(
+        item
+        for item in workspace.queue
+        if item.content == "Return after operator rest without explicit policy"
+    )
     background_item = next(item for item in workspace.queue if item.content == "low-value novelty work")
     assert deferred_item.total_score > background_item.total_score
     assert deferred_item.execution_mode == ExecutionMode.RESPOND_INLINE
     assert deferred_item.meta["deferred_user_facing_commitment"] is True
     assert deferred_item.meta["needs_acknowledgement"] is True
+    assert legacy_deferred_item.meta["deferred_user_facing_commitment"] is True
+    assert legacy_deferred_item.meta["needs_acknowledgement"] is True
 
 
 def test_intervention_surface_clarification(executive: ExecutiveState) -> None:

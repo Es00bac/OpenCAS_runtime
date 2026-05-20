@@ -8,10 +8,8 @@ from opencas.diagnostics import Doctor
 from opencas.embeddings import EmbeddingService
 from opencas.embeddings.backfill import EmbeddingBackfill
 from opencas.embeddings.service import EmbeddingCache
-from opencas.identity import IdentityManager, IdentityStore
 from opencas.memory import Episode, EpisodeKind, Memory
-from opencas.somatic import SomaticManager
-from opencas.telemetry import EventKind, TelemetryStore, Tracer
+from opencas.telemetry import EventKind
 
 
 @pytest.mark.asyncio
@@ -29,7 +27,7 @@ async def test_full_boot_cycle(tmp_path: Path) -> None:
     # LLM gateway is wired
     models = ctx.llm.list_available_models()
     assert len(models) > 0
-    assert any("claude" in m for m in models)
+    assert all("/" in m for m in models)
 
     # Memory round-trip
     ep = Episode(kind=EpisodeKind.TURN, session_id="integration-1", content="Hello")

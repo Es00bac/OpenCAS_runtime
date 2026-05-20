@@ -52,13 +52,13 @@ def test_shadow_registry_summary_and_planning_context(tmp_path: Path) -> None:
     first = registry.capture(
         tool_name="repair_retry",
         parameters={
-            "objective": "Continue Chronicle 4246 from the existing manuscript.",
-            "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+            "objective": "Continue writing project 4246 from the existing manuscript.",
+            "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             "attempt": 2,
         },
         reason=BlockReason.RETRY_BLOCKED,
         context="RetryGovernor blocked a broad retry with no new evidence.",
-        artifact="workspace/Chronicles/4246/chronicle_4246.md",
+        artifact="workspace/writing/4246/story_4246.md",
         target_kind="repair_task",
         target_id="task-4246",
         capture_source="repair_executor",
@@ -66,13 +66,13 @@ def test_shadow_registry_summary_and_planning_context(tmp_path: Path) -> None:
     second = registry.capture(
         tool_name="repair_retry",
         parameters={
-            "objective": "Continue Chronicle 4246 from the existing manuscript.",
-            "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+            "objective": "Continue writing project 4246 from the existing manuscript.",
+            "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             "attempt": 3,
         },
         reason=BlockReason.RETRY_BLOCKED,
         context="RetryGovernor blocked a broad retry with no new evidence.",
-        artifact="workspace/Chronicles/4246/chronicle_4246.md",
+        artifact="workspace/writing/4246/story_4246.md",
         target_kind="repair_task",
         target_id="task-4246",
         capture_source="repair_executor",
@@ -95,15 +95,15 @@ def test_shadow_registry_summary_and_planning_context(tmp_path: Path) -> None:
     assert summary["top_clusters"][0]["count"] == 2
 
     planning = registry.build_planning_context(
-        objective="Continue Chronicle 4246 from the existing manuscript.",
-        artifact="workspace/Chronicles/4246/chronicle_4246.md",
+        objective="Continue writing project 4246 from the existing manuscript.",
+        artifact="workspace/writing/4246/story_4246.md",
     )
     assert planning["available"] is True
     assert planning["clusters"][0]["count"] == 2
     assert "deterministic review" in planning["prompt_block"].lower()
     assert "narrow edit" in planning["prompt_block"].lower()
     assert "previously blocked framings to avoid repeating" in planning["prompt_block"].lower()
-    assert "continue chronicle 4246 from the existing manuscript." in planning["prompt_block"].lower()
+    assert "continue creative_writing 4246 from the existing manuscript." in planning["prompt_block"].lower()
     assert "blocker handling rule" in planning["prompt_block"].lower()
 
 
@@ -111,16 +111,16 @@ def test_shadow_registry_cluster_triage_persists_and_filters_summary(tmp_path: P
     store = ShadowRegistryStore(tmp_path / "shadow_registry")
     registry = ShadowRegistry(store=store)
 
-    chronicle = registry.capture(
+    creative_writing = registry.capture(
         tool_name="repair_retry",
         parameters={
-            "objective": "Continue Chronicle 4246 from the existing manuscript.",
-            "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+            "objective": "Continue writing project 4246 from the existing manuscript.",
+            "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             "attempt": 2,
         },
         reason=BlockReason.RETRY_BLOCKED,
         context="RetryGovernor blocked a broad retry with no new evidence.",
-        artifact="workspace/Chronicles/4246/chronicle_4246.md",
+        artifact="workspace/writing/4246/story_4246.md",
         target_kind="repair_task",
         target_id="task-4246",
         capture_source="repair_executor",
@@ -128,13 +128,13 @@ def test_shadow_registry_cluster_triage_persists_and_filters_summary(tmp_path: P
     registry.capture(
         tool_name="repair_retry",
         parameters={
-            "objective": "Continue Chronicle 4246 from the existing manuscript.",
-            "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+            "objective": "Continue writing project 4246 from the existing manuscript.",
+            "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             "attempt": 3,
         },
         reason=BlockReason.RETRY_BLOCKED,
         context="RetryGovernor blocked another broad retry with no new evidence.",
-        artifact="workspace/Chronicles/4246/chronicle_4246.md",
+        artifact="workspace/writing/4246/story_4246.md",
         target_kind="repair_task",
         target_id="task-4246",
         capture_source="repair_executor",
@@ -149,13 +149,13 @@ def test_shadow_registry_cluster_triage_persists_and_filters_summary(tmp_path: P
     )
 
     triaged = registry.triage_cluster(
-        chronicle.fingerprint,
-        annotation="Known Chronicle retry loop; handled manually.",
+        creative_writing.fingerprint,
+        annotation="Known Writing Project retry loop; handled manually.",
         dismissed=True,
     )
     assert triaged["available"] is True
     assert triaged["triage_status"] == "dismissed"
-    assert triaged["annotation"] == "Known Chronicle retry loop; handled manually."
+    assert triaged["annotation"] == "Known Writing Project retry loop; handled manually."
 
     summary = registry.summary(limit=5, cluster_limit=5)
     assert summary["dismissed_clusters"] == 1
@@ -163,17 +163,17 @@ def test_shadow_registry_cluster_triage_persists_and_filters_summary(tmp_path: P
     assert summary["top_clusters"][0]["fingerprint"] == safety.fingerprint
     assert summary["top_clusters"][0]["triage_status"] == "active"
 
-    detail = registry.inspect_cluster(chronicle.fingerprint)
-    assert detail["annotation"] == "Known Chronicle retry loop; handled manually."
+    detail = registry.inspect_cluster(creative_writing.fingerprint)
+    assert detail["annotation"] == "Known Writing Project retry loop; handled manually."
     assert detail["triage_status"] == "dismissed"
 
     planning = registry.build_planning_context(
-        objective="Continue Chronicle 4246 from the existing manuscript.",
-        artifact="workspace/Chronicles/4246/chronicle_4246.md",
+        objective="Continue writing project 4246 from the existing manuscript.",
+        artifact="workspace/writing/4246/story_4246.md",
     )
     assert planning["available"] is False
 
     reloaded = ShadowRegistry(store=ShadowRegistryStore(tmp_path / "shadow_registry"))
-    reloaded_detail = reloaded.inspect_cluster(chronicle.fingerprint)
-    assert reloaded_detail["annotation"] == "Known Chronicle retry loop; handled manually."
+    reloaded_detail = reloaded.inspect_cluster(creative_writing.fingerprint)
+    assert reloaded_detail["annotation"] == "Known Writing Project retry loop; handled manually."
     assert reloaded_detail["triage_status"] == "dismissed"

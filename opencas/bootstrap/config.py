@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from opencas.generation.policy import GenerationPolicyConfig
 from opencas.model_routing import ModelRoutingConfig
 from opencas.sandbox import SandboxConfig
 
@@ -36,8 +37,8 @@ class BootstrapConfig(BaseModel):
     workspace_roots: List[Path] = Field(default_factory=list)
     managed_workspace_root: Optional[Path] = None
 
-    # Embedding model override
-    embedding_model_id: Optional[str] = "google/embeddinggemma-300m"
+    # Embedding model override (None = use OpenLLMAuth embedding default)
+    embedding_model_id: Optional[str] = None
 
     # Optional Qdrant vector backend
     qdrant_url: Optional[str] = None
@@ -71,6 +72,7 @@ class BootstrapConfig(BaseModel):
     # LLM gateway default model (None = use open_llm_auth configured default)
     default_llm_model: Optional[str] = None
     model_routing: ModelRoutingConfig = Field(default_factory=ModelRoutingConfig)
+    generation_policy: GenerationPolicyConfig = Field(default_factory=GenerationPolicyConfig)
 
     # Per-project OpenLLMAuth configuration
     provider_config_path: Optional[Path] = None
@@ -92,8 +94,8 @@ class BootstrapConfig(BaseModel):
     # Sandbox configuration
     sandbox: Optional[SandboxConfig] = None
 
-    # Approval routing mode: "default" or "auto_review".
-    approval_mode: str = "default"
+    # Approval routing mode: default, auto_review, fully_autonomous, or trust_based.
+    approval_mode: str = "auto_review"
 
     # First-boot identity seeding
     clean_boot: bool = False
@@ -104,9 +106,12 @@ class BootstrapConfig(BaseModel):
     @field_validator("approval_mode", mode="before")
     @classmethod
     def _normalize_approval_mode(cls, value: Any) -> str:
-        cleaned = str(value or "default").strip().lower().replace("-", "_")
-        if cleaned not in {"default", "auto_review"}:
-            raise ValueError("approval_mode must be 'default' or 'auto_review'")
+        cleaned = str(value or "auto_review").strip().lower().replace("-", "_")
+        if cleaned == "yolo":
+            cleaned = "fully_autonomous"
+        valid = {"default", "auto_review", "fully_autonomous", "trust_based"}
+        if cleaned not in valid:
+            raise ValueError(f"approval_mode must be one of {sorted(valid)} (or 'yolo' alias)")
         return cleaned
 
     def resolve_paths(self) -> "BootstrapConfig":

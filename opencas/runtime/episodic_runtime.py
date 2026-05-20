@@ -18,6 +18,7 @@ from opencas.autonomy.commitment_extraction import (
     extract_self_commitments,
 )
 from opencas.memory import EdgeKind, Episode, EpisodeEdge, EpisodeKind
+from opencas.proof_chain import attach_operator_promise_claim
 from opencas.somatic import AppraisalEventType
 from opencas.somatic.models import AffectState
 from opencas.tom import BeliefSubject
@@ -27,6 +28,7 @@ from .continuity_breadcrumbs import (
     is_recoverable_burst_breadcrumb,
     recover_burst_continuity_context,
 )
+from .commitment_followthrough import seed_commitment_cognitive_followthrough
 
 if TYPE_CHECKING:
     from .agent_loop import AgentRuntime
@@ -89,9 +91,13 @@ def extract_runtime_goal_directives(text: str) -> tuple[List[str], Optional[str]
     return goals, intention, drops
 
 
-def extract_runtime_self_commitments(text: str) -> List[SelfCommitmentCandidate]:
+def extract_runtime_self_commitments(
+    text: str,
+    *,
+    user_input: str | None = None,
+) -> List[SelfCommitmentCandidate]:
     """Extract normalized future-action self-commitments from assistant text."""
-    return extract_self_commitments(text)
+    return extract_self_commitments(text, user_context=user_input)
 
 
 async def _recover_latest_burst_breadcrumb(
@@ -141,9 +147,11 @@ async def capture_runtime_self_commitments(
     runtime: "AgentRuntime",
     content: str,
     session_id: str,
+    *,
+    user_input: str | None = None,
 ) -> List[Commitment]:
     """Persist normalized self-commitments and mirror them into ToM/somatic state."""
-    captures = extract_runtime_self_commitments(content)
+    captures = extract_runtime_self_commitments(content, user_input=user_input)
     if not captures:
         return []
 
@@ -152,11 +160,15 @@ async def capture_runtime_self_commitments(
     commitments: List[Commitment] = []
 
     for capture in captures:
+        capability_audit = _build_commitment_capability_audit(runtime, capture)
+        commitment_status = status
+        if capability_audit.get("status") == "missing_required_tools":
+            commitment_status = CommitmentStatus.BLOCKED
         commitment: Optional[Commitment] = None
         if runtime.commitment_store:
             commitment = Commitment(
                 content=capture.content[:220],
-                status=status,
+                status=commitment_status,
                 tags=["self_commitment", "conversation"],
                 meta={
                     "source": "assistant_response",
@@ -166,21 +178,53 @@ async def capture_runtime_self_commitments(
                     "source_sentence": capture.source_sentence,
                     "normalization_source": capture.normalization_source,
                     "capture_confidence": capture.confidence,
+                    "capability_audit": capability_audit,
                     **(
                         {"blocked_reason": f"executive_{pause_reason}"}
                         if pause_reason
+                        else {}
+                    ),
+                    **(
+                        {"source_user_request": user_input}
+                        if user_input
+                        else {}
+                    ),
+                    **(
+                        {"blocked_reason": "missing_required_tools"}
+                        if commitment_status == CommitmentStatus.BLOCKED and not pause_reason
                         else {}
                     ),
                 },
             )
             await runtime.commitment_store.save(commitment)
             commitments.append(commitment)
+            try:
+                proof_claim = await attach_operator_promise_claim(
+                    runtime,
+                    commitment,
+                    subject="self_commitment",
+                    source="assistant_response",
+                    evidence_summary="Self-commitment persisted from assistant response.",
+                    meta={"session_id": session_id},
+                )
+                if proof_claim is not None:
+                    await runtime.commitment_store.save(commitment)
+            except Exception as exc:
+                runtime._trace(
+                    "proof_chain_commitment_capture_failed",
+                    {
+                        "commitment_id": str(commitment.commitment_id),
+                        "error": str(exc),
+                    },
+                )
+            await seed_commitment_cognitive_followthrough(runtime, commitment)
             runtime._trace(
                 "self_commitment_captured",
                 {
                     "commitment_id": str(commitment.commitment_id),
-                    "status": status.value,
+                    "status": commitment_status.value,
                     "normalization_source": capture.normalization_source,
+                    "capability_audit_status": capability_audit.get("status"),
                 },
             )
 
@@ -212,6 +256,68 @@ async def capture_runtime_self_commitments(
     return commitments
 
 
+def _build_commitment_capability_audit(
+    runtime: "AgentRuntime",
+    capture: SelfCommitmentCandidate,
+) -> dict[str, Any]:
+    """Record the concrete capability surface behind an accepted commitment."""
+
+    tool_names: set[str] = set()
+    tools = getattr(runtime, "tools", None)
+    list_tools = getattr(tools, "list_tools", None)
+    if callable(list_tools):
+        try:
+            tool_names = {
+                str(getattr(entry, "name", "") or "").strip()
+                for entry in list_tools()
+                if str(getattr(entry, "name", "") or "").strip()
+            }
+        except Exception:
+            tool_names = set()
+
+    required = _required_tools_for_commitment(capture)
+    available = sorted(name for name in required if name in tool_names)
+    missing = sorted(name for name in required if name not in tool_names)
+    status = "supported" if not missing else "missing_required_tools"
+    if not tool_names:
+        status = "unknown_tool_inventory"
+    return {
+        "status": status,
+        "required_tools": sorted(required),
+        "available_tools": available,
+        "missing_tools": missing,
+        "tool_count": len(tool_names),
+        "can_extend_tools": "mcp_list_servers" in tool_names and "mcp_register_server_tools" in tool_names,
+    }
+
+
+def _required_tools_for_commitment(capture: SelfCommitmentCandidate) -> set[str]:
+    required = {"workflow_create_commitment", "workflow_list_commitments"}
+    if capture.normalization_source == "contextual_assistant_acceptance":
+        required.update(
+            {
+                "workflow_create_schedule",
+                "workflow_list_schedules",
+                "workflow_create_plan",
+                "workflow_list_plans",
+                "workflow_update_plan",
+                "cognitive_prospective_memory_set",
+                "cognitive_focus_set",
+                "cognitive_working_memory_update",
+                "cognitive_skill_library_search",
+                "cognitive_skill_create",
+                "web_search",
+                "web_fetch",
+                "browser_start",
+                "mcp_list_servers",
+                "mcp_register_server_tools",
+                "workflow_list_tasks",
+                "workflow_get_task",
+            }
+        )
+    return required
+
+
 async def record_runtime_episode(
     runtime: "AgentRuntime",
     content: str,
@@ -220,28 +326,52 @@ async def record_runtime_episode(
     session_id: Optional[str] = None,
     role: Optional[str] = None,
     affect: Optional[AffectState] = None,
+    payload: Optional[dict[str, Any]] = None,
+    salience: Optional[float] = None,
 ) -> Episode:
     """Persist one episode with current somatic/relational salience adjustments."""
+    episode_payload = dict(payload or {})
+    if role:
+        episode_payload["role"] = role
+    if "source_lane" not in episode_payload:
+        origin = " ".join(
+            str(episode_payload.get(key) or "").lower()
+            for key in ("origin", "source", "context_material", "proposal_kind")
+        )
+        if any(token in origin for token in ("daydream", "reflect", "proposal", "association")):
+            episode_payload["source_lane"] = "reflective"
+        elif kind in {EpisodeKind.COMPACTION, EpisodeKind.CONSOLIDATION, EpisodeKind.PROCEDURAL}:
+            episode_payload["source_lane"] = "reflective"
+        elif kind in {EpisodeKind.TURN, EpisodeKind.ACTION, EpisodeKind.OBSERVATION} or role:
+            episode_payload["source_lane"] = "executive"
+    if "context_authority" not in episode_payload and episode_payload.get("source_lane"):
+        episode_payload["context_authority"] = (
+            "interpretation"
+            if episode_payload.get("source_lane") == "reflective"
+            else "live_observation"
+        )
+    episode_payload.setdefault("context_material", f"episode_{kind.value}")
     episode = Episode(
         kind=kind,
         session_id=session_id or runtime.ctx.config.session_id,
         content=content,
         somatic_tag=runtime.ctx.somatic.state.somatic_tag,
         affect=affect,
-        payload={"role": role} if role else {},
+        payload=episode_payload,
     )
-    salience = 1.0
-    salience *= runtime.ctx.somatic.state.to_memory_salience_modifier()
-    if hasattr(runtime.ctx, "relational") and runtime.ctx.relational:
-        has_collab_tag = bool(
-            episode.affect
-            and episode.affect.primary_emotion.value
-            in {"joy", "anticipation", "trust", "excited"}
-        )
-        salience += runtime.ctx.relational.to_memory_salience_modifier(
-            has_user_collab_tag=has_collab_tag
-        )
-    episode.salience = round(max(0.0, min(10.0, salience)), 3)
+    resolved_salience = float(salience) if salience is not None else 1.0
+    if salience is None:
+        resolved_salience *= runtime.ctx.somatic.state.to_memory_salience_modifier()
+        if hasattr(runtime.ctx, "relational") and runtime.ctx.relational:
+            has_collab_tag = bool(
+                episode.affect
+                and episode.affect.primary_emotion.value
+                in {"joy", "anticipation", "trust", "excited"}
+            )
+            resolved_salience += runtime.ctx.relational.to_memory_salience_modifier(
+                has_user_collab_tag=has_collab_tag
+            )
+    episode.salience = round(max(0.0, min(10.0, resolved_salience)), 3)
     embeddings = getattr(runtime.ctx, "embeddings", None)
     if embeddings is not None and content:
         try:
@@ -266,6 +396,27 @@ async def record_runtime_episode(
                 },
             )
     await runtime.memory.save_episode(episode)
+    tracer = getattr(runtime, "tracer", None)
+    activate_memory_node = getattr(tracer, "activate_memory_node", None)
+    if callable(activate_memory_node):
+        try:
+            activate_memory_node(
+                node_id=f"episode:{episode.episode_id}",
+                source_type="episode",
+                source_id=str(episode.episode_id),
+                activation_source="memory_write",
+                query=f"write:{kind.value}",
+                session_id=episode.session_id,
+                content_preview=content[:180],
+                extra={
+                    "episode_kind": kind.value,
+                    "source_lane": episode_payload.get("source_lane"),
+                    "context_authority": episode_payload.get("context_authority"),
+                    "context_material": episode_payload.get("context_material"),
+                },
+            )
+        except Exception:
+            pass
 
     await link_runtime_episode_to_previous(runtime, episode)
     await runtime._maybe_record_somatic_snapshot(
@@ -346,20 +497,29 @@ async def run_runtime_continuity_check(runtime: "AgentRuntime") -> None:
     now = datetime.now(timezone.utc)
     sleep_hours = 0.0
     last_activity_desc = "unknown activity"
-    if continuity.last_shutdown_time is not None:
+    boot_offline_seconds = getattr(continuity, "last_offline_duration_seconds", None)
+    score_already_computed_at_boot = boot_offline_seconds is not None
+    if boot_offline_seconds is not None:
+        try:
+            sleep_hours = max(0.0, float(boot_offline_seconds) / 3600.0)
+        except (TypeError, ValueError):
+            sleep_hours = 0.0
+            score_already_computed_at_boot = False
+    elif continuity.last_shutdown_time is not None:
         delta = now - continuity.last_shutdown_time
         sleep_hours = max(0.0, delta.total_seconds() / 3600.0)
-    try:
-        recent_eps = await runtime.memory.list_episodes(compacted=False, limit=1)
-        if recent_eps:
-            recent_activity_at = recent_eps[0].created_at
-            if recent_activity_at.tzinfo is None:
-                recent_activity_at = recent_activity_at.replace(tzinfo=timezone.utc)
-            if continuity.last_shutdown_time is None or recent_activity_at > continuity.last_shutdown_time:
-                delta = now - recent_activity_at
-                sleep_hours = max(0.0, delta.total_seconds() / 3600.0)
-    except Exception:
-        pass
+    if not score_already_computed_at_boot:
+        try:
+            recent_eps = await runtime.memory.list_episodes(compacted=False, limit=1)
+            if recent_eps:
+                recent_activity_at = recent_eps[0].created_at
+                if recent_activity_at.tzinfo is None:
+                    recent_activity_at = recent_activity_at.replace(tzinfo=timezone.utc)
+                if continuity.last_shutdown_time is None or recent_activity_at > continuity.last_shutdown_time:
+                    delta = now - recent_activity_at
+                    sleep_hours = max(0.0, delta.total_seconds() / 3600.0)
+        except Exception:
+            pass
 
     recent_activity = identity.self_model.recent_activity
     if recent_activity:
@@ -370,7 +530,10 @@ async def run_runtime_continuity_check(runtime: "AgentRuntime") -> None:
         )
 
     pre_decay_score = continuity.continuous_present_score
-    new_score = identity.decay_continuous_present(sleep_hours)
+    if score_already_computed_at_boot:
+        new_score = continuity.continuous_present_score
+    else:
+        new_score = identity.decay_continuous_present(sleep_hours)
 
     if sleep_hours > 0.01:
         sleep_display = (
@@ -463,6 +626,30 @@ async def run_runtime_continuity_check(runtime: "AgentRuntime") -> None:
             )
 
         if new_score < 0.3:
+            try:
+                cognitive_store = getattr(runtime.ctx, "cognitive_state_store", None)
+                upsert_working_memory = getattr(cognitive_store, "upsert_working_memory", None)
+                if callable(upsert_working_memory):
+                    await upsert_working_memory(
+                        "discontinuity_anxiety",
+                        f"discontinuity_anxiety: true; score: {new_score:.2f}",
+                        priority=0.25,
+                        source="continuous_present",
+                        evidence_refs=[
+                            "identity.continuity.continuous_present_score",
+                            "identity.continuity.last_offline_duration_seconds",
+                        ],
+                        payload={
+                            "discontinuity_anxiety": True,
+                            "score": round(new_score, 4),
+                            "sleep_hours": round(sleep_hours, 4),
+                        },
+                    )
+            except Exception:
+                runtime._trace(
+                    "continuity_working_memory_signal_error",
+                    {"session_id": runtime.ctx.config.session_id},
+                )
             try:
                 await runtime.ctx.somatic.emit_appraisal_event(
                     AppraisalEventType.DISCONTINUITY_DETECTED,

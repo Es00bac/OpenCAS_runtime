@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+from opencas.context.models import MessageRole
+from opencas.memory import EpisodeKind
 from opencas.telegram_integration import TelegramBotService, TelegramPairingStore
 
 
@@ -82,12 +84,33 @@ class FakeRuntime:
                         "session_id": "default",
                     },
                 )()
+                ,
+                "identity": type(
+                    "Identity",
+                    (),
+                    {"self_model": type("SelfModel", (), {"name": "TestAgent"})()},
+                )(),
             },
         )()
 
     async def converse(self, text, session_id=None, user_meta=None):
         self.calls.append({"text": text, "session_id": session_id, "user_meta": user_meta})
         return self.response
+
+
+class FakeContextStore:
+    def __init__(self):
+        self.entries = []
+
+    async def append(self, session_id, role, content, meta=None):
+        self.entries.append(
+            {
+                "session_id": session_id,
+                "role": role,
+                "content": content,
+                "meta": meta or {},
+            }
+        )
 
 
 class FakeVisionLLM:
@@ -188,6 +211,101 @@ async def test_authorized_message_edits_placeholder_into_final_reply(tmp_path, m
     assert runtime.calls[0]["user_meta"] is None
     assert client.actions
     assert client.edited_messages[0]["text"] == "final answer"
+
+
+@pytest.mark.asyncio
+async def test_reply_to_owner_notification_passes_telegram_context(tmp_path, monkeypatch):
+    runtime = FakeRuntime(response="grounded reply")
+    client = FakeTelegramClient()
+    service = TelegramBotService(
+        runtime=runtime,
+        enabled=True,
+        token="123:abc",
+        state_dir=tmp_path,
+        dm_policy="pairing",
+        allow_from=["42"],
+        client=client,
+    )
+
+    async def no_placeholder(chat_id, reply_to_message_id, stop_event):
+        return None
+
+    monkeypatch.setattr(service, "_delayed_placeholder", no_placeholder)
+
+    await service.notify_owner(
+        "Spike: 0.75 intensity. Want this as a short piece?",
+        reason="daydream threshold",
+        urgency="high",
+        source="initiative",
+    )
+    outbound = client.sent_messages[0]
+
+    await service.handle_update(
+        {
+            "update_id": 22,
+            "message": {
+                "message_id": 23,
+                "text": "Sounds interesting.",
+                "reply_to_message": {
+                    "message_id": outbound["message_id"],
+                    "text": outbound["text"],
+                    "from": {"id": 1, "is_bot": True},
+                },
+                "chat": {"id": 42, "type": "private"},
+                "from": {"id": 42, "username": "operator", "first_name": "Op"},
+            },
+        }
+    )
+
+    assert runtime.calls[0]["text"] == "Sounds interesting."
+    context = runtime.calls[0]["user_meta"]["telegram_context"]
+    assert context["relation"] == "reply_to_outbound"
+    assert context["confidence"] == "exact"
+    assert "Want this as a short piece?" in context["text"]
+
+
+@pytest.mark.asyncio
+async def test_short_deictic_reply_uses_recent_owner_notification_context(tmp_path, monkeypatch):
+    runtime = FakeRuntime(response="grounded reply")
+    client = FakeTelegramClient()
+    service = TelegramBotService(
+        runtime=runtime,
+        enabled=True,
+        token="123:abc",
+        state_dir=tmp_path,
+        dm_policy="pairing",
+        allow_from=["42"],
+        client=client,
+    )
+
+    async def no_placeholder(chat_id, reply_to_message_id, stop_event):
+        return None
+
+    monkeypatch.setattr(service, "_delayed_placeholder", no_placeholder)
+
+    await service.notify_owner(
+        "Spike: 0.75 intensity. Want this as a short piece?",
+        reason="daydream threshold",
+        urgency="high",
+        source="initiative",
+    )
+
+    await service.handle_update(
+        {
+            "update_id": 24,
+            "message": {
+                "message_id": 25,
+                "text": "Sounds interesting. I will always support you being creative.",
+                "chat": {"id": 42, "type": "private"},
+                "from": {"id": 42, "username": "operator", "first_name": "Op"},
+            },
+        }
+    )
+
+    context = runtime.calls[0]["user_meta"]["telegram_context"]
+    assert context["relation"] == "recent_outbound_candidate"
+    assert context["confidence"] == "candidate"
+    assert "Want this as a short piece?" in context["text"]
 
 
 @pytest.mark.asyncio
@@ -332,6 +450,7 @@ async def test_authorized_photo_adds_vision_description_when_available(tmp_path,
     assert attachment["telegram"]["image_analysis"] == "vision"
     vision_content = runtime.llm.calls[0]["messages"][1]["content"]
     assert vision_content[0]["type"] == "text"
+    assert "TestAgent's chat context" in vision_content[0]["text"]
     assert vision_content[1]["type"] == "image_url"
 
 
@@ -360,3 +479,48 @@ async def test_notify_owner_sends_to_allowlisted_owner(tmp_path):
     assert result["chat_ids"] == ["42"]
     assert client.sent_messages[0]["chat_id"] == 42
     assert client.sent_messages[0]["text"] == "I should tell you this."
+
+
+@pytest.mark.asyncio
+async def test_notify_owner_records_agent_visible_context_and_episode(tmp_path):
+    runtime = FakeRuntime()
+    runtime.ctx.context_store = FakeContextStore()
+    runtime.recorded_episodes = []
+
+    async def _record_episode(content, kind, *, session_id, role=None):
+        runtime.recorded_episodes.append(
+            {"content": content, "kind": kind, "session_id": session_id, "role": role}
+        )
+
+    runtime._record_episode = _record_episode
+    client = FakeTelegramClient()
+    service = TelegramBotService(
+        runtime=runtime,
+        enabled=True,
+        token="123:abc",
+        state_dir=tmp_path,
+        dm_policy="pairing",
+        allow_from=["42"],
+        client=client,
+    )
+
+    result = await service.notify_owner(
+        "A background task failed and needs attention.",
+        reason="baa_task_failed",
+        urgency="high",
+        source="baa",
+    )
+
+    assert result["sent"] == 1
+    [entry] = runtime.ctx.context_store.entries
+    assert entry["session_id"] == "default"
+    assert entry["role"] == MessageRole.SYSTEM
+    assert "A background task failed" in entry["content"]
+    assert entry["meta"]["agent_visible_system_message"] is True
+    assert entry["meta"]["event_kind"] == "telegram_owner_notification"
+
+    [episode] = runtime.recorded_episodes
+    assert episode["kind"] == EpisodeKind.OBSERVATION
+    assert episode["session_id"] == "default"
+    assert episode["role"] == "system"
+    assert "baa_task_failed" in episode["content"]

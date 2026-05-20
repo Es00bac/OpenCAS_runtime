@@ -8,7 +8,6 @@ from typing import Any, Dict, List, Optional
 
 from opencas.api.qualification_history import (
     load_latest_rerun_history_by_label,
-    load_recent_rerun_history,
 )
 from opencas.api.qualification_models import (
     QualificationArtifactsPaths,

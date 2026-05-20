@@ -6,7 +6,7 @@ import pytest_asyncio
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.somatic.manager import SomaticManager
 from opencas.somatic.store import SomaticStore
-from opencas.somatic.models import SomaticSnapshot, PrimaryEmotion
+from opencas.somatic.models import SomaticSnapshot
 
 
 @pytest_asyncio.fixture

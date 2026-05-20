@@ -8,8 +8,10 @@ from typing import Any, Sequence
 from opencas.autonomy.models import ActionRiskTier
 from opencas.sandbox import DockerSandbox, SandboxMode
 from opencas.tools import ShellToolAdapter
+from opencas.tools.adapters.cli import CliDiscoveryToolAdapter
 from opencas.tools.adapters.process import ProcessToolAdapter
 from opencas.tools.adapters.pty import PtyToolAdapter
+from opencas.tools.adapters.tui_playwright import TuiPlaywrightToolAdapter
 
 from .tool_registration_specs import ToolRegistrationSpec, register_tool_specs
 
@@ -43,6 +45,55 @@ def register_foundation_process_tools(
                             "type": "string",
                             "description": "The bash command to execute (e.g. pytest tests/)",
                         }
+                    },
+                    "required": ["command"],
+                },
+            )
+        ],
+    )
+
+    cli_discovery = CliDiscoveryToolAdapter(cwd=default_cwd)
+    register_tool_specs(
+        runtime,
+        cli_discovery,
+        [
+            ToolRegistrationSpec(
+                name="cli_discover_command",
+                description=(
+                    "Resolve a local CLI command and collect bounded --help, -h, help, "
+                    "--version, version, and optional man-page evidence. Use before "
+                    "claiming an unfamiliar command cannot be used."
+                ),
+                risk_tier=ActionRiskTier.READONLY,
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Single executable name or path, without arguments.",
+                        },
+                        "probe_args": {
+                            "type": "array",
+                            "items": {
+                                "oneOf": [
+                                    {"type": "string"},
+                                    {"type": "array", "items": {"type": "string"}},
+                                ]
+                            },
+                            "description": "Optional help/version argument sets to try.",
+                        },
+                        "include_man": {
+                            "type": "boolean",
+                            "description": "If true, also capture a bounded man-page excerpt.",
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": "Per-probe timeout in seconds (default 5).",
+                        },
+                        "max_chars": {
+                            "type": "integer",
+                            "description": "Maximum stdout/stderr characters per probe.",
+                        },
                     },
                     "required": ["command"],
                 },
@@ -288,6 +339,137 @@ def register_foundation_process_tools(
                         "scope_key": {"type": "string", "description": "Scope key for PTY isolation."},
                     },
                     "required": [],
+                },
+            ),
+        ],
+    )
+
+    tui_playwright = TuiPlaywrightToolAdapter(runtime)
+    register_tool_specs(
+        runtime,
+        tui_playwright,
+        [
+            ToolRegistrationSpec(
+                name="tui_playwright_open",
+                description=(
+                    "Start a PTY-backed terminal/TUI session and return a browser URL "
+                    "with stable DOM selectors so browser automation can drive it."
+                ),
+                risk_tier=ActionRiskTier.SHELL_LOCAL,
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "Command to run in the PTY session.",
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "Working directory for the PTY session.",
+                        },
+                        "scope_key": {
+                            "type": "string",
+                            "description": "Scope key for PTY isolation.",
+                        },
+                        "rows": {
+                            "type": "integer",
+                            "description": "Terminal rows.",
+                        },
+                        "cols": {
+                            "type": "integer",
+                            "description": "Terminal columns.",
+                        },
+                        "observe": {
+                            "type": "boolean",
+                            "description": "If true, capture an initial terminal snapshot.",
+                        },
+                        "idle_seconds": {
+                            "type": "number",
+                            "description": "Return after this much PTY silence once output has started.",
+                        },
+                        "max_wait_seconds": {
+                            "type": "number",
+                            "description": "Maximum total time to observe before timing out.",
+                        },
+                    },
+                    "required": ["command"],
+                },
+            ),
+            ToolRegistrationSpec(
+                name="tui_playwright_input",
+                description="Write text or control sequences to an existing browser-targetable TUI session and return the observed snapshot.",
+                risk_tier=ActionRiskTier.SHELL_LOCAL,
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "TUI/PTY session id returned by tui_playwright_open."},
+                        "input": {"type": "string", "description": "Text or terminal control sequence to write."},
+                        "scope_key": {"type": "string", "description": "Scope key for PTY isolation."},
+                        "observe": {"type": "boolean", "description": "If true, return a fresh terminal snapshot after writing."},
+                        "idle_seconds": {"type": "number", "description": "Return after this much PTY silence once output has started."},
+                        "max_wait_seconds": {"type": "number", "description": "Maximum total time to observe before timing out."},
+                    },
+                    "required": ["session_id", "input"],
+                },
+            ),
+            ToolRegistrationSpec(
+                name="tui_playwright_keys",
+                description="Send named keys such as Enter, Escape, Ctrl-C, Tab, arrows, Home, End, PageUp, or PageDown to an existing browser-targetable TUI session.",
+                risk_tier=ActionRiskTier.SHELL_LOCAL,
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "TUI/PTY session id returned by tui_playwright_open."},
+                        "keys": {"type": "array", "items": {"type": "string"}, "description": "Key names to translate into terminal control sequences."},
+                        "scope_key": {"type": "string", "description": "Scope key for PTY isolation."},
+                        "observe": {"type": "boolean", "description": "If true, return a fresh terminal snapshot after writing."},
+                        "idle_seconds": {"type": "number", "description": "Return after this much PTY silence once output has started."},
+                        "max_wait_seconds": {"type": "number", "description": "Maximum total time to observe before timing out."},
+                    },
+                    "required": ["session_id", "keys"],
+                },
+            ),
+            ToolRegistrationSpec(
+                name="tui_playwright_resize",
+                description="Resize an existing browser-targetable TUI session.",
+                risk_tier=ActionRiskTier.SHELL_LOCAL,
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "TUI/PTY session id returned by tui_playwright_open."},
+                        "rows": {"type": "integer", "description": "Terminal rows."},
+                        "cols": {"type": "integer", "description": "Terminal columns."},
+                        "scope_key": {"type": "string", "description": "Scope key for PTY isolation."},
+                    },
+                    "required": ["session_id", "rows", "cols"],
+                },
+            ),
+            ToolRegistrationSpec(
+                name="tui_playwright_snapshot",
+                description="Observe an existing browser-targetable TUI session and return its browser URL, selectors, and terminal snapshot.",
+                risk_tier=ActionRiskTier.SHELL_LOCAL,
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "TUI/PTY session id returned by tui_playwright_open."},
+                        "scope_key": {"type": "string", "description": "Scope key for PTY isolation."},
+                        "idle_seconds": {"type": "number", "description": "Return after this much PTY silence once output has started."},
+                        "max_wait_seconds": {"type": "number", "description": "Maximum total time to observe before timing out."},
+                    },
+                    "required": ["session_id"],
+                },
+            ),
+            ToolRegistrationSpec(
+                name="tui_playwright_close",
+                description="Close and remove an existing browser-targetable TUI/PTY session.",
+                risk_tier=ActionRiskTier.SHELL_LOCAL,
+                schema={
+                    "type": "object",
+                    "properties": {
+                        "session_id": {"type": "string", "description": "TUI/PTY session id returned by tui_playwright_open."},
+                        "scope_key": {"type": "string", "description": "Scope key for PTY isolation."},
+                    },
+                    "required": ["session_id"],
                 },
             ),
         ],

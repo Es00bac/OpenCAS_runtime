@@ -9,8 +9,8 @@ import os
 import sys
 from pathlib import Path
 
+from open_llm_auth.auth.manager import ProviderManager
 from open_llm_auth.config import load_config
-from open_llm_auth.provider_catalog import get_builtin_provider_models
 
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
 from opencas.bootstrap.responsibility import (
@@ -18,6 +18,7 @@ from opencas.bootstrap.responsibility import (
     needs_bootstrap_responsibility_ack,
     record_bootstrap_responsibility_ack,
 )
+from opencas.generation.policy import load_persisted_generation_policy
 from opencas.model_routing import (
     ModelRoutingMode,
     load_persisted_model_routing_state,
@@ -44,29 +45,66 @@ def _read_materialized_default_model(state_dir: Path) -> str | None:
 
 
 def _ordered_materialized_model_refs(cfg) -> list[str]:
-    provider_map = cfg.all_provider_configs() if hasattr(cfg, "all_provider_configs") else {}
-    ordered: list[str] = []
+    refs: list[str] = []
     seen: set[str] = set()
 
-    def add_model_ref(provider_id: str, model_id: str) -> None:
-        clean = str(model_id or "").strip()
-        if not clean:
-            return
-        ref = clean if "/" in clean else f"{provider_id}/{clean}"
-        if ref in seen:
+    def add_ref(value: str | None) -> None:
+        ref = str(value or "").strip()
+        if not ref or ref in seen:
             return
         seen.add(ref)
-        ordered.append(ref)
+        refs.append(ref)
 
+    default_model = str(getattr(cfg, "default_model", "") or "").strip()
+    try:
+        provider_map = cfg.all_provider_configs()
+    except Exception:
+        provider_map = {}
+    allowed_catalog_providers = {
+        str(provider_id or "").strip()
+        for provider_id in provider_map.keys()
+        if str(provider_id or "").strip()
+    }
+    allowed_catalog_providers.update(
+        str(provider_id or "").strip()
+        for provider_id in list(getattr(cfg, "active_provider_ids", []) or [])
+        if str(provider_id or "").strip()
+    )
+    if allowed_catalog_providers & {"codex-cli", "openai-codex"}:
+        allowed_catalog_providers.add("openai")
     for provider_id, provider_cfg in provider_map.items():
-        for model in getattr(provider_cfg, "models", None) or []:
-            add_model_ref(provider_id, getattr(model, "id", ""))
-        builtins = list(get_builtin_provider_models(provider_id))
-        preferred = [item for item in builtins if bool(item.get("reasoning"))]
-        preferred.extend(item for item in builtins if not bool(item.get("reasoning")))
-        for model in preferred:
-            add_model_ref(provider_id, model.get("id") or "")
-    return ordered
+        clean_provider = str(provider_id or "").strip()
+        if not clean_provider:
+            continue
+        provider_added = False
+        for model in list(getattr(provider_cfg, "models", []) or []):
+            model_id = str(getattr(model, "id", "") or "").strip()
+            if not model_id:
+                continue
+            ref = model_id if "/" in model_id else f"{clean_provider}/{model_id}"
+            add_ref(ref)
+            provider_added = True
+        if not provider_added:
+            try:
+                catalog_refs = ProviderManager.model_refs_for_config(cfg, require_credentials=False)
+            except Exception:
+                catalog_refs = []
+            for ref in catalog_refs:
+                if not str(ref).startswith(f"{clean_provider}/") or ref in seen:
+                    continue
+                add_ref(ref)
+    try:
+        catalog_refs = ProviderManager.model_refs_for_config(cfg, require_credentials=False)
+    except Exception:
+        catalog_refs = []
+    for ref in catalog_refs:
+        provider_id = str(ref).split("/", 1)[0]
+        if allowed_catalog_providers and provider_id not in allowed_catalog_providers:
+            continue
+        add_ref(ref)
+    if default_model and (default_model in seen or not refs):
+        add_ref(default_model)
+    return refs
 
 
 def _read_materialized_available_models(state_dir: Path) -> list[str]:
@@ -109,6 +147,7 @@ def _build_bootstrap_config(args, persisted_telegram) -> BootstrapConfig:
     state_dir = Path(args.state_dir).expanduser().resolve()
     materialized_models = _read_materialized_available_models(state_dir)
     persisted_model_routing = load_persisted_model_routing_state(state_dir)
+    persisted_generation_policy = load_persisted_generation_policy(state_dir)
     materialized_default = _read_materialized_default_model(state_dir)
     config_kwargs = {
         "state_dir": state_dir,
@@ -174,6 +213,8 @@ def _build_bootstrap_config(args, persisted_telegram) -> BootstrapConfig:
         config_kwargs["default_llm_model"] = materialized_default
     if args.embedding_model_id is not None:
         config_kwargs["embedding_model_id"] = args.embedding_model_id
+    if persisted_generation_policy is not None:
+        config_kwargs["generation_policy"] = persisted_generation_policy
     qdrant_url = getattr(args, "qdrant_url", None) or os.getenv("OPENCAS_QDRANT_URL")
     if qdrant_url:
         config_kwargs["qdrant_url"] = str(qdrant_url)
@@ -295,12 +336,12 @@ def main() -> int:
     parser.add_argument(
         "--default-llm-model",
         default=None,
-        help="Default model reference for conversation/tool use (e.g. kimi-coding/k2p5)",
+        help="Default model reference for conversation/tool use (resolved by OpenLLMAuth)",
     )
     parser.add_argument(
         "--embedding-model-id",
         default=None,
-        help="Embedding model reference (e.g. google/embeddinggemma-300m)",
+        help="Embedding model reference (resolved by OpenLLMAuth)",
     )
     parser.add_argument(
         "--qdrant-url",

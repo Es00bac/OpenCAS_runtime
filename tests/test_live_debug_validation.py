@@ -13,6 +13,7 @@ from scripts.run_live_debug_validation import (
     _finalize_agent_check_record,
     _render_markdown_report,
 )
+from scripts import run_live_debug_validation as live_debug_validation
 
 
 def test_collect_expected_artifact_reads_existing_file(tmp_path: Path) -> None:
@@ -113,6 +114,53 @@ def test_arg_parser_defaults_to_embeddinggemma() -> None:
     args = parser.parse_args([])
 
     assert args.embedding_model == "google/embeddinggemma-300m"
+
+
+def test_arg_parser_default_source_env_uses_current_opencas_state() -> None:
+    parser = _build_arg_parser()
+
+    args = parser.parse_args([])
+
+    assert "openbulma-v4" not in args.source_env
+    assert args.source_env.endswith(".opencas/provider_material/.env")
+
+
+def test_validation_credentials_include_openai_codex_profiles_for_canonical_gpt(
+    tmp_path: Path,
+) -> None:
+    source_config = tmp_path / "config.json"
+    source_config.write_text(
+        """
+{
+  "authProfiles": {
+    "kimi-coding:default": {"provider": "kimi-coding", "type": "api_key", "key": "kimi"},
+    "google:default": {"provider": "google", "type": "api_key", "key": "google"},
+    "openai-codex:chatgpt-plus": {
+      "provider": "openai-codex",
+      "type": "token",
+      "token": "oauth-token"
+    }
+  },
+  "authOrder": {
+    "kimi-coding": ["kimi-coding:default"],
+    "google": ["google:default"],
+    "openai-codex": ["openai-codex:chatgpt-plus"]
+  },
+  "activeProviderIds": ["kimi-coding", "google", "openai-codex", "codex-cli"]
+}
+""",
+        encoding="utf-8",
+    )
+
+    profiles = live_debug_validation._validation_credential_profile_ids(
+        model="openai/gpt-5.5",
+        source_config_path=source_config,
+        source_env_path=None,
+    )
+
+    assert "kimi-coding:default" in profiles
+    assert "google:default" in profiles
+    assert "openai-codex:chatgpt-plus" in profiles
 
 
 def test_render_markdown_report_includes_request_id() -> None:

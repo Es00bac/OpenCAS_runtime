@@ -180,6 +180,7 @@ def build_memory_retriever(runtime: Any) -> MemoryRetriever:
         episode_graph=getattr(runtime, "episode_graph", None),
         somatic_manager=getattr(runtime.ctx, "somatic", None),
         relational_engine=getattr(runtime, "relational", None),
+        tracer=getattr(runtime, "tracer", None),
     )
 
 

@@ -16,18 +16,18 @@ from opencas.api.provenance_entry import (
     append_registry_entry_from_event_context,
     now_iso8601_ts,
 )
+from opencas.autonomy.models import ActionRiskTier, ApprovalLevel
+from opencas.infra.hook_bus import (
+    POST_ACTION_DECISION,
+    POST_SESSION_LIFECYCLE,
+    POST_TOOL_EXECUTE,
+    PRE_TOOL_EXECUTE,
+    HookResult,
+)
 from opencas.provenance_events_adapter import (
     ProvenanceEventType,
     append_provenance_event,
     emit_provenance_event,
-)
-from opencas.autonomy.models import ActionRiskTier, ApprovalLevel
-from opencas.infra.hook_bus import (
-    POST_ACTION_DECISION,
-    POST_TOOL_EXECUTE,
-    POST_SESSION_LIFECYCLE,
-    PRE_TOOL_EXECUTE,
-    HookResult,
 )
 
 _FILE_WRITE_TOOLS = {"fs_write_file", "edit_file"}
@@ -478,6 +478,9 @@ def _pre_tool_execute(runtime: Any, _hook_name: str, ctx: Dict[str, Any]) -> Hoo
 
 
 def _post_tool_execute(runtime: Any, _hook_name: str, ctx: Dict[str, Any]) -> HookResult:
+    if bool(ctx.get("audit_only", False)):
+        return HookResult(allowed=True)
+
     tool_name = str(ctx.get("tool_name", "") or "").strip()
     if not tool_name:
         return HookResult(allowed=True)
@@ -488,6 +491,10 @@ def _post_tool_execute(runtime: Any, _hook_name: str, ctx: Dict[str, Any]) -> Ho
     risk = _to_risk(risk_tier)
     args = ctx.get("args") if isinstance(ctx.get("args"), dict) else {}
     session_id = str(ctx.get("session_id", "") or "").strip() or None
+
+    write_checksum: Optional[str] = None
+    if result_success and tool_name in _FILE_WRITE_TOOLS:
+        write_checksum = _record_workspace_write(runtime, args)
 
     if result_success:
         artifact = _artifact_for_tool(runtime, ctx)
@@ -524,6 +531,8 @@ def _post_tool_execute(runtime: Any, _hook_name: str, ctx: Dict[str, Any]) -> Ho
         ).to_dict()
         enriched = dict(ctx)
         result_metadata = dict(enriched.get("result_metadata") or {})
+        if write_checksum:
+            result_metadata["checksum"] = write_checksum
         enriched["result_metadata"] = append_provenance_event(result_metadata, event)
         return HookResult(allowed=True, mutated_context=enriched)
 
@@ -562,7 +571,35 @@ def _post_tool_execute(runtime: Any, _hook_name: str, ctx: Dict[str, Any]) -> Ho
     return HookResult(allowed=True, mutated_context=enriched)
 
 
+def _record_workspace_write(runtime: Any, args: Dict[str, Any]) -> Optional[str]:
+    file_path = str(args.get("file_path") or args.get("path") or "").strip()
+    if not file_path:
+        return None
+    service = getattr(getattr(runtime, "ctx", None), "workspace_index", None)
+    if service is None:
+        return None
+    record = getattr(service, "record_write_sync", None)
+    if not callable(record):
+        return None
+    try:
+        return record(Path(file_path))
+    except Exception as exc:
+        tracer = getattr(runtime, "_trace", None)
+        if callable(tracer):
+            tracer(
+                "workspace_record_write_failed",
+                {
+                    "path": file_path,
+                    "error": f"{type(exc).__name__}: {exc}",
+                },
+            )
+        return None
+
+
 def _post_action_decision(runtime: Any, _hook_name: str, ctx: Dict[str, Any]) -> HookResult:
+    if bool(ctx.get("audit_only", False)):
+        return HookResult(allowed=True)
+
     tool_name = str(ctx.get("tool_name", "") or "").strip()
     if not tool_name:
         return HookResult(allowed=True)

@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from opencas.telemetry import EventKind, Tracer
 
 from .shadow_models import (
-    BlockReason,
     BlockedIntention,
+    BlockReason,
     ClusterTriageStatus,
+    DecompositionStage,
     ShadowClusterTriageState,
 )
 from .shadow_store import ShadowRegistryStore
@@ -214,6 +215,53 @@ class ShadowRegistry:
                 "duplicate_context": _coerce_mapping(payload.get("duplicate_context")),
             },
         )
+
+    def capture_project_compost(self, payload: Dict[str, Any]) -> Optional[BlockedIntention]:
+        """Persist a composted project as reusable shadow material."""
+
+        if not isinstance(payload, dict):
+            return None
+        project_key = _clean(payload.get("project_key")) or "project"
+        project_title = _clean(payload.get("project_title")) or project_key
+        reason = _clean(payload.get("reason")) or "project composted"
+        compost_path = _clean(payload.get("compost_path"))
+        receipt_path = _clean(payload.get("receipt_path"))
+        intention = self.capture(
+            tool_name="workflow_cancel_project",
+            parameters={
+                "objective": f"Compost project: {project_title}",
+                "project_key": project_key,
+                "project_title": project_title,
+                "reason": reason,
+                "compost_path": compost_path,
+                "receipt_path": receipt_path,
+                "salvage_candidates": payload.get("salvage_candidates", []),
+                "commitments_abandoned": payload.get("commitments_abandoned", []),
+                "schedules_cancelled": payload.get("schedules_cancelled", []),
+                "tasks_cancelled": payload.get("tasks_cancelled", []),
+                "tasks_deleted": payload.get("tasks_deleted", []),
+                "best_next_step": f"Review {receipt_path or compost_path or project_title} before restarting.",
+            },
+            reason=BlockReason.PROJECT_COMPOSTED,
+            context=(
+                f"Project {project_title} was composted: {reason}. Preserve salvageable material, "
+                "release stale obligations, and avoid repeating the failed framing."
+            ),
+            artifact=compost_path or receipt_path,
+            target_kind="project",
+            target_id=project_key,
+            capture_source="project_lifecycle",
+            agent_state={
+                "receipt_path": receipt_path,
+                "compost_path": compost_path,
+                "salvage_index_path": _clean(payload.get("salvage_index_path")),
+                "project_type": _clean(payload.get("project_type")),
+            },
+        )
+        if intention is None:
+            return None
+        intention.decomposition_stage = DecompositionStage.FERMENTING
+        return self.store.save(intention)
 
     def summary(self, limit: int = 10, cluster_limit: int = 5) -> Dict[str, Any]:
         """Return a compact dashboard-safe summary of blocked intentions."""
@@ -474,9 +522,9 @@ class ShadowRegistry:
         for item in items:
             objective = str(item.raw_parameters.get("objective", "") or "").strip()
             if objective:
-                framings.append(objective)
+                framings.append(_normalize_planning_framing(objective))
             for framing in _coerce_string_list(item.raw_parameters.get("failed_framings")):
-                framings.append(framing)
+                framings.append(_normalize_planning_framing(framing))
         return _dedupe_strings(framings)[:limit]
 
     @staticmethod
@@ -509,6 +557,9 @@ class ShadowRegistry:
                 suggestions.append("Validate tool arguments and workspace paths before the next tool call.")
             elif reason == BlockReason.SAFETY_BLOCKED.value:
                 suggestions.append("Prefer workspace-contained, non-destructive commands before escalating shell actions.")
+            elif reason == BlockReason.PROJECT_COMPOSTED.value:
+                suggestions.append("Review the compost receipt and salvage index before restarting the project.")
+                suggestions.append("Reuse preserved artifacts only after naming what failed in the previous framing.")
         if not suggestions:
             suggestions.append("Prefer the smallest safe next step that preserves artifact continuity.")
         return list(dict.fromkeys(suggestions))
@@ -516,6 +567,11 @@ class ShadowRegistry:
 
 def _coerce_mapping(value: Any) -> Dict[str, Any]:
     return dict(value) if isinstance(value, dict) else {}
+
+
+def _normalize_planning_framing(value: str) -> str:
+    pattern = r"\bwriting" + r" project\s+(\d+)\b"
+    return re.sub(pattern, r"creative_writing \1", value, flags=re.IGNORECASE)
 
 
 def _coerce_string_list(value: Any) -> List[str]:

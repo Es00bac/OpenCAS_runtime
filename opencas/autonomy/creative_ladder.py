@@ -7,7 +7,6 @@ learned experience, semantic similarity, relevance, and capacity.
 from __future__ import annotations
 
 import asyncio
-import math
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +31,9 @@ _PROMOTION_THRESHOLDS: dict[WorkStage, float] = {
 }
 
 _STAGE_ORDER = list(_PROMOTION_THRESHOLDS.keys())
+_HYDRATED_STAGES = (WorkStage.SPARK, WorkStage.NOTE, WorkStage.ARTIFACT)
+_FALLBACK_STAGES = (WorkStage.SPARK, WorkStage.NOTE, WorkStage.ARTIFACT)
+_FALLBACK_ORIGINS = {"daydream", "daydream_signal", "curiosity"}
 
 
 class CreativeLadder:
@@ -55,6 +57,13 @@ class CreativeLadder:
         self._ladder: List[WorkObject] = []
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._successful_project_hashes: set[str] = set()
+        self.last_cycle_health: Dict[str, Any] = {
+            "stage_counts": {},
+            "promoted": 0,
+            "demoted": 0,
+            "fallback_promoted": 0,
+            "choke_point": None,
+        }
 
     def add(self, work: WorkObject) -> None:
         """Introduce a new work object to the ladder."""
@@ -206,16 +215,82 @@ class CreativeLadder:
             return True
         return False
 
-    def run_cycle(self) -> Dict[str, int]:
+    async def hydrate_from_store(
+        self,
+        *,
+        per_stage_limit: int = 25,
+        stages: Optional[tuple[WorkStage, ...]] = None,
+    ) -> int:
+        """Load persisted low-rung work into the in-memory ladder."""
+        if not self.work_store:
+            return 0
+        hydrated = 0
+        seen = {str(work.work_id) for work in self._ladder}
+        for stage in stages or _HYDRATED_STAGES:
+            for work in await self.work_store.list_by_stage(stage, limit=per_stage_limit):
+                if str(work.work_id) in seen:
+                    continue
+                self._ladder.append(work)
+                seen.add(str(work.work_id))
+                hydrated += 1
+        if hydrated:
+            self._trace(
+                EventKind.CREATIVE_PROMOTION,
+                "rehydrated",
+                {
+                    "hydrated": hydrated,
+                    "ladder_count": len(self._ladder),
+                    "stages": [stage.value for stage in (stages or _HYDRATED_STAGES)],
+                },
+            )
+        return hydrated
+
+    def run_cycle(self) -> Dict[str, Any]:
         """Evaluate all work objects and apply promotions/demotions."""
         promoted = 0
         demoted = 0
-        for work in self._ladder:
+        promoted_ids: set[str] = set()
+        for work in list(self._ladder):
             if self.try_promote(work):
                 promoted += 1
-            elif self.try_demote(work):
+                promoted_ids.add(str(work.work_id))
+
+        fallback_promoted = 0
+        if promoted == 0:
+            fallback_promoted = self._promote_top_fallback_candidates()
+            promoted += fallback_promoted
+            promoted_ids.update(
+                str(work.work_id)
+                for work in self._ladder
+                if work.meta.get("fallback_promoted_at")
+            )
+
+        for work in list(self._ladder):
+            if str(work.work_id) in promoted_ids:
+                continue
+            if self.try_demote(work):
                 demoted += 1
-        return {"promoted": promoted, "demoted": demoted}
+
+        self.last_cycle_health = self._build_health_summary(
+            promoted=promoted,
+            demoted=demoted,
+            fallback_promoted=fallback_promoted,
+        )
+        return {
+            "promoted": promoted,
+            "demoted": demoted,
+            "fallback_promoted": fallback_promoted,
+            "stage_counts": dict(self.last_cycle_health["stage_counts"]),
+            "choke_point": self.last_cycle_health["choke_point"],
+        }
+
+    async def drain_background_tasks(self) -> None:
+        """Wait for scheduled persistence tasks created during ladder updates."""
+        await asyncio.sleep(0)
+        while self._background_tasks:
+            tasks = list(self._background_tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.sleep(0)
 
     def list_by_stage(self, stage: WorkStage) -> List[WorkObject]:
         return [w for w in self._ladder if w.stage == stage]
@@ -241,6 +316,109 @@ class CreativeLadder:
                 "successful_project_hashes": len(self._successful_project_hashes),
             },
         )
+
+    def _promote_top_fallback_candidates(self) -> int:
+        promoted = 0
+        promoted_ids: set[str] = set()
+        for stage in _FALLBACK_STAGES:
+            candidates = [
+                work
+                for work in self._ladder
+                if str(work.work_id) not in promoted_ids
+                and work.stage == stage
+                and self._eligible_for_fallback(work)
+            ]
+            if not candidates:
+                continue
+            selected = max(
+                candidates,
+                key=lambda work: (
+                    float(work.promotion_score or 0.0),
+                    work.updated_at,
+                    str(work.work_id),
+                ),
+            )
+            if self._advance_one_stage(
+                selected,
+                reason=(
+                    f"fallback promoted top {stage.value} candidate after a cycle "
+                    "with no threshold promotions"
+                ),
+                fallback=True,
+            ):
+                promoted += 1
+                promoted_ids.add(str(selected.work_id))
+        return promoted
+
+    def _eligible_for_fallback(self, work: WorkObject) -> bool:
+        if work.stage not in _FALLBACK_STAGES:
+            return False
+        if work.blocked_by:
+            return False
+        self.evaluate(work)
+        if self._relevance_boost(work) > 0:
+            return True
+        origin = str(work.meta.get("origin") or "").strip()
+        if origin in _FALLBACK_ORIGINS and work.promotion_score >= 0.10:
+            return True
+        if work.access_count > 0 and work.promotion_score >= 0.10:
+            return True
+        return False
+
+    def _advance_one_stage(self, work: WorkObject, *, reason: str, fallback: bool = False) -> bool:
+        current_idx = _STAGE_ORDER.index(work.stage)
+        if current_idx >= len(_STAGE_ORDER) - 1:
+            return False
+        old_stage = work.stage
+        next_stage = _STAGE_ORDER[current_idx + 1]
+        work.stage = next_stage
+        work.updated_at = datetime.now(timezone.utc)
+        if fallback:
+            work.meta["fallback_promoted_at"] = work.updated_at.isoformat()
+            work.meta["fallback_reason"] = reason
+            work.meta.setdefault("score_reasons", []).append("fallback_top_candidate")
+        self._record_lifecycle_transition(work, old_stage, next_stage, reason)
+        self._trace(
+            EventKind.CREATIVE_PROMOTION,
+            "fallback_promoted" if fallback else "promoted",
+            {
+                "work_id": str(work.work_id),
+                "from": old_stage.value,
+                "to": next_stage.value,
+                "score": work.promotion_score,
+                "score_reasons": work.meta.get("score_reasons", []),
+                "ladder_count": len(self._ladder),
+            },
+        )
+        self._sync_work(work)
+        return True
+
+    def _build_health_summary(
+        self,
+        *,
+        promoted: int,
+        demoted: int,
+        fallback_promoted: int,
+    ) -> Dict[str, Any]:
+        stage_counts = self._stage_counts()
+        choke_point = None
+        if stage_counts:
+            choke_point = max(stage_counts, key=lambda stage: stage_counts[stage])
+        return {
+            "stage_counts": stage_counts,
+            "promoted": promoted,
+            "demoted": demoted,
+            "fallback_promoted": fallback_promoted,
+            "choke_point": choke_point,
+            "ladder_count": len(self._ladder),
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+
+    def _stage_counts(self) -> Dict[str, int]:
+        counts: Dict[str, int] = {}
+        for work in self._ladder:
+            counts[work.stage.value] = counts.get(work.stage.value, 0) + 1
+        return counts
 
     def _record_lifecycle_transition(
         self,
@@ -275,7 +453,7 @@ class CreativeLadder:
         if self.task_store:
             try:
                 import asyncio
-                loop = asyncio.get_running_loop()
+                asyncio.get_running_loop()
 
                 async def _persist():
                     await self.task_store.record_lifecycle_transition(

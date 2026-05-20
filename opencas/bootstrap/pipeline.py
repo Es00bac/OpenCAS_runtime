@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import AsyncExitStack
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Optional
 
 from open_llm_auth.auth.manager import ProviderManager
 
 from opencas.affective import AffectiveExaminationService, AffectiveExaminationStore
+from opencas.affective_registry import AffectiveRegistryWriter
 from opencas.api import LLMClient
 from opencas.embeddings import (
     EmbeddingCache,
@@ -28,7 +30,19 @@ from opencas.infra.hook_bus import (
     PRE_FILE_WRITE,
     PRE_TOOL_EXECUTE,
 )
-from opencas.memory import MemoryStore
+from opencas.memory import ArtifactMemoryBridge, MemoryStore
+from opencas.memory.autobiography import (
+    AutobiographyReconstructor,
+    SessionAnchorStore,
+    SessionAutobiographyComposer,
+)
+from opencas.recovery.classifier import RecoveryClassifier
+from opencas.recovery.continuity import ContinuityPacketBuilder
+from opencas.recovery.coordinator import AutonomousRecoveryCoordinator
+from opencas.recovery.executor import RecoveryExecutorAdapter
+from opencas.recovery.ledger import RecoveryLedger
+from opencas.recovery.planner import RecoveryPlanner
+from opencas.recovery.scanner import RecoveryScanner
 from opencas.sandbox import SandboxConfig
 from opencas.somatic import SomaticManager, SomaticStore
 from opencas.telemetry import EventKind, TelemetryStore, TokenTelemetry, Tracer
@@ -50,6 +64,22 @@ from .pipeline_support import (
 from .provider_material import materialize_provider_material
 
 
+async def _close_resource(obj: Any) -> None:
+    action = getattr(obj, "close", None)
+    if not callable(action):
+        action = getattr(obj, "stop", None)
+    if not callable(action):
+        return
+    result = action()
+    if hasattr(result, "__await__"):
+        await result
+
+
+async def _cancel_background_task(task: asyncio.Task[Any]) -> None:
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 class BootstrapPipeline:
     """Bootstraps OpenCAS in explicit, recoverable stages."""
 
@@ -65,6 +95,11 @@ class BootstrapPipeline:
         self._llm: Optional[LLMClient] = None
 
     async def run(self) -> BootstrapContext:
+        """Execute the full bootstrap pipeline."""
+        async with AsyncExitStack() as exit_stack:
+            return await self._run_with_exit_stack(exit_stack)
+
+    async def _run_with_exit_stack(self, exit_stack: AsyncExitStack) -> BootstrapContext:
         """Execute the full bootstrap pipeline."""
         self._runtime_guard()
         self._stage("config_loaded", {"state_dir": str(self.config.state_dir)})
@@ -123,15 +158,21 @@ class BootstrapPipeline:
             identity=self._identity,
             tracer=self._tracer,
             stage=self._stage,
+            exit_stack=exit_stack,
         )
         self._memory = stores.memory
         self._tasks = stores.tasks
         receipt_store = stores.receipt_store
         context_store = stores.context_store
+        context_proposal_store = stores.context_proposal_store
         work_store = stores.work_store
         commitment_store = stores.commitment_store
         self_inspection_store = stores.self_inspection_store
+        cognitive_state_store = stores.cognitive_state_store
         wellbeing_store = stores.wellbeing_store
+        dream_store = stores.dream_store
+        proof_store = stores.proof_store
+        thread_registry_store = stores.thread_registry_store
         portfolio_store = stores.portfolio_store
         executive = stores.executive
 
@@ -167,6 +208,7 @@ class BootstrapPipeline:
             provider_manager=provider_manager,
             default_model=self.config.default_llm_model,
             model_routing=self.config.model_routing,
+            generation_policy=self.config.generation_policy,
             tracer=self._tracer,
             token_telemetry=self._token_telemetry,
         )
@@ -174,8 +216,11 @@ class BootstrapPipeline:
 
         # 6. Embedding service startup (uses LLM gateway when configured)
         embed_model = self._resolve_embedding_model()
-        embed_dimensions = resolve_embedding_dimensions(embed_model)
+        embed_dimensions = resolve_embedding_dimensions(embed_model, self._llm)
         vector_backend = None
+        backend_stack = AsyncExitStack()
+        await backend_stack.__aenter__()
+        exit_stack.push_async_callback(backend_stack.aclose)
         if self.config.qdrant_url:
             if self.config.qdrant_auto_start:
                 startup_result = await ensure_local_qdrant(
@@ -195,6 +240,7 @@ class BootstrapPipeline:
                 dimension=embed_dimensions,
             )
             await vector_backend.connect()
+            backend_stack.push_async_callback(_close_resource, vector_backend)
             if self.config.qdrant_required and not vector_backend.available:
                 raise RuntimeError(
                     f"Qdrant is required but unavailable at {self.config.qdrant_url}"
@@ -207,6 +253,7 @@ class BootstrapPipeline:
                     ef_construction=self.config.hnsw_ef_construction,
                 )
                 hnsw_backend.connect()
+                backend_stack.push_async_callback(_close_resource, hnsw_backend)
             except Exception as exc:
                 logging.getLogger(__name__).warning(
                     "HNSW backend connection failed: %s", exc
@@ -217,18 +264,20 @@ class BootstrapPipeline:
             hnsw_backend=hnsw_backend,
         )
         await embedding_cache.connect()
-        embed_fn = None
-        embed_batch_fn = None
-
-        # EmbeddingGemma-300M is 768-native and is the canonical local text
-        # embedding model. Remote providers are only called for non-Gemma IDs.
-        if embed_model not in {"local-fallback", "google/embeddinggemma-300m"}:
-            embed_fn = lambda text: self._llm.embed(
+        exit_stack.push_async_callback(_close_resource, embedding_cache)
+        backend_stack.pop_all()
+        # OpenLLMAuth is the single model boundary for both LLMs and embeddings.
+        # Local/offline embedding runtimes are resolved by ProviderManager, not
+        # by importing model runtimes from OpenCAS.
+        def embed_fn(text: str) -> Any:
+            return self._llm.embed(
                 text,
                 model=embed_model,
                 dimensions=embed_dimensions,
             )
-            embed_batch_fn = lambda texts: self._llm.embed_batch(
+
+        def embed_batch_fn(texts: list[str]) -> Any:
+            return self._llm.embed_batch(
                 texts,
                 model=embed_model,
                 dimensions=embed_dimensions,
@@ -247,6 +296,7 @@ class BootstrapPipeline:
         # 6a. Backfill missing embeddings in the background
         backfill = EmbeddingBackfill(self._embeddings, self._memory)
         backfill_task = asyncio.create_task(self._run_embedding_backfill(backfill))
+        exit_stack.push_async_callback(_cancel_background_task, backfill_task)
 
         # 6. Permission / sandbox initialization
         sandbox = self.config.sandbox or SandboxConfig()
@@ -258,6 +308,7 @@ class BootstrapPipeline:
         # 7. Somatic state startup
         somatic_store = SomaticStore(self.config.state_dir / "somatic.db")
         await somatic_store.connect()
+        exit_stack.push_async_callback(_close_resource, somatic_store)
         self._somatic = SomaticManager(
             self.config.state_dir / "somatic.json",
             store=somatic_store,
@@ -267,9 +318,13 @@ class BootstrapPipeline:
             self.config.state_dir / "affective_examinations.db"
         )
         await affective_store.connect()
+        exit_stack.push_async_callback(_close_resource, affective_store)
         affective_examinations = AffectiveExaminationService(
             affective_store,
             somatic_manager=self._somatic,
+        )
+        affective_registry_writer = AffectiveRegistryWriter(
+            self.config.state_dir / "affective_registry" / "events.jsonl"
         )
         executive.somatic = self._somatic
         executive.refresh_structural_load()
@@ -289,6 +344,7 @@ class BootstrapPipeline:
             stage=self._stage,
             is_first_boot=is_first_boot,
             clean_boot=self.config.clean_boot,
+            exit_stack=exit_stack,
         )
         relational = services.relational
         plugin_store = services.plugin_store
@@ -298,6 +354,7 @@ class BootstrapPipeline:
         readiness = services.readiness
         project_orchestrator = services.project_orchestrator
         daydream_store = services.daydream_store
+        daydream_signal_store = services.daydream_signal_store
         conflict_store = services.conflict_store
         curation_store = services.curation_store
         harness = services.harness
@@ -308,6 +365,27 @@ class BootstrapPipeline:
         mcp_registry = services.mcp_registry
         doctor = services.doctor
         health_monitor = services.health_monitor
+
+        recovery_ledger = RecoveryLedger(self.config.state_dir / "recovery.db")
+        await recovery_ledger.connect()
+        exit_stack.push_async_callback(_close_resource, recovery_ledger)
+        recovery_scanner = RecoveryScanner(
+            commitment_store=commitment_store,
+            task_store=self._tasks,
+            harness_store=getattr(harness, "store", None),
+            schedule_store=schedule_store,
+            work_store=work_store,
+        )
+        recovery_coordinator = AutonomousRecoveryCoordinator(
+            scanner=recovery_scanner,
+            classifier=RecoveryClassifier(),
+            continuity_builder=ContinuityPacketBuilder(),
+            planner=RecoveryPlanner(),
+            executor=RecoveryExecutorAdapter(harness=harness),
+            ledger=recovery_ledger,
+            tracer=self._tracer,
+        )
+        self._stage("recovery_online")
 
         # 11. Main loop readiness
         readiness.ready("bootstrap_complete")
@@ -326,6 +404,32 @@ class BootstrapPipeline:
             self._embeddings,
             self._llm,
         )
+        exit_stack.push_async_callback(_close_resource, workspace_index)
+        assert self._memory._db is not None
+        autobiography_anchor_store = SessionAnchorStore(self._memory._db)
+        autobiography_composer = SessionAutobiographyComposer(
+            memory_store=self._memory,
+            anchor_store=autobiography_anchor_store,
+            context_store=context_store,
+            identity=self._identity,
+            commitment_store=commitment_store,
+            task_store=self._tasks,
+            schedule_store=schedule_store,
+            llm=self._llm,
+        )
+        autobiography_reconstructor = AutobiographyReconstructor(
+            anchor_store=autobiography_anchor_store,
+            composer=autobiography_composer,
+            memory_store=self._memory,
+        )
+        self._stage("autobiography_online")
+
+        artifact_bridge = ArtifactMemoryBridge(
+            state_dir=self.config.state_dir,
+            memory=self._memory,
+            embeddings=self._embeddings,
+        )
+        self._stage("artifact_bridge_online")
 
         bctx = build_bootstrap_context(
             config=self.config,
@@ -348,10 +452,12 @@ class BootstrapPipeline:
             sandbox=sandbox,
             readiness=readiness,
             context_store=context_store,
+            context_proposal_store=context_proposal_store,
             work_store=work_store,
             project_orchestrator=project_orchestrator,
             relational=relational,
             daydream_store=daydream_store,
+            daydream_signal_store=daydream_signal_store,
             conflict_store=conflict_store,
             somatic_store=somatic_store,
             executive=executive,
@@ -363,7 +469,11 @@ class BootstrapPipeline:
             health_monitor=health_monitor,
             commitment_store=commitment_store,
             self_inspection_store=self_inspection_store,
+            cognitive_state_store=cognitive_state_store,
             wellbeing_store=wellbeing_store,
+            dream_store=dream_store,
+            proof_store=proof_store,
+            thread_registry_store=thread_registry_store,
             portfolio_store=portfolio_store,
             tom_store=tom_store,
             self_knowledge_registry=self_knowledge_registry,
@@ -373,10 +483,18 @@ class BootstrapPipeline:
             plan_store=plan_store,
             schedule_store=schedule_store,
             schedule_service=schedule_service,
+            recovery_ledger=recovery_ledger,
+            recovery_coordinator=recovery_coordinator,
+            artifact_bridge=artifact_bridge,
+            autobiography_anchor_store=autobiography_anchor_store,
+            autobiography_composer=autobiography_composer,
+            autobiography_reconstructor=autobiography_reconstructor,
             affective_examinations=affective_examinations,
+            affective_registry_writer=affective_registry_writer,
             mcp_registry=mcp_registry,
             background_tasks=(backfill_task,),
         )
+        bctx._exit_stack = exit_stack.pop_all()
         doctor.context = bctx
         return bctx
 

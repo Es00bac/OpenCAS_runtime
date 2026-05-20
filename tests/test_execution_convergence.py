@@ -1,14 +1,15 @@
 """Tests for RepairExecutor convergence guard and backoff."""
 
-from unittest.mock import AsyncMock
-from unittest.mock import patch
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
+from opencas.execution.baa import BoundedAssistantAgent
 from opencas.autonomy.models import ActionRiskTier
 from opencas.execution import ExecutionStage, RepairExecutor, RepairTask
+from opencas.tools import ToolUseResult
 from opencas.execution.store import TaskStore
 from opencas.tools import ShellToolAdapter, ToolRegistry
 
@@ -110,14 +111,14 @@ async def test_executor_blocks_low_divergence_retry_after_salvage(tmp_path):
     )
 
     task = RepairTask(
-        objective="Continue Chronicle 4246 from the existing manuscript.",
+        objective="Continue writing project 4246 from the existing manuscript.",
         verification_command="exit 1",
         max_attempts=3,
         retry_backoff_seconds=0.05,
         meta={
             "resume_project": {
-                "signature": "chronicle-4246",
-                "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+                "signature": "writing-project-4246",
+                "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             }
         },
     )
@@ -133,24 +134,141 @@ async def test_executor_blocks_low_divergence_retry_after_salvage(tmp_path):
     latest = await store.get_latest_salvage_packet(str(task.task_id))
     assert latest is not None
     assert latest.attempt == 2
-    assert latest.canonical_artifact_path == "workspace/Chronicles/4246/chronicle_4246.md"
+    assert latest.canonical_artifact_path == "workspace/writing/4246/story_4246.md"
     assert task.meta["retry_governor"]["allowed"] is False
+    assert task.meta["counterfactual_review"]["salvage_packet_id"] == str(latest.packet_id)
+    assert task.meta["counterfactual_review"]["retry_allowed"] is False
+    assert task.meta["counterfactual_review"]["recommended"]["strategy"] in {
+        "change_tool_or_arguments",
+        "narrow_scope",
+        "verify_prerequisite",
+        "ask_or_escalate",
+    }
     assert len(captures) == 1
+
+
+@pytest.mark.asyncio
+async def test_executor_blocks_guard_stopped_broad_retry_without_repeating_full_attempt(
+    tmp_path,
+) -> None:
+    tools = ToolRegistry()
+    store = TaskStore(tmp_path / "tasks.db")
+    await store.connect()
+    calls = []
+    captures = []
+
+    async def _run(**kwargs):
+        calls.append(kwargs)
+        return ToolUseResult(
+            final_output="partial output before guard",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "name": "runtime_status",
+                    "args": {},
+                }
+            ],
+            guard_fired=True,
+            guard_reason="Tool loop circuit breaker: tool 'runtime_status' was called 3 times with identical arguments.",
+        )
+
+    executor = RepairExecutor(
+        tools=tools,
+        store=store,
+        runtime=SimpleNamespace(
+            tool_loop=SimpleNamespace(run=_run),
+            scheduler=None,
+            ctx=SimpleNamespace(
+                shadow_registry=SimpleNamespace(capture_retry_blocked=captures.append)
+            ),
+        ),
+    )
+    task = RepairTask(
+        objective="Return to project: Writing Project 4",
+        max_attempts=3,
+        retry_backoff_seconds=0.0,
+    )
+
+    first = await executor.run(task)
+    assert first.stage == ExecutionStage.FAILED
+    assert "retry blocked" in first.output.lower()
+    assert len(calls) == 1
+    latest = await store.get_latest_salvage_packet(str(task.task_id))
+    assert latest is not None
+    assert latest.outcome.value == "guard_stopped"
+    assert latest.meaningful_progress_signal == "blocker"
+    assert latest.tool_signature != "4f53cda18c2baa0c"
+    assert task.meta["retry_governor"]["allowed"] is False
     assert captures[0]["task_id"] == str(task.task_id)
-    assert captures[0]["artifact"] == "workspace/Chronicles/4246/chronicle_4246.md"
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_executor_allows_guard_stopped_attempt_with_edit_artifact_progress(
+    tmp_path,
+) -> None:
+    tools = ToolRegistry()
+    store = TaskStore(tmp_path / "tasks.db")
+    await store.connect()
+    calls = []
+    artifact_path = "/mnt/xtra/OpenCAS/workspace/self/notes/evidence.md"
+
+    async def _run(**kwargs):
+        calls.append(kwargs)
+        return ToolUseResult(
+            final_output="edited evidence note before guard",
+            tool_calls=[
+                {
+                    "id": "call-edit",
+                    "name": "edit_file",
+                    "args": {"file_path": artifact_path},
+                }
+            ],
+            guard_fired=True,
+            guard_reason="Meaningful progress contract blocker: bash_run_command reported a blocker",
+        )
+
+    executor = RepairExecutor(
+        tools=tools,
+        store=store,
+        runtime=SimpleNamespace(
+            tool_loop=SimpleNamespace(run=_run),
+            scheduler=None,
+            ctx=SimpleNamespace(
+                shadow_registry=SimpleNamespace(capture_retry_blocked=lambda payload: None)
+            ),
+        ),
+    )
+    task = RepairTask(
+        objective="Verify and record evidence for a standards note.",
+        max_attempts=3,
+        retry_backoff_seconds=0.0,
+    )
+
+    first = await executor.run(task)
+
+    assert first.stage == ExecutionStage.RECOVERING
+    assert len(calls) == 1
+    latest = await store.get_latest_salvage_packet(str(task.task_id))
+    assert latest is not None
+    assert latest.outcome.value == "guard_stopped"
+    assert latest.artifact_paths_touched == [artifact_path]
+    assert latest.meaningful_progress_signal == "artifact"
+    assert latest.recommended_mode.value == "resume_existing_artifact"
+    assert task.meta["retry_governor"]["allowed"] is True
     await store.close()
 
 
 def _make_retry_blocked_task():
     task = RepairTask(
-        objective="Continue Chronicle 4246 from the existing manuscript.",
+        objective="Continue writing project 4246 from the existing manuscript.",
         verification_command="exit 1",
         max_attempts=3,
         retry_backoff_seconds=0.0,
         meta={
             "resume_project": {
-                "signature": "chronicle-4246",
-                "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+                "signature": "writing-project-4246",
+                "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             }
         },
     )
@@ -183,4 +301,33 @@ async def test_baa_does_not_requeue_retry_blocked_task(tmp_path):
 
     assert task.status == "failed"
     assert str(task.task_id) not in baa._futures
+    await store.close()
+
+
+@pytest.mark.asyncio
+async def test_baa_provider_rate_limit_failure_does_not_requeue(tmp_path):
+    class RateLimitedLLM:
+        async def chat_completion(self, messages, **kwargs):
+            raise RuntimeError(
+                "Client error '429 Too Many Requests' for url "
+                "'https://api.z.ai/api/coding/paas/v4/chat/completions'"
+            )
+
+    store = TaskStore(tmp_path / "tasks.db")
+    await store.connect()
+    tools = ToolRegistry()
+    baa = BoundedAssistantAgent(tools=tools, llm=RateLimitedLLM(), store=store)
+    task = RepairTask(
+        objective="Generate and send a comprehensive health check.",
+        max_attempts=3,
+    )
+
+    await baa.submit(task)
+    await baa._run_bounded(task)
+
+    assert task.status == "failed"
+    assert task.stage == ExecutionStage.FAILED
+    assert "provider backoff" in task.meta["retry_governor"]["reason"]
+    assert str(task.task_id) not in baa._futures
+
     await store.close()

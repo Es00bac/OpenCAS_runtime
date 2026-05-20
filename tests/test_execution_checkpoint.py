@@ -3,7 +3,6 @@
 import subprocess
 from pathlib import Path
 
-import pytest
 
 from opencas.execution.checkpoint import FileCopyCheckpointManager
 from opencas.execution.git_checkpoint import GitCheckpointManager
@@ -89,7 +88,7 @@ def test_git_checkpoint_inside_repo(tmp_path: Path) -> None:
     assert commit
 
     file_path.write_text("modified")
-    mgr.restore()
+    mgr.restore(commit)
     assert file_path.read_text() == "original"
 
     mgr.discard()
@@ -99,6 +98,19 @@ def test_git_checkpoint_inside_repo(tmp_path: Path) -> None:
 def test_git_checkpoint_outside_repo(tmp_path: Path) -> None:
     scratch = tmp_path / "scratch"
     scratch.mkdir()
+    subprocess.run(["git", "init"], cwd=scratch, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=scratch,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=scratch,
+        check=True,
+        capture_output=True,
+    )
 
     mgr = GitCheckpointManager(str(scratch))
     file_path = scratch / "data.txt"
@@ -108,7 +120,7 @@ def test_git_checkpoint_outside_repo(tmp_path: Path) -> None:
     assert commit
 
     file_path.write_text("version2")
-    mgr.restore()
+    mgr.restore(commit)
     assert file_path.read_text() == "version1"
 
     mgr.discard()

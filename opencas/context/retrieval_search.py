@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from opencas.memory.store_serialization import row_to_episode
 from opencas.somatic.models import AffectState, SocialTarget
 
 from .models import RetrievalResult
@@ -16,6 +18,7 @@ from .resonance import (
     compute_reliability_score,
     compute_temporal_echo,
 )
+from .retrieval_query import extract_exact_handle_terms
 from .retrieval_ranking import apply_temporal_decay
 
 
@@ -138,6 +141,75 @@ async def keyword_search(retriever, query: str, limit: int) -> List[RetrievalRes
                 )
     results = sorted(merged.values(), key=lambda item: item.score, reverse=True)
     return results[:limit]
+
+
+async def exact_handle_search(retriever, query: str, limit: int) -> List[RetrievalResult]:
+    """Search exact path/checksum handles in episode content and payload JSON."""
+    handles = extract_exact_handle_terms(query)
+    needles = handles["paths"] + handles["checksums"]
+    if not needles:
+        return []
+
+    db = getattr(retriever.memory, "_db", None)
+    if db is None:
+        return []
+
+    clauses: List[str] = []
+    params: List[str] = []
+    for needle in needles:
+        clauses.extend(["content LIKE ?", "payload LIKE ?"])
+        like = f"%{needle}%"
+        params.extend([like, like])
+
+    cursor = await db.execute(
+        f"""
+        SELECT *
+        FROM episodes
+        WHERE {" OR ".join(clauses)}
+        ORDER BY created_at DESC
+        LIMIT ?
+        """,
+        tuple(params + [limit]),
+    )
+    rows = await cursor.fetchall()
+
+    results: List[RetrievalResult] = []
+    seen: set[str] = set()
+    for row in rows:
+        episode = row_to_episode(row)
+        episode_id = str(episode.episode_id)
+        if episode_id in seen:
+            continue
+        seen.add(episode_id)
+        content = _exact_handle_content(episode, handles)
+        results.append(
+            RetrievalResult(
+                source_type="episode",
+                source_id=episode_id,
+                content=content,
+                score=1.0,
+                episode=episode,
+            )
+        )
+    return results
+
+
+def _exact_handle_content(episode, handles: dict[str, List[str]]) -> str:
+    payload = getattr(episode, "payload", {}) or {}
+    if not isinstance(payload, dict):
+        payload = {}
+    haystack = f"{getattr(episode, 'content', '')} {json.dumps(payload, default=str)}"
+    parts = ["exact_handle_match"]
+    tool_name = payload.get("tool_name")
+    if tool_name:
+        parts.append(f"tool={tool_name}")
+    for path in handles["paths"]:
+        if path in haystack:
+            parts.append(f"path={path}")
+    for checksum in handles["checksums"]:
+        if checksum in haystack:
+            parts.append(f"checksum={checksum}")
+    return f"[{'; '.join(parts)}] {episode.content}"
 
 
 async def expand_graph(

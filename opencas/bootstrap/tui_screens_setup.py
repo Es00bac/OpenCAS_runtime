@@ -278,7 +278,7 @@ class ModelsScreen(Screen):
         )
         yield HelpText(
             "Embeddings turn text into vectors so the agent can search its memory semantically. "
-            "If no provider-backed embedding model is configured, `local-fallback` keeps the system usable offline."
+            "OpenLLMAuth supplies the available provider-backed and local fallback embedding choices."
         )
 
         yield Static()
@@ -337,11 +337,10 @@ class ModelsScreen(Screen):
             if custom_llm:
                 STATE.default_llm_model = custom_llm
             else:
-                STATE.default_llm_model = str(
-                    self.query_one("#select-llm", Select).value or "anthropic/claude-sonnet-4-6"
-                )
+                selected_llm = str(self.query_one("#select-llm", Select).value or "").strip()
+                STATE.default_llm_model = selected_llm or STATE.default_llm_model
             STATE.embedding_model_id = str(
-                self.query_one("#select-embedding", Select).value or "local-fallback"
+                self.query_one("#select-embedding", Select).value or STATE.embedding_model_id
             )
             STATE.model_routing_mode = str(
                 self.query_one("#select-routing-mode", Select).value or "single"
@@ -511,6 +510,8 @@ class AgentSystemsScreen(Screen):
             [
                 ("Auto-review eligible escalations", "auto_review"),
                 ("Default approval routing", "default"),
+                ("Trust-based earned autonomy", "trust_based"),
+                ("YOLO fully autonomous (opt-in)", "yolo"),
             ],
             allow_blank=False,
             value=STATE.approval_mode,

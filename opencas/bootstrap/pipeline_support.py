@@ -7,6 +7,8 @@ import importlib.util
 import sys
 from typing import Any, Optional
 
+from open_llm_auth.auth.manager import ProviderManager
+
 from opencas.embeddings.backfill import EmbeddingBackfill
 from opencas.telemetry import EventKind, Tracer
 from opencas.bootstrap.responsibility import BOOTSTRAP_RESPONSIBILITY_WARNING
@@ -40,20 +42,56 @@ async def run_embedding_backfill(
 
 
 def resolve_embedding_model(config: Any, llm: Any) -> str:
-    """Resolve the configured embedding model with a local fallback."""
+    """Resolve the configured embedding model via OpenLLMAuth authority."""
     if config.embedding_model_id:
         return config.embedding_model_id
 
-    # Default to the local high-fidelity Gemma model as requested.
-    # This runs on the local CPU (18 threads) and avoids Google Cloud quota.
-    return "google/embeddinggemma-300m"
+    manager = getattr(llm, "manager", None) or getattr(llm, "provider_manager", None)
+    resolver = getattr(manager, "default_embedding_model_ref", None)
+    if callable(resolver):
+        return str(resolver())
+    return ProviderManager.default_embedding_model_ref()
 
 
-def resolve_embedding_dimensions(model_id: Optional[str]) -> Optional[int]:
-    """Return provider request dimensions for embedding models that require a pin."""
-    if model_id == "google/embeddinggemma-300m":
-        return 768
+def resolve_embedding_dimensions(model_id: Optional[str], llm: Any = None) -> Optional[int]:
+    """Return provider request dimensions using OpenLLMAuth model metadata."""
+    if not model_id:
+        return None
+    manager = getattr(llm, "manager", None) or getattr(llm, "provider_manager", None)
+    definition = None
+    resolver = getattr(manager, "embedding_model_definition", None)
+    if callable(resolver):
+        try:
+            definition = resolver(model_id)
+        except Exception:
+            definition = None
+    if definition is None:
+        definition = ProviderManager.local_embedding_model_definition(model_id)
+    if isinstance(definition, dict):
+        dimensions = definition.get("dimensions")
+        if dimensions is not None:
+            try:
+                return int(dimensions)
+            except (TypeError, ValueError):
+                return None
     return None
+
+
+def embedding_model_uses_local_runtime(model_id: Optional[str], llm: Any = None) -> bool:
+    """Return whether OpenCAS should compute the embedding model locally."""
+    if not model_id:
+        return False
+    manager = getattr(llm, "manager", None) or getattr(llm, "provider_manager", None)
+    definition = None
+    resolver = getattr(manager, "embedding_model_definition", None)
+    if callable(resolver):
+        try:
+            definition = resolver(model_id)
+        except Exception:
+            definition = None
+    if definition is None:
+        definition = ProviderManager.local_embedding_model_definition(model_id)
+    return bool(isinstance(definition, dict) and definition.get("local_runtime"))
 
 
 def runtime_guard(config: Any) -> None:

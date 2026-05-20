@@ -3,7 +3,7 @@
 from pathlib import Path
 import pytest
 
-from opencas.identity import KnowledgeEntry, SelfKnowledgeRegistry
+from opencas.identity import SelfKnowledgeRegistry
 
 
 @pytest.fixture
@@ -54,6 +54,24 @@ def test_latest_value_wins(registry: SelfKnowledgeRegistry) -> None:
     fetched = registry.get("tom", "k1")
     assert fetched is not None
     assert fetched.value == "second"
+
+
+def test_recent_value_hash_seen_detects_duplicate_recent_arc(
+    registry: SelfKnowledgeRegistry,
+) -> None:
+    value = {"summary": "Recent cognitive arc: x", "theme_counts": {"x": 1}}
+    registry.record("cognitive_narrative", "recent_arc", value)
+
+    assert registry.recent_value_hash_seen(
+        "cognitive_narrative",
+        "recent_arc",
+        {"theme_counts": {"x": 1}, "summary": "Recent cognitive arc: x"},
+    )
+    assert not registry.recent_value_hash_seen(
+        "cognitive_narrative",
+        "recent_arc",
+        {"summary": "Recent cognitive arc: y", "theme_counts": {"y": 1}},
+    )
 
 
 def test_persistence(tmp_path: Path) -> None:

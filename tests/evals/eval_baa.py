@@ -9,10 +9,9 @@ or tool calls are needed.
 from __future__ import annotations
 
 import asyncio
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List
+from typing import List
 from unittest.mock import MagicMock
 from uuid import uuid4
 
@@ -276,7 +275,7 @@ async def eval_multi_lane_throughput(tmp: Path) -> EvalResult:
         name="baa.multi_lane_throughput",
         passed=passed,
         score=1.0 if passed else 0.0,
-        notes=f"5 tasks across BAA+CRON lanes, all should complete",
+        notes="5 tasks across BAA+CRON lanes, all should complete",
         details=details,
     )
 

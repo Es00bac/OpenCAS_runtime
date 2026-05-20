@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Optional, Set
+from typing import Any, Dict, Set
 
 from fastapi import WebSocket
 

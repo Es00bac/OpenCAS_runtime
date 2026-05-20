@@ -3,7 +3,7 @@
 Usage::
 
     python -m opencas.affective_registry \
-        --registry /mnt/xtra/openbulma-v4/tmp/baa-neural-link-smoke-test \
+        --registry .opencas/affective_registry/events.jsonl \
         --phase boot \
         --valence 0.2 \
         --arousal 0.6 \
@@ -28,6 +28,7 @@ from .models import AffectiveRegistryEntry, AffectiveState, ExecutionContext, Ex
 from .writer import AffectiveRegistryWriter
 
 logger = logging.getLogger(__name__)
+DEFAULT_REGISTRY_PATH = Path(".opencas/affective_registry/events.jsonl")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -38,7 +39,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--registry",
         type=Path,
-        default=Path("/mnt/xtra/openbulma-v4/tmp/baa-neural-link-smoke-test"),
+        default=DEFAULT_REGISTRY_PATH,
         help="Path to the registry file (default: %(default)s)",
     )
     parser.add_argument(

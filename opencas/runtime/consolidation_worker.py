@@ -6,8 +6,10 @@ import argparse
 import asyncio
 import json
 import os
+import signal
 import subprocess
 import sys
+import time
 import traceback
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,6 +30,7 @@ from opencas.bootstrap.pipeline_support import (
 from opencas.consolidation import ConsolidationCurationStore, NightlyConsolidationEngine
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.identity import IdentityManager, IdentityStore
+from opencas.generation.policy import load_persisted_generation_policy
 from opencas.memory import MemoryStore
 from opencas.model_routing import load_persisted_model_routing_state
 from opencas.tom import TomStore
@@ -82,6 +85,82 @@ def load_consolidation_worker_status(state_dir: Path | str) -> Dict[str, Any]:
     except Exception:
         return {"status": "unreadable", "path": str(path)}
     return payload if isinstance(payload, dict) else {}
+
+
+def cancel_active_consolidation_worker(
+    state_dir: Path | str,
+    *,
+    reason: str = "foreground_user_turn",
+    grace_seconds: float = 5.0,
+) -> Dict[str, Any]:
+    """Cancel a running consolidation worker so foreground interaction can proceed."""
+    status = load_consolidation_worker_status(state_dir)
+    if str(status.get("status") or "").lower() != "running":
+        return {"cancelled": False, "reason": "not_running"}
+
+    pid_raw = status.get("pid")
+    try:
+        pid = int(pid_raw)
+    except (TypeError, ValueError):
+        return {"cancelled": False, "reason": "missing_pid", "status": status}
+    if pid == os.getpid():
+        return {"cancelled": False, "reason": "refusing_to_cancel_current_process", "pid": pid}
+
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return {"cancelled": False, "reason": "stale_status", "pid": pid}
+    except PermissionError:
+        return {"cancelled": False, "reason": "permission_denied", "pid": pid}
+
+    run_id = str(status.get("run_id") or "")
+    timestamp = _now_iso()
+    result_path_value = status.get("result_path")
+    result_path = (
+        Path(result_path_value)
+        if result_path_value
+        else consolidation_worker_result_path(state_dir, run_id or f"cancelled-{int(time.time())}")
+    )
+    status_path = consolidation_worker_status_path(state_dir)
+    worker = {
+        "mode": status.get("mode") or "subprocess",
+        "run_id": run_id,
+        "pid": pid,
+        "status": "cancelled",
+        "reason": reason,
+        "result_path": str(result_path),
+        "status_path": str(status_path),
+        "updated_at": timestamp,
+    }
+    payload = {
+        "result_id": f"worker-cancelled-{run_id or pid}",
+        "timestamp": timestamp,
+        "budget_exhausted": True,
+        "budget_reason": reason,
+        "worker": worker,
+    }
+
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except ProcessLookupError:
+        pass
+    deadline = time.monotonic() + max(0.0, float(grace_seconds))
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        time.sleep(0.05)
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+            worker["status"] = "killed"
+        except ProcessLookupError:
+            pass
+
+    _write_json(result_path, payload)
+    _write_json(status_path, worker)
+    return payload
 
 
 def _workspace_root_from_config(config: Any) -> Path:
@@ -263,6 +342,12 @@ async def run_consolidation_in_worker_process(
         raise
 
     result_payload = _load_result_payload(command.result_path)
+    if not result_payload:
+        cancel_payload = _cancelled_status_payload(command, process.returncode)
+        if cancel_payload:
+            return cancel_payload
+    if not result_payload:
+        result_payload = await _load_result_payload_after_brief_wait(command.result_path)
     if result_payload:
         worker = dict(result_payload.get("worker") or {})
         worker.update(
@@ -276,6 +361,10 @@ async def run_consolidation_in_worker_process(
         )
         result_payload["worker"] = worker
         return result_payload
+
+    cancel_payload = _cancelled_status_payload(command, process.returncode)
+    if cancel_payload:
+        return cancel_payload
 
     timestamp = _now_iso()
     return {
@@ -302,6 +391,52 @@ def _load_result_payload(path: Path) -> Dict[str, Any]:
     except Exception:
         return {}
     return payload if isinstance(payload, dict) else {}
+
+
+async def _load_result_payload_after_brief_wait(
+    path: Path,
+    *,
+    wait_seconds: float = 0.75,
+) -> Dict[str, Any]:
+    """Give external foreground cancellation a moment to materialize its result file."""
+    deadline = time.monotonic() + max(0.0, float(wait_seconds))
+    while time.monotonic() < deadline:
+        await asyncio.sleep(0.05)
+        payload = _load_result_payload(path)
+        if payload:
+            return payload
+    return {}
+
+
+def _cancelled_status_payload(
+    command: ConsolidationWorkerCommand,
+    returncode: Optional[int],
+) -> Dict[str, Any]:
+    status = _load_result_payload(command.status_path)
+    worker_status = str(status.get("status") or "").lower()
+    if worker_status not in {"cancelled", "killed"}:
+        return {}
+    if str(status.get("run_id") or "") != command.run_id:
+        return {}
+    reason = str(status.get("reason") or "worker_cancelled").strip() or "worker_cancelled"
+    timestamp = str(status.get("updated_at") or _now_iso())
+    worker = dict(status)
+    worker.update(
+        {
+            "mode": worker.get("mode") or "subprocess",
+            "run_id": command.run_id,
+            "returncode": returncode,
+            "result_path": str(command.result_path),
+            "status_path": str(command.status_path),
+        }
+    )
+    return {
+        "result_id": f"worker-cancelled-{command.run_id}",
+        "timestamp": timestamp,
+        "budget_exhausted": True,
+        "budget_reason": reason,
+        "worker": worker,
+    }
 
 
 def _read_materialized_default_model(state_dir: Path) -> Optional[str]:
@@ -332,6 +467,9 @@ def _build_worker_bootstrap_config(args: argparse.Namespace) -> BootstrapConfig:
         config_kwargs["model_routing"] = persisted_model_routing.model_routing
         if persisted_model_routing.default_llm_model:
             config_kwargs["default_llm_model"] = persisted_model_routing.default_llm_model
+    persisted_generation_policy = load_persisted_generation_policy(state_dir)
+    if persisted_generation_policy is not None:
+        config_kwargs["generation_policy"] = persisted_generation_policy
     if args.default_llm_model:
         config_kwargs["default_llm_model"] = args.default_llm_model
     elif not config_kwargs.get("default_llm_model") and materialized_default:
@@ -384,21 +522,28 @@ async def _connect_and_run_worker(
             provider_manager=provider_manager,
             default_model=config.default_llm_model,
             model_routing=config.model_routing,
+            generation_policy=config.generation_policy,
         )
         embed_model = resolve_embedding_model(config, llm)
-        embed_dimensions = resolve_embedding_dimensions(embed_model)
-        embed_fn = None
-        # Match normal bootstrap: Gemma is served by the local embedder at
-        # its native 768-dimensional text embedding size.
-        if embed_model not in {"local-fallback", "google/embeddinggemma-300m"}:
-            embed_fn = lambda text: llm.embed(
+        embed_dimensions = resolve_embedding_dimensions(embed_model, llm)
+        def embed_fn(text: str) -> Any:
+            return llm.embed(
                 text,
                 model=embed_model,
                 dimensions=embed_dimensions,
             )
+
+        def embed_batch_fn(texts: list[str]) -> Any:
+            return llm.embed_batch(
+                texts,
+                model=embed_model,
+                dimensions=embed_dimensions,
+            )
+
         embeddings = EmbeddingService(
             cache=embedding_cache,
             embed_fn=embed_fn,
+            embed_batch_fn=embed_batch_fn,
             expected_dimension=embed_dimensions,
             model_id=embed_model,
             store=memory,

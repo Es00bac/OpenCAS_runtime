@@ -123,6 +123,30 @@ async def list_episodes(
     return [deserialize_episode(row) for row in rows]
 
 
+async def list_episodes_for_session(
+    store: "MemoryStore",
+    session_id: str,
+    include_compacted: bool = True,
+    limit: int = 500,
+) -> List[Episode]:
+    """Return all episodes for one session in chronological order."""
+    conditions = ["session_id = ?"]
+    params: List[Any] = [session_id]
+    if not include_compacted:
+        conditions.append("compacted = 0")
+    cursor = await store._execute(
+        f"""
+        SELECT * FROM episodes
+        WHERE {" AND ".join(conditions)}
+        ORDER BY created_at ASC
+        LIMIT ?
+        """,
+        (*params, limit),
+    )
+    rows = await cursor.fetchall()
+    return [deserialize_episode(row) for row in rows]
+
+
 async def list_artifact_episodes(store: "MemoryStore", artifact_path: str) -> List[Episode]:
     """Return artifact-backed episodes for a specific relative artifact path."""
     assert store._db is not None
@@ -300,19 +324,38 @@ async def compaction_backlog_stats(
     *,
     tail_size: int = 10,
 ) -> Dict[str, Any]:
-    """Return exact compaction backlog stats, excluding per-session retained tails."""
+    """Return exact compaction backlog stats, excluding non-session reference material.
+
+    Conversation compaction operates on session-addressable episodes. Durable
+    reference artifacts can be useful long-term memory without belonging to a
+    conversation session, so they must be reported separately rather than
+    counted as compactable backlog that the compactor can never consume.
+    """
     assert store._db is not None
     retained_tail = max(0, int(tail_size))
     cursor = await store._db.execute(
         """
-        SELECT COALESCE(session_id, 'unknown') AS session_id, COUNT(*) AS count
+        SELECT session_id, COUNT(*) AS count
         FROM episodes
         WHERE compacted = 0
-        GROUP BY COALESCE(session_id, 'unknown')
+          AND session_id IS NOT NULL
+          AND TRIM(session_id) != ''
+        GROUP BY session_id
         ORDER BY count DESC, session_id ASC
         """
     )
     rows = await cursor.fetchall()
+    sessionless_cursor = await store._db.execute(
+        """
+        SELECT kind, COUNT(*) AS count
+        FROM episodes
+        WHERE compacted = 0
+          AND (session_id IS NULL OR TRIM(session_id) = '')
+        GROUP BY kind
+        ORDER BY count DESC, kind ASC
+        """
+    )
+    sessionless_rows = await sessionless_cursor.fetchall()
     session_counts = [
         {
             "session_id": str(row["session_id"]),
@@ -322,14 +365,25 @@ async def compaction_backlog_stats(
         for row in rows
     ]
     compactable_sessions = [entry for entry in session_counts if entry["compactable"] > 0]
+    sessionless_kind_counts = {
+        str(row["kind"] or "unknown"): int(row["count"])
+        for row in sessionless_rows
+    }
+    session_non_compacted = sum(entry["count"] for entry in session_counts)
+    sessionless_non_compacted = sum(sessionless_kind_counts.values())
     return {
         "tail_size": retained_tail,
         "session_count": len(session_counts),
-        "total_non_compacted": sum(entry["count"] for entry in session_counts),
+        "session_non_compacted": session_non_compacted,
+        "sessionless_non_compacted": sessionless_non_compacted,
+        "non_compactable_reference_lag": sessionless_non_compacted,
+        "total_non_compacted": session_non_compacted + sessionless_non_compacted,
         "compactable_lag": sum(entry["compactable"] for entry in compactable_sessions),
         "compactable_session_count": len(compactable_sessions),
         "max_session_lag": max((entry["count"] for entry in session_counts), default=0),
         "top_sessions": session_counts[:10],
+        "compactable_sessions": compactable_sessions[:100],
+        "sessionless_kind_counts": sessionless_kind_counts,
     }
 
 

@@ -1,6 +1,8 @@
 """Tests for the persistent ToM store."""
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
 import pytest
 import pytest_asyncio
 
@@ -23,6 +25,36 @@ async def test_save_and_list_beliefs(store: TomStore) -> None:
     results = await store.list_beliefs()
     assert len(results) == 1
     assert results[0].predicate == "likes tea"
+
+
+@pytest.mark.asyncio
+async def test_save_and_list_structured_belief_fields(store: TomStore) -> None:
+    valid_from = datetime.now(timezone.utc)
+    valid_until = valid_from + timedelta(days=30)
+    b = Belief(
+        subject=BeliefSubject.USER,
+        predicate="likes tea",
+        confidence=0.8,
+        relation="likes",
+        object="tea",
+        source_kind="direct_user_report",
+        source_strength=0.88,
+        valid_from=valid_from,
+        valid_until=valid_until,
+        decay_rate=0.02,
+    )
+    await store.save_belief(b)
+
+    results = await store.list_beliefs()
+
+    assert len(results) == 1
+    assert results[0].relation == "likes"
+    assert results[0].object == "tea"
+    assert results[0].source_kind == "direct_user_report"
+    assert results[0].source_strength == 0.88
+    assert results[0].valid_from is not None
+    assert results[0].valid_until is not None
+    assert results[0].decay_rate == 0.02
 
 
 @pytest.mark.asyncio
@@ -57,9 +89,10 @@ async def test_resolve_intention(store: TomStore) -> None:
 
 @pytest.mark.asyncio
 async def test_hydration_capped(store: TomStore) -> None:
-    from opencas.tom.engine import ToMEngine
-    from opencas.identity import IdentityManager, IdentityStore
     import tempfile
+
+    from opencas.identity import IdentityManager, IdentityStore
+    from opencas.tom.engine import ToMEngine
 
     with tempfile.TemporaryDirectory() as td:
         identity = IdentityManager(IdentityStore(Path(td) / "identity"))
@@ -91,6 +124,35 @@ async def test_get_belief_by_predicate(store: TomStore) -> None:
 
 
 @pytest.mark.asyncio
+async def test_agent_belief_entity_filter_persists(store: TomStore) -> None:
+    await store.save_belief(
+            Belief(
+                subject=BeliefSubject.AGENT,
+                predicate="can audit opencas",
+            confidence=0.7,
+            meta={"entity_id": "opus", "entity_label": "Opus"},
+        )
+    )
+    await store.save_belief(
+            Belief(
+                subject=BeliefSubject.AGENT,
+                predicate="can audit opencas",
+            confidence=0.8,
+            meta={"entity_id": "codex", "entity_label": "Codex"},
+        )
+    )
+
+    opus = await store.get_belief_by_predicate(
+        BeliefSubject.AGENT,
+        "can audit opencas",
+        entity_id="opus",
+    )
+
+    assert opus is not None
+    assert opus.meta["entity_id"] == "opus"
+
+
+@pytest.mark.asyncio
 async def test_increment_belief_reinforcement(store: TomStore) -> None:
     from datetime import datetime, timezone
 
@@ -112,9 +174,10 @@ async def test_increment_belief_reinforcement(store: TomStore) -> None:
 @pytest.mark.asyncio
 async def test_reinforcement_deduplication(store: TomStore) -> None:
     """Recording the same belief 10 times should produce 1 reinforced row, not 10 duplicates."""
-    from opencas.tom.engine import ToMEngine
-    from opencas.identity import IdentityManager, IdentityStore
     import tempfile
+
+    from opencas.identity import IdentityManager, IdentityStore
+    from opencas.tom.engine import ToMEngine
 
     with tempfile.TemporaryDirectory() as td:
         identity = IdentityManager(IdentityStore(Path(td) / "identity"))
@@ -133,9 +196,10 @@ async def test_reinforcement_deduplication(store: TomStore) -> None:
 @pytest.mark.asyncio
 async def test_different_predicates_not_deduplicated(store: TomStore) -> None:
     """Different predicates should remain separate beliefs."""
-    from opencas.tom.engine import ToMEngine
-    from opencas.identity import IdentityManager, IdentityStore
     import tempfile
+
+    from opencas.identity import IdentityManager, IdentityStore
+    from opencas.tom.engine import ToMEngine
 
     with tempfile.TemporaryDirectory() as td:
         identity = IdentityManager(IdentityStore(Path(td) / "identity"))
@@ -153,9 +217,10 @@ async def test_different_predicates_not_deduplicated(store: TomStore) -> None:
 @pytest.mark.asyncio
 async def test_reinforcement_persists_across_load(store: TomStore) -> None:
     """Reinforced beliefs should survive store hydration."""
-    from opencas.tom.engine import ToMEngine
-    from opencas.identity import IdentityManager, IdentityStore
     import tempfile
+
+    from opencas.identity import IdentityManager, IdentityStore
+    from opencas.tom.engine import ToMEngine
 
     with tempfile.TemporaryDirectory() as td:
         identity = IdentityManager(IdentityStore(Path(td) / "identity"))

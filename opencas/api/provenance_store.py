@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Mapping, Sequence
+from typing import Any, Iterator, List, Mapping, Sequence
 
 from .provenance_schema import (
     ActorIdentity,
@@ -29,12 +30,16 @@ from .provenance_schema import (
     parse_provenance_transition,
     provenance_record_from_json,
     provenance_record_to_dict,
+    provenance_transition_to_dict,
     serialize_provenance_record,
     serialize_provenance_transition,
     transition_verification_status,
     validate_provenance_record,
     validate_provenance_transition,
 )
+
+DEFAULT_TRANSITION_MAX_BYTES = 128 * 1024 * 1024
+DEFAULT_TRANSITION_ARCHIVE_LIMIT = 4
 
 __all__ = [
     "ActorIdentity",
@@ -120,9 +125,25 @@ def _normalize_linked_ids(*values: Any) -> List[str]:
 class ProvenanceEntryStore:
     """Persist canonical provenance records as newline-delimited JSON."""
 
-    def __init__(self, path: Path | str) -> None:
+    def __init__(
+        self,
+        path: Path | str,
+        *,
+        transition_max_bytes: int | None = None,
+        transition_archive_limit: int | None = None,
+    ) -> None:
         self.path = Path(path)
         self.transition_path = self._derive_transition_path()
+        self.transition_max_bytes = _env_int(
+            "OPENCAS_PROVENANCE_TRANSITION_MAX_BYTES",
+            DEFAULT_TRANSITION_MAX_BYTES if transition_max_bytes is None else transition_max_bytes,
+        )
+        self.transition_archive_limit = _env_int(
+            "OPENCAS_PROVENANCE_TRANSITION_ARCHIVE_LIMIT",
+            DEFAULT_TRANSITION_ARCHIVE_LIMIT
+            if transition_archive_limit is None
+            else transition_archive_limit,
+        )
 
     def append(self, entry: ProvenanceRecord | Mapping[str, Any]) -> ProvenanceRecord:
         record = self._coerce_entry(entry)
@@ -150,6 +171,7 @@ class ProvenanceEntryStore:
         """Append one immutable provenance transition record."""
 
         record = self._coerce_transition(entry)
+        self.rotate_transition_log()
         self._append_line(self.transition_path, format_provenance_transition(record))
         return record
 
@@ -270,18 +292,47 @@ class ProvenanceEntryStore:
     ) -> List[ProvenanceTransitionRecord]:
         """Return immutable transition history in append order."""
 
-        if not self.transition_path.exists():
-            return []
-
-        with self.transition_path.open("r", encoding="utf-8") as handle:
-            items = [
-                parse_provenance_transition_entry(line)
-                for line in handle.read().splitlines()
-                if line.strip()
-            ]
+        items = [
+            record
+            for line in self._iter_transition_lines()
+            if line.strip()
+            for record in [self._parse_transition_line(line)]
+            if record is not None
+        ]
         if limit is None:
             return items[offset:]
         return items[offset : offset + limit]
+
+    def rotate_transition_log(self, *, force: bool = False) -> dict[str, Any]:
+        """Archive an oversized transition log and seed the active log with checkpoints."""
+
+        if not self.transition_path.exists():
+            return {"rotated": False, "reason": "missing"}
+        max_bytes = int(self.transition_max_bytes or 0)
+        current_bytes = self.transition_path.stat().st_size
+        if not force and (max_bytes <= 0 or current_bytes <= max_bytes):
+            return {
+                "rotated": False,
+                "reason": "below_threshold",
+                "size_bytes": current_bytes,
+                "max_bytes": max_bytes,
+            }
+
+        current_status = self.list_current_status(limit=None)
+        skipped_invalid = getattr(self, "_last_transition_parse_errors", 0)
+        archive_path = self._next_transition_archive_path()
+        self.transition_path.rename(archive_path)
+        checkpointed = self._write_rotation_checkpoints(current_status, archive_path)
+        removed_archives = self._prune_transition_archives()
+        return {
+            "rotated": True,
+            "archive_path": str(archive_path),
+            "size_bytes": current_bytes,
+            "max_bytes": max_bytes,
+            "checkpointed": checkpointed,
+            "skipped_invalid_lines": skipped_invalid,
+            "removed_archives": [str(path) for path in removed_archives],
+        }
 
     def list_current_status(
         self,
@@ -395,13 +446,108 @@ class ProvenanceEntryStore:
 
     def _current_status_index(self) -> dict[tuple[str, str], tuple[int, ProvenanceTransitionRecord]]:
         latest: dict[tuple[str, str], tuple[int, ProvenanceTransitionRecord]] = {}
-        for index, record in enumerate(self.list_transition_history(limit=None)):
+        skipped_invalid = 0
+        for index, line in enumerate(self._iter_transition_lines()):
+            if not line.strip():
+                continue
+            record = self._parse_transition_line(line)
+            if record is None:
+                skipped_invalid += 1
+                continue
             latest[(record.session_id, record.entity_id)] = (index, record)
+        self._last_transition_parse_errors = skipped_invalid
         return latest
+
+    @staticmethod
+    def _parse_transition_line(line: str) -> ProvenanceTransitionRecord | None:
+        try:
+            return parse_provenance_transition_entry(line)
+        except ProvenanceParseError:
+            return None
 
     def _derive_transition_path(self) -> Path:
         suffix = self.path.suffix or ".jsonl"
         return self.path.with_name(f"{self.path.stem}.transitions{suffix}")
+
+    def _iter_transition_lines(self) -> Iterator[str]:
+        for path in self._transition_history_paths():
+            with path.open("r", encoding="utf-8") as handle:
+                yield from handle
+
+    def _transition_history_paths(self) -> list[Path]:
+        paths = self._transition_archive_paths()
+        if self.transition_path.exists():
+            paths.append(self.transition_path)
+        return paths
+
+    def _transition_archive_paths(self) -> list[Path]:
+        pattern = f"{self.transition_path.stem}.*{self.transition_path.suffix}"
+        return sorted(
+            path
+            for path in self.transition_path.parent.glob(pattern)
+            if path.is_file() and path != self.transition_path
+        )
+
+    def _next_transition_archive_path(self) -> Path:
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+        base = self.transition_path.with_name(
+            f"{self.transition_path.stem}.{stamp}{self.transition_path.suffix}"
+        )
+        if not base.exists():
+            return base
+        counter = 1
+        while True:
+            candidate = self.transition_path.with_name(
+                f"{self.transition_path.stem}.{stamp}.{counter}{self.transition_path.suffix}"
+            )
+            if not candidate.exists():
+                return candidate
+            counter += 1
+
+    def _write_rotation_checkpoints(
+        self,
+        records: Sequence[ProvenanceTransitionRecord],
+        archive_path: Path,
+    ) -> int:
+        if not records:
+            return 0
+        checkpointed_at = self._now_iso8601()
+        ordered = sorted(records, key=lambda record: record.recorded_at)
+        for record in ordered:
+            details = dict(record.details)
+            details.update(
+                {
+                    "rotation_checkpoint": True,
+                    "checkpoint_source_archive": archive_path.name,
+                    "checkpoint_source_transition_id": record.transition_id,
+                    "checkpoint_source_recorded_at": record.recorded_at,
+                }
+            )
+            checkpoint = ProvenanceTransitionRecord(
+                transition_id=(
+                    f"{record.transition_id}:rotation_checkpoint:{archive_path.stem}"
+                ),
+                session_id=record.session_id,
+                entity_id=record.entity_id,
+                kind=record.kind,
+                status=record.status,
+                recorded_at=checkpointed_at,
+                details=details,
+            )
+            self._append_line(self.transition_path, format_provenance_transition(checkpoint))
+        return len(ordered)
+
+    def _prune_transition_archives(self) -> list[Path]:
+        limit = int(self.transition_archive_limit or 0)
+        if limit <= 0:
+            return []
+        archives = self._transition_archive_paths()
+        removable = archives[: max(0, len(archives) - limit)]
+        removed: list[Path] = []
+        for path in removable:
+            path.unlink(missing_ok=True)
+            removed.append(path)
+        return removed
 
     def _default_transition_id(
         self,
@@ -423,6 +569,16 @@ class ProvenanceEntryStore:
         with path.open("a", encoding="utf-8") as handle:
             handle.write(line + "\n")
             handle.flush()
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return int(default)
+    try:
+        return int(value)
+    except ValueError:
+        return int(default)
 
 
 def record_provenance_transition(

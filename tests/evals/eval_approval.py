@@ -10,12 +10,11 @@ Measures whether SelfApprovalLadder produces correct approval decisions:
 
 from __future__ import annotations
 
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List
 
-from opencas.autonomy.models import ActionRequest, ActionRiskTier, ApprovalLevel, WorkObject
+from opencas.autonomy.models import ActionRequest, ActionRiskTier, ApprovalLevel
 from opencas.autonomy.self_approval import SelfApprovalLadder
 from opencas.identity import IdentityManager
 from opencas.identity.store import IdentityStore

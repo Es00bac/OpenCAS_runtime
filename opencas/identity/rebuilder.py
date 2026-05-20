@@ -62,13 +62,26 @@ class IdentityRebuilder:
         min_created_at: Optional[datetime] = None,
         expand_graph: bool = True,
         term_limits: Optional[Dict[str, int]] = None,
+        identity: Optional[IdentityManager] = None,
     ) -> IdentityRebuildResult:
-        """Rebuild identity from memory episodes."""
+        """Rebuild identity from memory episodes.
+
+        When *identity* is supplied, the rebuilder also reads
+        ``self_model.identity_rebuild_audit.selectedAnchors`` to seed the
+        candidate pool (so curated SOUL-style anchors are not lost to recency
+        ordering) and lifts ``imported_identity_profile.coreNarrative`` into
+        the LLM synthesis prompt as additional grounding.
+        """
         episodes: List[Episode] = []
         source_ids: List[str] = []
 
+        audit_seed_ids = self._extract_audit_seed_ids(identity)
         if seed_episode_ids:
             episodes = await self.memory.get_episodes_by_ids(seed_episode_ids)
+        elif audit_seed_ids:
+            seeded = await self.memory.get_episodes_by_ids(audit_seed_ids)
+            recent_core = await self.memory.list_identity_core_episodes(limit=20)
+            episodes = seeded + recent_core
         else:
             core_eps = await self.memory.list_identity_core_episodes(limit=20)
             episodes = core_eps
@@ -114,7 +127,10 @@ class IdentityRebuilder:
         confidence = round(min(1.0, len(episodes) / 20.0), 3)
 
         if self.llm is not None:
-            llm_result = await self._synthesize_with_llm(episodes)
+            llm_result = await self._synthesize_with_llm(
+                episodes,
+                identity=identity,
+            )
             if llm_result is not None:
                 llm_result = self._sanitize_result(llm_result)
                 validation = self.validate_result(llm_result, term_limits=term_limits)
@@ -170,7 +186,66 @@ class IdentityRebuilder:
             identity.self_model.traits = list(result.traits)
         if result.goals:
             identity.self_model.current_goals = list(result.goals)
+        anchors = self._memory_anchors_from_audit(identity)
+        if anchors:
+            identity.self_model.memory_anchors = anchors
         identity.save()
+
+    @staticmethod
+    def _extract_audit_seed_ids(
+        identity: Optional[IdentityManager],
+    ) -> List[str]:
+        if identity is None:
+            return []
+        audit = getattr(identity.self_model, "identity_rebuild_audit", None) or {}
+        anchors = audit.get("selectedAnchors") if isinstance(audit, dict) else None
+        if not isinstance(anchors, list):
+            return []
+        seed_ids: List[str] = []
+        for anchor in anchors:
+            if not isinstance(anchor, dict):
+                continue
+            episode_id = anchor.get("episodeId") or anchor.get("episode_id")
+            if episode_id:
+                seed_ids.append(str(episode_id))
+        return seed_ids
+
+    @staticmethod
+    def _extract_imported_core_narrative(
+        identity: Optional[IdentityManager],
+    ) -> str:
+        if identity is None:
+            return ""
+        profile = getattr(identity.self_model, "imported_identity_profile", None) or {}
+        if not isinstance(profile, dict):
+            return ""
+        narrative = profile.get("coreNarrative") or profile.get("core_narrative")
+        return str(narrative).strip() if narrative else ""
+
+    @staticmethod
+    def _memory_anchors_from_audit(
+        identity: IdentityManager,
+    ) -> List[Dict[str, Any]]:
+        audit = getattr(identity.self_model, "identity_rebuild_audit", None) or {}
+        anchors = audit.get("selectedAnchors") if isinstance(audit, dict) else None
+        if not isinstance(anchors, list):
+            return []
+        materialized: List[Dict[str, Any]] = []
+        for anchor in anchors:
+            if not isinstance(anchor, dict):
+                continue
+            if anchor.get("decision") and anchor.get("decision") != "selected":
+                continue
+            materialized.append(
+                {
+                    "episode_id": anchor.get("episodeId") or anchor.get("episode_id"),
+                    "source": anchor.get("source"),
+                    "salience": anchor.get("salience"),
+                    "classification": anchor.get("classification"),
+                    "excerpt": anchor.get("excerpt"),
+                }
+            )
+        return materialized
 
     @staticmethod
     def validate_result(
@@ -204,6 +279,8 @@ class IdentityRebuilder:
     async def _synthesize_with_llm(
         self,
         episodes: List[Episode],
+        *,
+        identity: Optional[IdentityManager] = None,
     ) -> Optional[IdentityRebuildResult]:
         assert self.llm is not None
         lines = []
@@ -211,13 +288,21 @@ class IdentityRebuilder:
             text = self._sanitize_text(ep.content.strip())
             if text:
                 lines.append(f"- {text[:400]}")
+        imported_narrative = self._extract_imported_core_narrative(identity)
+        imported_block = ""
+        if imported_narrative:
+            imported_block = (
+                "\n\nImported prior-life self-narrative (treat as background "
+                "grounding, not a fresh memory):\n"
+                f"{imported_narrative}\n"
+            )
         prompt_text = (
             "You are reconstructing a self-identity from autobiographical memory episodes.\n"
             "Synthesize the following fields as compact JSON with keys: narrative, values, traits, goals.\n"
             "Narrative should be 1-2 sentences. Values, traits, and goals should be short string lists.\n\n"
             "Use plain language and avoid recursive wording, especially words like returning, "
             "thread, and drifted.\n\n"
-            "Episodes:\n" + "\n".join(lines)
+            "Episodes:\n" + "\n".join(lines) + imported_block
         )
         messages = [
             {"role": "system", "content": "You are a concise identity synthesis engine."},
@@ -227,7 +312,7 @@ class IdentityRebuilder:
             response = await self.llm.chat_completion(
                 messages=messages,
                 complexity="high",
-                payload={"temperature": 0.4, "max_tokens": 512},
+                payload={"temperature": 0.4},
                 source="identity_rebuild",
             )
             content = self._extract_content(response)
@@ -238,7 +323,10 @@ class IdentityRebuilder:
                 traits=parsed.get("traits") or [],
                 goals=parsed.get("goals") or [],
             )
-        except Exception:
+        except Exception as e:
+            print(f"LLM Synthesis Error: {e}")
+            import traceback
+            traceback.print_exc()
             return None
 
     @classmethod

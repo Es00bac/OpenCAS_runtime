@@ -7,7 +7,7 @@ from opencas.context import MemoryRetriever
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.execution import BoundedAssistantAgent, RepairTask
 from opencas.execution.models import RepairResult
-from opencas.memory import Episode, EpisodeKind, Memory, MemoryStore
+from opencas.memory import Episode, EpisodeKind, MemoryStore
 from opencas.tools import ToolRegistry
 
 

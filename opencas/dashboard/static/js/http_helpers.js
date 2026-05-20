@@ -54,7 +54,24 @@
   async function fetchJson(url, options) {
     const response = await fetch(url, options);
     if (!response.ok) {
-      throw new Error(`${options?.method || 'GET'} ${url} failed: ${response.status}`);
+      const payload = await safeJson(response, {});
+      const detail = payload?.detail;
+      let detailText = '';
+      if (typeof detail === 'string') {
+        detailText = detail;
+      } else if (detail && typeof detail === 'object') {
+        detailText = detail.message || detail.code || JSON.stringify(detail);
+      } else if (payload?.error) {
+        detailText = String(payload.error);
+      }
+      const error = new Error(`${options?.method || 'GET'} ${url} failed: ${response.status}${detailText ? ` - ${detailText}` : ''}`);
+      error.status = response.status;
+      error.detail = detail;
+      error.payload = payload;
+      if (detail && typeof detail === 'object' && detail.code) {
+        error.code = detail.code;
+      }
+      throw error;
     }
     return await safeJson(response, {});
   }

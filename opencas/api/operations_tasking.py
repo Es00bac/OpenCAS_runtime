@@ -7,6 +7,8 @@ from typing import Any, Callable, Dict, Optional
 
 from opencas.api.operations_models import CommitmentEntry, CommitmentListResponse, CommitmentUpdateRequest, PlanListResponse, PlanSummary, PlanUpdateRequest, WorkItemEntry, WorkListResponse, WorkUpdateRequest
 from opencas.autonomy.commitment import CommitmentStatus, commitment_operator_snapshot
+from opencas.autonomy.commitment_work import settle_linked_work_for_terminal_commitment
+from opencas.autonomy.completion_evidence import completion_evidence_rejection_reason
 
 
 def _serialize_work_item(item: Any) -> Dict[str, Any]:
@@ -102,6 +104,10 @@ class TaskingOperationsService:
         if changed:
             updated.updated_at = datetime.now(timezone.utc)
             await store.save(updated)
+            executive = getattr(self.runtime, "executive", None)
+            reconcile = getattr(executive, "reconcile_work_update", None)
+            if callable(reconcile):
+                reconcile(updated)
         return {"found": True, "item": _serialize_work_item(updated)}
 
     async def list_commitments(self, *, status: str = "active", limit: int = 50) -> CommitmentListResponse:
@@ -170,7 +176,22 @@ class TaskingOperationsService:
             changed = True
         if changed:
             updated.updated_at = datetime.now(timezone.utc)
+            if payload.status == CommitmentStatus.COMPLETED:
+                reason = completion_evidence_rejection_reason(updated, payload.completion_evidence)
+                if reason:
+                    return {
+                        "found": True,
+                        "error": reason,
+                        "commitment": commitment_operator_snapshot(item, include_meta=True),
+                    }
             await store.save(updated)
+            if payload.status in {CommitmentStatus.COMPLETED, CommitmentStatus.ABANDONED}:
+                await settle_linked_work_for_terminal_commitment(
+                    self.runtime,
+                    updated,
+                    payload.status,
+                    completion_evidence=payload.completion_evidence,
+                )
         return {"found": True, "commitment": commitment_operator_snapshot(updated, include_meta=True)}
 
     async def list_plans(self, *, project_id: Optional[str] = None, limit: int = 20) -> PlanListResponse:

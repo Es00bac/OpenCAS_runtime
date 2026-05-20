@@ -11,6 +11,10 @@ from pydantic import BaseModel, Field
 
 MAX_CONTINUATION_HANDLES_PER_MESSAGE = 8
 MAX_RETRIEVAL_CUES_PER_CONTINUATION_HANDLE = 6
+MAX_HISTORY_SYSTEM_ENTRY_CHARS = 6_000
+MAX_HISTORY_COMPACTION_ENTRY_CHARS = 4_000
+MAX_HISTORY_SYSTEM_PROMPT_CHARS = 16_000
+HISTORY_SYSTEM_OMISSION_NOTICE = "[older system context omitted to keep prompt bounded]"
 
 
 class MessageRole(str, Enum):
@@ -99,10 +103,14 @@ class ContextManifest(BaseModel):
             if entry.meta.get("hidden"):
                 continue
             if entry.role == MessageRole.SYSTEM:
-                history_system_content.append(self.render_entry_content_for_prompt(entry))
+                history_system_content.append(
+                    self._render_bounded_history_system_content(entry)
+                )
 
         if history_system_content:
-            system_content.append("\n\n".join(history_system_content))
+            system_content.append(
+                "\n\n".join(self._bound_history_system_content(history_system_content))
+            )
 
         if system_content:
             messages.append({"role": "system", "content": "\n\n".join(system_content)})
@@ -135,6 +143,73 @@ class ContextManifest(BaseModel):
         if continuation_block and "Continuation handles:" not in content:
             content = f"{content}\n{continuation_block}" if content else continuation_block
         return content
+
+    @staticmethod
+    def _render_bounded_history_system_content(entry: MessageEntry) -> str:
+        content = ContextManifest.render_entry_content_for_prompt(entry)
+        if not content:
+            return ""
+        limit = (
+            MAX_HISTORY_COMPACTION_ENTRY_CHARS
+            if ContextManifest._is_compaction_system_entry(entry, content)
+            else MAX_HISTORY_SYSTEM_ENTRY_CHARS
+        )
+        return ContextManifest._clip_middle(
+            content,
+            limit,
+            marker="\n... [system context truncated]\n",
+        )
+
+    @staticmethod
+    def _bound_history_system_content(entries: List[str]) -> List[str]:
+        selected: List[str] = []
+        used_chars = 0
+        omitted = 0
+        for entry in reversed([item for item in entries if item]):
+            separator_cost = 2 if selected else 0
+            remaining = MAX_HISTORY_SYSTEM_PROMPT_CHARS - used_chars - separator_cost
+            if remaining <= 0:
+                omitted += 1
+                continue
+            if len(entry) > remaining:
+                if remaining < 400:
+                    omitted += 1
+                    continue
+                selected.append(
+                    ContextManifest._clip_middle(
+                        entry,
+                        remaining,
+                        marker="\n... [system context truncated]\n",
+                    )
+                )
+                used_chars = MAX_HISTORY_SYSTEM_PROMPT_CHARS
+                continue
+            selected.append(entry)
+            used_chars += len(entry) + separator_cost
+
+        bounded = list(reversed(selected))
+        if omitted:
+            bounded.insert(0, HISTORY_SYSTEM_OMISSION_NOTICE)
+        return bounded
+
+    @staticmethod
+    def _is_compaction_system_entry(entry: MessageEntry, content: str) -> bool:
+        source = str(entry.meta.get("source") or "")
+        if source in {"compaction_narrative_bridge", "compaction_continuation"}:
+            return True
+        return content.lstrip().startswith("[Context: earlier conversation was compacted.")
+
+    @staticmethod
+    def _clip_middle(text: str, max_chars: int, *, marker: str) -> str:
+        text = str(text or "")
+        if len(text) <= max_chars:
+            return text
+        if max_chars <= len(marker) + 20:
+            return text[:max_chars]
+        available = max_chars - len(marker)
+        head = available // 2
+        tail = available - head
+        return text[:head] + marker + text[-tail:]
 
     @staticmethod
     def _render_user_content(entry: MessageEntry) -> str:

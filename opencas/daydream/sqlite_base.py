@@ -19,8 +19,11 @@ class SqliteBackedStore:
 
     async def connect(self) -> Self:
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(str(self.path))
+        self._db = await aiosqlite.connect(str(self.path), timeout=30)
         self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA busy_timeout=30000")
+        await self._db.execute("PRAGMA synchronous=NORMAL")
         if self.SCHEMA:
             await self._db.executescript(self.SCHEMA)
         await self._migrate()

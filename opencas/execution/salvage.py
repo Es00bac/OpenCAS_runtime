@@ -77,6 +77,7 @@ def build_salvage_packet(
             exec_output,
             verify_output,
             canonical_artifact_path,
+            artifact_paths_touched=normalized_artifact_paths,
             meaningful_progress_signal=meaningful_progress_signal,
         ),
         recommended_mode=(
@@ -84,7 +85,7 @@ def build_salvage_packet(
             if meaningful_progress_signal == "no_meaningful_progress"
             else
             RetryMode.RESUME_EXISTING_ARTIFACT
-            if canonical_artifact_path
+            if canonical_artifact_path or normalized_artifact_paths
             else RetryMode.DETERMINISTIC_REVIEW
         ),
         meaningful_progress_signal=meaningful_progress_signal,
@@ -148,7 +149,7 @@ def _meaningful_progress_signal(
     artifact_paths_touched: Sequence[str],
     outcome: AttemptOutcome,
 ) -> str:
-    if canonical_artifact_path or artifact_paths_touched:
+    if artifact_paths_touched or (canonical_artifact_path and outcome != AttemptOutcome.GUARD_STOPPED):
         return "artifact"
     context = "\n".join(part for part in (exec_output, verify_output) if part).strip()
     if _extract_constraints(exec_output, verify_output):
@@ -182,12 +183,13 @@ def _best_next_step(
     verify_output: str,
     canonical_artifact_path: str | None,
     *,
+    artifact_paths_touched: Sequence[str] = (),
     meaningful_progress_signal: str = "",
 ) -> str:
     if meaningful_progress_signal == "no_meaningful_progress":
         return "No meaningful progress: stop broad retry, perform deterministic review, and change the next attempt frame before retrying."
     context = verify_output or exec_output
-    artifact_hint = canonical_artifact_path or "the current artifact"
+    artifact_hint = canonical_artifact_path or next(iter(artifact_paths_touched), "the current artifact")
     if context:
         if _has_gap_language(context):
             return f"Repair the remaining gap in {artifact_hint} and rerun verification."

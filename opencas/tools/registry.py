@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import threading
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +31,8 @@ class ToolRegistry:
         self.hook_bus = hook_bus
         self._plugin_tools: Dict[str, str] = {}
         self.runtime: Optional[Any] = None
+        self.values_engine: Optional[Any] = None
+        self._values_cache: Dict[str, List[Any]] = {}
 
     def register(
         self,
@@ -110,7 +114,14 @@ class ToolRegistry:
                 metadata={"error_type": type(exc).__name__},
             )
 
-    async def execute_async(self, name: str, args: Dict[str, Any]) -> ToolResult:
+    async def execute_async(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        *,
+        audit_only: bool = False,
+        hook_context: Optional[Dict[str, Any]] = None,
+    ) -> ToolResult:
         """Execute a tool by name with the given arguments (asynchronous)."""
         entry = self._tools.get(name)
         if entry is None:
@@ -121,12 +132,21 @@ class ToolRegistry:
             )
         self._trace(
             "tool_executing",
-            {"name": name, "tier": entry.risk_tier.value},
+            {
+                "name": name,
+                "tier": entry.risk_tier.value,
+                **self._argument_signature_metadata(args),
+            },
         )
-        hook_context: Dict[str, Any] = {
+        if audit_only and not args.get("_audit_only"):
+            args = {**args, "_audit_only": True}
+        hook_context = {
+            **(hook_context or {}),
             "tool_name": name,
             "args": args,
             "risk_tier": entry.risk_tier.value,
+            "audit_only": audit_only,
+            "tracer": self.tracer,
         }
 
         def _emit_post_tool_execute(result: ToolResult) -> None:
@@ -138,7 +158,17 @@ class ToolRegistry:
                 "result_output": result.output,
                 "result_metadata": result.metadata,
             }
-            self.hook_bus.run(POST_TOOL_EXECUTE, post_context)
+            post_result = self.hook_bus.run(
+                POST_TOOL_EXECUTE,
+                post_context,
+                isolate_handler_failures=True,
+            )
+            if post_result.mutated_context is not None:
+                result.metadata = dict(
+                    post_result.mutated_context.get("result_metadata")
+                    or result.metadata
+                    or {}
+                )
 
         # Run hook bus for high-risk tools
         if self.hook_bus is not None and entry.risk_tier in (
@@ -150,7 +180,7 @@ class ToolRegistry:
         ):
             hook_result = self.hook_bus.run(
                 PRE_TOOL_EXECUTE,
-                {"tool_name": name, "args": args, "risk_tier": entry.risk_tier.value},
+                hook_context,
             )
             if not hook_result.allowed:
                 result = ToolResult(
@@ -169,7 +199,11 @@ class ToolRegistry:
             if name == "bash_run_command":
                 cmd_hook_result = self.hook_bus.run(
                     PRE_COMMAND_EXECUTE,
-                    {"command": args.get("command", ""), "args": args},
+                    {
+                        "command": args.get("command", ""),
+                        "args": args,
+                        "audit_only": audit_only,
+                    },
                     )
                 if not cmd_hook_result.allowed:
                     result = ToolResult(
@@ -185,7 +219,7 @@ class ToolRegistry:
             elif name in ("fs_write_file", "edit_file"):
                 file_hook_result = self.hook_bus.run(
                     PRE_FILE_WRITE,
-                    {"tool_name": name, "args": args},
+                    {"tool_name": name, "args": args, "audit_only": audit_only},
                 )
                 if not file_hook_result.allowed:
                     result = ToolResult(
@@ -214,6 +248,10 @@ class ToolRegistry:
                 return result
         else:
             validation = None
+        values_result = await self._values_review(name, args, entry.risk_tier)
+        if values_result is not None:
+            _emit_post_tool_execute(values_result)
+            return values_result
         try:
             import inspect
             if inspect.iscoroutinefunction(entry.adapter):
@@ -249,6 +287,94 @@ class ToolRegistry:
             },
         )
         return result
+
+    async def _values_review(
+        self,
+        name: str,
+        args: Dict[str, Any],
+        risk_tier: ActionRiskTier,
+    ) -> Optional[ToolResult]:
+        if risk_tier not in {ActionRiskTier.EXTERNAL_WRITE, ActionRiskTier.DESTRUCTIVE}:
+            return None
+        cache_key = self._values_cache_key(name, args)
+        violations = self._values_cache.get(cache_key)
+        if violations is None:
+            engine = self.values_engine
+            if engine is None:
+                try:
+                    from opencas.values.engine import ValuesEngine
+
+                    engine = ValuesEngine()
+                except Exception:
+                    engine = None
+                self.values_engine = engine
+            if engine is None:
+                violations = []
+            else:
+                try:
+                    llm = getattr(self.runtime, "llm", None) if self.runtime is not None else None
+                    violations = await engine.check_alignment_semantic(
+                        f"Execute tool {name} with arguments {args}",
+                        llm=llm,
+                        capability_context=self._values_capability_context(),
+                        request_meta={"tool_name": name, "risk_tier": risk_tier.value},
+                    )
+                except Exception:
+                    violations = []
+            self._values_cache[cache_key] = list(violations or [])
+        if not violations:
+            return None
+        worst = max(violations, key=lambda item: float(getattr(item, "weight", 0.0) or 0.0))
+        return ToolResult(
+            success=False,
+            output=(
+                "Values violation: "
+                f"{getattr(worst, 'value_name', 'unknown')} - {getattr(worst, 'description', '')}"
+            ),
+            metadata={
+                "values_violation": True,
+                "violation": self._violation_to_metadata(worst),
+            },
+        )
+
+    @staticmethod
+    def _values_cache_key(name: str, args: Dict[str, Any]) -> str:
+        serialized = json.dumps(args or {}, sort_keys=True, default=str)
+        digest = hashlib.sha256(serialized.encode("utf-8")).hexdigest()[:16]
+        return f"{name}:{digest}"
+
+    @staticmethod
+    def _argument_signature_metadata(args: Dict[str, Any]) -> Dict[str, Any]:
+        serialized = json.dumps(args or {}, sort_keys=True, default=str)
+        return {
+            "args_hash": hashlib.sha256(serialized.encode("utf-8")).hexdigest(),
+            "args_keys": sorted(str(key) for key in (args or {}).keys()),
+            "args_size_bytes": len(serialized.encode("utf-8")),
+        }
+
+    def _values_capability_context(self) -> str:
+        lines = ["Runtime capability evidence:"]
+        for entry in sorted(self._tools.values(), key=lambda item: item.name):
+            lines.append(f"- tool {entry.name}; risk={entry.risk_tier.value}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _violation_to_metadata(violation: Any) -> Dict[str, Any]:
+        if hasattr(violation, "to_policy_evidence"):
+            try:
+                return dict(violation.to_policy_evidence())
+            except Exception:
+                pass
+        if hasattr(violation, "model_dump"):
+            try:
+                return dict(violation.model_dump())
+            except Exception:
+                pass
+        return {
+            "value_name": str(getattr(violation, "value_name", "unknown")),
+            "weight": float(getattr(violation, "weight", 0.0) or 0.0),
+            "description": str(getattr(violation, "description", "")),
+        }
 
     def _trace(self, event: str, payload: Dict[str, Any]) -> None:
         if self.tracer:

@@ -30,6 +30,24 @@ def test_reflect_structural_load_keeps_crowded_for_live_clutter(tmp_path: Path) 
     assert somatic.state.somatic_tag == "crowded"
 
 
+def test_reflect_structural_load_marks_commitment_pressure(tmp_path: Path) -> None:
+    somatic = SomaticManager(tmp_path / "somatic.json")
+
+    somatic.reflect_structural_load(
+        weighted_queue_load=0.0,
+        queue_depth=0,
+        active_goal_count=0,
+        parked_goal_count=0,
+        active_commitment_count=6,
+        user_facing_commitment_count=4,
+        blocked_commitment_count=1,
+    )
+
+    assert somatic.state.somatic_tag == "commitment_pressure"
+    assert somatic.state.tension > 0.1
+    assert somatic.state.certainty < 0.7
+
+
 def test_bump_from_work_moves_focus_and_energy(tmp_path: Path) -> None:
     somatic = SomaticManager(tmp_path / "somatic.json")
     start_focus = somatic.state.focus
@@ -39,6 +57,37 @@ def test_bump_from_work_moves_focus_and_energy(tmp_path: Path) -> None:
 
     assert somatic.state.focus > start_focus
     assert somatic.state.energy < start_energy
+
+
+def test_successful_work_reduces_existing_fatigue_second_wind(tmp_path: Path) -> None:
+    somatic = SomaticManager(tmp_path / "somatic.json")
+    somatic.set_fatigue(0.6)
+    somatic.set_tension(0.2)
+
+    somatic.bump_from_work(intensity=0.5, success=True)
+
+    assert somatic.state.fatigue < 0.6
+    assert somatic.state.tension < 0.2
+
+
+def test_repeated_successful_work_does_not_create_exhaustion(tmp_path: Path) -> None:
+    somatic = SomaticManager(tmp_path / "somatic.json")
+
+    for _ in range(20):
+        somatic.bump_from_work(intensity=0.4, success=True)
+
+    assert somatic.state.fatigue <= 0.1
+
+
+def test_failed_work_increases_fatigue_and_tension(tmp_path: Path) -> None:
+    somatic = SomaticManager(tmp_path / "somatic.json")
+    start_fatigue = somatic.state.fatigue
+    start_tension = somatic.state.tension
+
+    somatic.bump_from_work(intensity=0.5, success=False)
+
+    assert somatic.state.fatigue > start_fatigue
+    assert somatic.state.tension > start_tension
 
 
 def test_decay_rest_recovers_energy_and_relaxes_focus(tmp_path: Path) -> None:

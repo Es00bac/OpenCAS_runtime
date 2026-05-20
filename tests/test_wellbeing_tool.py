@@ -29,7 +29,12 @@ async def test_wellbeing_query_returns_latest_state(runtime: AgentRuntime):
 
     result = await runtime.tools.execute_async(
         "wellbeing_query",
-        {"include_recent_events": True, "include_recommendations": True, "limit": 3},
+        {
+            "include_recent_events": True,
+            "include_recommendations": True,
+            "include_maintenance_outcomes": True,
+            "limit": 3,
+        },
     )
 
     assert isinstance(result, ToolResult)
@@ -38,3 +43,7 @@ async def test_wellbeing_query_returns_latest_state(runtime: AgentRuntime):
     assert result.metadata["latest_state"]["recovery_need"] >= 0.7
     assert result.metadata["event_count"] >= 1
     assert result.metadata["recommendation_count"] >= 1
+    assert result.metadata["maintenance_outcome_count"] >= 1
+    outcome = result.metadata["maintenance_outcomes"][0]
+    assert outcome["meta"]["effect_basis"] in {"estimated", "record_only"}
+    assert "risk_delta" in outcome["meta"]

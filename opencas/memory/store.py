@@ -16,6 +16,9 @@ from .store_edges import (
     decay_all_edges as decay_all_edges_impl,
 )
 from .store_edges import (
+    decay_edges_for as decay_edges_for_impl,
+)
+from .store_edges import (
     delete_edges_for as delete_edges_for_impl,
 )
 from .store_edges import (
@@ -56,6 +59,9 @@ from .store_episodes import (
 )
 from .store_episodes import (
     list_episodes as list_episodes_impl,
+)
+from .store_episodes import (
+    list_episodes_for_session as list_episodes_for_session_impl,
 )
 from .store_episodes import (
     list_episodes_by_embedding_ids as list_episodes_by_embedding_ids_impl,
@@ -115,8 +121,11 @@ class MemoryStore:
 
     async def connect(self) -> "MemoryStore":
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(str(self.path))
+        self._db = await aiosqlite.connect(str(self.path), timeout=30)
         self._db.row_factory = aiosqlite.Row
+        await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA busy_timeout=30000")
+        await self._db.commit()
         await self._executescript(MEMORY_STORE_SCHEMA)
         await self._migrate()
         return self
@@ -189,6 +198,19 @@ class MemoryStore:
             compacted=compacted,
             limit=limit,
             offset=offset,
+        )
+
+    async def list_episodes_for_session(
+        self,
+        session_id: str,
+        include_compacted: bool = True,
+        limit: int = 500,
+    ) -> List[Episode]:
+        return await list_episodes_for_session_impl(
+            self,
+            session_id=session_id,
+            include_compacted=include_compacted,
+            limit=limit,
         )
 
     async def list_artifact_episodes(self, artifact_path: str) -> List[Episode]:
@@ -286,6 +308,19 @@ class MemoryStore:
     async def decay_all_edges(self, decay: float = 0.95) -> int:
         return await decay_all_edges_impl(self, decay=decay)
 
+    async def decay_edges_for(
+        self,
+        episode_id: str,
+        decay: float = 0.95,
+        exclude_edge_ids: Optional[List[str]] = None,
+    ) -> List[str]:
+        return await decay_edges_for_impl(
+            self,
+            episode_id,
+            decay=decay,
+            exclude_edge_ids=exclude_edge_ids,
+        )
+
     async def prune_weak_edges(self, min_confidence: float = 0.05) -> int:
         return await prune_weak_edges_impl(self, min_confidence=min_confidence)
 
@@ -377,13 +412,61 @@ class MemoryStore:
                 SELECT 1 FROM json_each(tags)
                 WHERE json_each.value = ?
             )
+            OR EXISTS (
+                SELECT 1 FROM json_each(tags, '$.tags')
+                WHERE json_each.value = ?
+            )
             ORDER BY salience DESC, updated_at DESC
             LIMIT ? OFFSET ?
             """,
-            (tag, limit, offset),
+            (tag, tag, limit, offset),
         )
         rows = await cursor.fetchall()
         return [self._row_to_memory(r) for r in rows]
+
+    async def count_memories_by_tag(
+        self,
+        tag: str,
+        *,
+        required_tag: str | None = None,
+    ) -> int:
+        """Count memories carrying *tag* without materializing the rows."""
+
+        required_clause = ""
+        params: list[Any] = [tag, tag]
+        if required_tag:
+            required_clause = """
+            AND (
+                EXISTS (
+                    SELECT 1 FROM json_each(tags)
+                    WHERE json_each.value = ?
+                )
+                OR EXISTS (
+                    SELECT 1 FROM json_each(tags, '$.tags')
+                    WHERE json_each.value = ?
+                )
+            )
+            """
+            params.extend([required_tag, required_tag])
+        cursor = await self._execute(
+            f"""
+            SELECT COUNT(*) FROM memories
+            WHERE (
+                EXISTS (
+                    SELECT 1 FROM json_each(tags)
+                    WHERE json_each.value = ?
+                )
+                OR EXISTS (
+                    SELECT 1 FROM json_each(tags, '$.tags')
+                    WHERE json_each.value = ?
+                )
+            )
+            {required_clause}
+            """,
+            tuple(params),
+        )
+        row = await cursor.fetchone()
+        return int(row[0] if row else 0)
 
     async def search_memories_by_content(
         self,

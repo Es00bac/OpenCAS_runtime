@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .models import AttemptSalvagePacket, RetryDecision, RetryMode
+from .models import AttemptOutcome, AttemptSalvagePacket, RetryDecision, RetryMode
 
 
 class RetryGovernor:
@@ -17,6 +17,17 @@ class RetryGovernor:
         broad_attempt: bool,
     ) -> RetryDecision:
         latest = prior_packets[-1] if prior_packets else None
+        if (
+            broad_attempt
+            and candidate.outcome == AttemptOutcome.GUARD_STOPPED
+            and not _has_touched_artifact_progress(candidate)
+        ):
+            return RetryDecision(
+                allowed=False,
+                reason="tool loop guard stopped broad attempt without artifact progress; preserve partial value and reframe narrowly before retry",
+                mode=_blocked_mode(candidate),
+                reuse_packet_id=latest.packet_id if latest is not None else None,
+            )
         if latest is None:
             return RetryDecision(
                 allowed=True,
@@ -55,7 +66,11 @@ class RetryGovernor:
         )
 
 
+def _has_touched_artifact_progress(packet: AttemptSalvagePacket) -> bool:
+    return bool(packet.artifact_paths_touched)
+
+
 def _blocked_mode(packet: AttemptSalvagePacket) -> RetryMode:
-    if packet.canonical_artifact_path:
+    if packet.canonical_artifact_path or packet.artifact_paths_touched:
         return RetryMode.RESUME_EXISTING_ARTIFACT
     return RetryMode.DETERMINISTIC_REVIEW

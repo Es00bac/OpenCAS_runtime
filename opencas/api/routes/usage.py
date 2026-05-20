@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 import time
 from typing import Any, Dict, List
@@ -156,7 +157,11 @@ async def _build_gateway_usage_snapshot(runtime: Any, window_days: int, recent_l
                 env_path=material.env_path if material.env_path and material.env_path.exists() else None,
             )
         active_provider_ids = _active_gateway_provider_ids(runtime)
-        overview = build_usage_overview(days=window_days, recent_limit=recent_limit)
+        overview = await asyncio.to_thread(
+            build_usage_overview,
+            days=window_days,
+            recent_limit=recent_limit,
+        )
         telemetry = await collect_provider_telemetry(
             days=max(1, min(window_days, 30)),
             manager=manager,
@@ -201,6 +206,7 @@ def _build_opencas_usage_snapshot(
         "by_execution_mode": [],
         "recent_events": [],
         "top_events": [],
+        "prompt_cache": {},
         "notes": [],
     }
     if telemetry is None:
@@ -209,6 +215,10 @@ def _build_opencas_usage_snapshot(
 
     start_ms, end_ms = _window_bounds_ms(window_days)
     bucket_ms = max(1, min(bucket_hours, 24)) * 60 * 60 * 1000
+    try:
+        events = list(telemetry.get_events(start_ms, end_ms))
+    except Exception:
+        events = []
     snapshot["summary"] = telemetry.get_summary(start_ms, end_ms).to_dict()
     snapshot["session_summary"] = telemetry.get_session_summary(session_id).to_dict() if session_id else {}
     snapshot["daily_rollup"] = [item.to_dict() for item in telemetry.get_daily_rollup(start_ms, end_ms)]
@@ -219,10 +229,119 @@ def _build_opencas_usage_snapshot(
     snapshot["by_execution_mode"] = telemetry.get_breakdown(start_ms, end_ms, "execution_mode", limit=10)
     snapshot["recent_events"] = telemetry.get_recent_events(start_ms, end_ms, limit=recent_limit)
     snapshot["top_events"] = telemetry.get_top_events(start_ms, end_ms, limit=10)
+    snapshot["prompt_cache"] = _build_prompt_cache_snapshot(events)
 
     if int(snapshot["summary"].get("totalCalls", 0) or 0) <= 0:
         snapshot["notes"].append("No OpenCAS token usage has been recorded in the selected window.")
     return snapshot
+
+
+def _event_int(event: Any, attr: str) -> int:
+    try:
+        value = getattr(event, attr)
+    except Exception:
+        value = None
+    if value is None and isinstance(event, dict):
+        value = event.get(attr)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, parsed)
+
+
+def _event_text(event: Any, attr: str, fallback: str = "unknown") -> str:
+    try:
+        value = getattr(event, attr)
+    except Exception:
+        value = None
+    if value is None and isinstance(event, dict):
+        value = event.get(attr)
+    text = str(value or "").strip()
+    return text or fallback
+
+
+def _build_prompt_cache_snapshot(events: List[Any]) -> Dict[str, Any]:
+    total_prompt = 0
+    cached_prompt = 0
+    reported_calls = 0
+    cache_hit_calls = 0
+    by_provider: Dict[str, Dict[str, Any]] = {}
+    by_model: Dict[str, Dict[str, Any]] = {}
+
+    for event in events:
+        prompt_tokens = _event_int(event, "prompt_tokens")
+        cached_tokens = _event_int(event, "cached_prompt_tokens")
+        total_prompt += prompt_tokens
+        if getattr(event, "cached_prompt_tokens", None) is not None or (
+            isinstance(event, dict) and event.get("cached_prompt_tokens") is not None
+        ):
+            reported_calls += 1
+        if cached_tokens > 0:
+            cache_hit_calls += 1
+            cached_prompt += cached_tokens
+
+        provider = _event_text(event, "provider")
+        model = _event_text(event, "model")
+        for bucket, key, label in (
+            (by_provider, provider, "provider"),
+            (by_model, model, "model"),
+        ):
+            row = bucket.setdefault(
+                key,
+                {
+                    label: key,
+                    "promptTokens": 0,
+                    "cachedPromptTokens": 0,
+                    "calls": 0,
+                    "cacheReportedCalls": 0,
+                    "cacheHitCalls": 0,
+                },
+            )
+            row["promptTokens"] += prompt_tokens
+            row["cachedPromptTokens"] += cached_tokens
+            row["calls"] += 1
+            if cached_tokens > 0:
+                row["cacheHitCalls"] += 1
+            if getattr(event, "cached_prompt_tokens", None) is not None or (
+                isinstance(event, dict) and event.get("cached_prompt_tokens") is not None
+            ):
+                row["cacheReportedCalls"] += 1
+
+    def _finish_rows(rows: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+        finished = []
+        for row in rows.values():
+            prompt = int(row.get("promptTokens", 0) or 0)
+            cached = int(row.get("cachedPromptTokens", 0) or 0)
+            row["cacheReuseRatio"] = round(cached / prompt, 4) if prompt > 0 else 0.0
+            finished.append(row)
+        finished.sort(
+            key=lambda item: (item["cachedPromptTokens"], item["promptTokens"], item["calls"]),
+            reverse=True,
+        )
+        return finished[:10]
+
+    reuse_ratio = round(cached_prompt / total_prompt, 4) if total_prompt > 0 else 0.0
+    notes = []
+    if not events:
+        notes.append("No LLM token events are available in the selected window.")
+    elif reported_calls <= 0:
+        notes.append("No provider reported cached prompt token counts in this window.")
+    elif cache_hit_calls <= 0:
+        notes.append("Providers reported cache fields, but no cached prompt token hits were recorded.")
+    else:
+        notes.append("Provider-reported cached prompt token hits are visible in this window.")
+    return {
+        "totalPromptTokens": total_prompt,
+        "cachedPromptTokens": cached_prompt,
+        "uncachedPromptTokens": max(0, total_prompt - cached_prompt),
+        "cacheReuseRatio": reuse_ratio,
+        "cacheReportedCalls": reported_calls,
+        "cacheHitCalls": cache_hit_calls,
+        "byProvider": _finish_rows(by_provider),
+        "byModel": _finish_rows(by_model),
+        "notes": notes,
+    }
 
 
 def build_usage_router(runtime: Any) -> APIRouter:
@@ -237,22 +356,24 @@ def build_usage_router(runtime: Any) -> APIRouter:
         clamped_days = max(1, min(window_days, 30))
         clamped_bucket = max(1, min(bucket_hours, 24))
         clamped_recent = max(5, min(recent_limit, 100))
-        return {
-            "window_days": clamped_days,
-            "bucket_hours": clamped_bucket,
-            "generated_at": int(time.time() * 1000),
-            "opencas": _build_opencas_usage_snapshot(
+        opencas_snapshot, gateway_snapshot, process_hygiene = await asyncio.gather(
+            asyncio.to_thread(
+                _build_opencas_usage_snapshot,
                 runtime,
                 window_days=clamped_days,
                 bucket_hours=clamped_bucket,
                 recent_limit=clamped_recent,
             ),
-            "gateway": await _build_gateway_usage_snapshot(
-                runtime,
-                clamped_days,
-                clamped_recent,
-            ),
-            "process_hygiene": _scan_process_hygiene(),
+            _build_gateway_usage_snapshot(runtime, clamped_days, clamped_recent),
+            asyncio.to_thread(_scan_process_hygiene),
+        )
+        return {
+            "window_days": clamped_days,
+            "bucket_hours": clamped_bucket,
+            "generated_at": int(time.time() * 1000),
+            "opencas": opencas_snapshot,
+            "gateway": gateway_snapshot,
+            "process_hygiene": process_hygiene,
         }
 
     return router

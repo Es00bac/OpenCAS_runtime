@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import pytest
-import pytest_asyncio
 
 from opencas.api.operations_activity import ActivityOperationsService
-from opencas.api.operations_models import TaskEntry
 from opencas.autonomy.models import ActionRiskTier
 from opencas.execution import RepairExecutor, RepairTask
 from opencas.execution.models import ExecutionStage
@@ -179,14 +177,14 @@ async def test_list_salvage_packets_returns_all_attempts(tmp_path):
     tools.register("bash_run_command", "Run command", shell, ActionRiskTier.SHELL_LOCAL)
 
     task = RepairTask(
-        objective="Continue Chronicle 4246.",
+        objective="Continue writing project 4246.",
         verification_command="exit 1",
         max_attempts=3,
         retry_backoff_seconds=0.0,
         meta={
             "resume_project": {
-                "signature": "chronicle-4246",
-                "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+                "signature": "writing-project-4246",
+                "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             }
         },
     )

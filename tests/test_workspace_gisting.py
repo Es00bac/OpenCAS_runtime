@@ -7,6 +7,8 @@ import pytest
 
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.workspace.gisting import generate_validated_gist
+from opencas.workspace.scanner import FileSnapshot, sha256_file_sync
+from opencas.workspace.service import WorkspaceIndexService
 from opencas.workspace.store import WorkspaceStore
 
 
@@ -73,3 +75,94 @@ async def test_unreadable_workspace_file_does_not_store_synthetic_content_vector
     finally:
         await store.close()
         await cache.close()
+
+
+@pytest.mark.asyncio
+async def test_list_directory_with_status_reports_divergence_when_index_is_non_empty(
+    tmp_path: Path,
+) -> None:
+    store = await WorkspaceStore(tmp_path / "workspace.db").connect()
+    root = tmp_path / "workspace"
+    root.mkdir()
+    indexed_path = root / "indexed.md"
+    missing_path = root / "missing.md"
+    live_only_path = root / "live_only.md"
+    indexed_path.write_text("indexed", encoding="utf-8")
+    missing_path.write_text("missing", encoding="utf-8")
+    live_only_path.write_text("live only", encoding="utf-8")
+
+    async def index_file(path: Path) -> None:
+        stat = path.stat()
+        checksum = sha256_file_sync(path)
+        await store.upsert_path_snapshot(
+            FileSnapshot(
+                abs_path=path.resolve(),
+                rel_path=path.relative_to(root),
+                parent_dir=path.parent.resolve(),
+                file_name=path.name,
+                extension=path.suffix.lower() or None,
+                size_bytes=stat.st_size,
+                mtime_ns=stat.st_mtime_ns,
+                file_kind="text",
+            ),
+            checksum=checksum,
+        )
+        await store.upsert_checksum(
+            checksum,
+            stat.st_size,
+            "text",
+            "text/markdown",
+            "full",
+            path.read_text(encoding="utf-8"),
+            None,
+            None,
+            None,
+        )
+
+    try:
+        await index_file(indexed_path)
+        await index_file(missing_path)
+        missing_path.unlink()
+        service = WorkspaceIndexService(
+            store=store,
+            embeddings_client=None,
+            llm_client=None,
+            workspace_roots=[root],
+            llm_model="test-llm",
+            embedding_model="test-embedding",
+        )
+
+        payload = await service.list_directory_with_status(root)
+
+        assert sorted(item["name"] for item in payload["indexed_files"]) == [
+            "indexed.md",
+            "missing.md",
+        ]
+        assert sorted(item["name"] for item in payload["disk_listing"]) == [
+            "indexed.md",
+            "live_only.md",
+        ]
+        assert payload["index_status"]["indexed_count"] == 2
+        assert payload["index_status"]["disk_count"] == 2
+        assert payload["index_status"]["fallback_used"] is False
+        assert payload["index_status"]["live_listing_complete"] is True
+        assert payload["index_status"]["not_indexed"] == [
+            {
+                "name": "live_only.md",
+                "path": str(live_only_path.resolve()),
+                "kind": "text",
+                "indexed": False,
+                "gist_pending": True,
+                "size_bytes": 9,
+            }
+        ]
+        assert payload["index_status"]["missing_on_disk"] == [
+            {
+                "name": "missing.md",
+                "path": str(missing_path.resolve()),
+                "kind": "text",
+            }
+        ]
+        assert payload["index_status"]["stale_index_count"] == 1
+    finally:
+        await store.close()

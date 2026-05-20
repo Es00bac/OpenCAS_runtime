@@ -58,6 +58,11 @@ class MeaningfulProgressGuard:
         "connection error",
         "too many redirects",
     )
+    _BROWSER_SESSION_STATE_TOOLS = {
+        "browser_clear",
+        "browser_close",
+        "browser_start",
+    }
 
     def __init__(
         self,
@@ -145,6 +150,13 @@ class MeaningfulProgressGuard:
 
         if not success:
             return ProgressAssessment(False, "failure", f"{tool_name} failed without new evidence")
+
+        if tool_name.lower() in self._BROWSER_SESSION_STATE_TOOLS:
+            return ProgressAssessment(
+                False,
+                "browser_setup",
+                f"{tool_name} changed browser session state without inspecting or navigating",
+            )
 
         if output and not self._generic_success_output(output_lower):
             if self._observational_tool(tool_name):

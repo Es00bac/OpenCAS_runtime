@@ -1,6 +1,5 @@
 import asyncio
 import logging
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -12,7 +11,6 @@ from opencas.bootstrap.config import BootstrapConfig
 from opencas.bootstrap.pipeline import BootstrapPipeline
 from opencas.runtime.agent_loop import AgentRuntime
 from opencas.execution.models import RepairTask
-from opencas.autonomy.models import ActionRiskTier
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 logger = logging.getLogger("live_test")
@@ -70,7 +68,7 @@ async def main():
         logger.info("Attempting to execute an unknown command: 'some_made_up_command_xyz --flag'")
         tool_res = await runtime.execute_tool("bash_run_command", {"command": "some_made_up_command_xyz --flag"})
         logger.info(f"Tool Result: {tool_res['output']}")
-        assert tool_res['success'] == False, "Unknown command should have been blocked by SmartCommandValidator."
+        assert not tool_res['success'], "Unknown command should have been blocked by SmartCommandValidator."
         assert "validation" in tool_res['output'].lower() or "blocked" in tool_res['output'].lower() or "caution" in tool_res['output'].lower(), "Should be caught by validation"
 
         logger.info("Attempting to execute a known safe command: 'echo hello'")

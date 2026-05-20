@@ -3,9 +3,7 @@
 from __future__ import annotations
 
 import json
-import os
 import threading
-import time
 from pathlib import Path
 from typing import List
 
@@ -19,7 +17,8 @@ from opencas.affective_registry import (
     SystemMetrics,
 )
 from opencas.affective_registry.models import AffectiveState
-from opencas.affective_registry.writer import RegistryWriteError, ValidationError
+from opencas.affective_registry.writer import ValidationError
+from opencas.affective_registry.cli import _build_parser
 
 
 @pytest.fixture
@@ -34,6 +33,13 @@ def writer(registry_path: Path) -> AffectiveRegistryWriter:
         enable_locking=True,
         validate_writes=True,
     )
+
+
+def test_affective_registry_cli_default_uses_current_opencas_state() -> None:
+    args = _build_parser().parse_args([])
+
+    assert "openbulma-v4" not in str(args.registry)
+    assert str(args.registry) == ".opencas/affective_registry/events.jsonl"
 
 
 class TestAffectiveRegistryWriter:

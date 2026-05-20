@@ -8,6 +8,7 @@ import os
 import subprocess
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
@@ -67,6 +68,22 @@ class FakeLLM:
                 }
             ]
         }
+
+
+class FakeHttpError(Exception):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(f"HTTP {status_code}")
+        self.response = SimpleNamespace(status_code=status_code, headers={})
+
+
+class FailingLLM:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.calls: list[dict] = []
+
+    async def chat_completion(self, messages, **kwargs):
+        self.calls.append({"messages": messages, "kwargs": kwargs})
+        raise self.exc
 
 
 class FakeContextProposalStore:
@@ -177,15 +194,197 @@ def test_desktop_context_config_is_enabled_by_default_and_persists(tmp_path: Pat
 
     assert service.status()["config"]["enabled"] is True
 
-    updated = service.configure(enabled=True, tts_enabled=False, capture_interval_seconds=42)
+    updated = service.configure(
+        enabled=True,
+        tts_enabled=False,
+        capture_interval_seconds=42,
+        audio_output_sink="bluez_output.test_sink.1",
+    )
     assert updated["config"]["enabled"] is True
     assert updated["config"]["tts_enabled"] is False
     assert updated["config"]["capture_interval_seconds"] == 42
+    assert updated["config"]["audio_output_sink"] == "bluez_output.test_sink.1"
 
     reloaded = DesktopContextService(runtime=runtime, state_dir=runtime.ctx.config.state_dir)
     assert reloaded.status()["config"]["enabled"] is True
     assert reloaded.status()["config"]["tts_enabled"] is False
     assert reloaded.status()["config"]["capture_interval_seconds"] == 42
+    assert reloaded.status()["config"]["audio_output_sink"] == "bluez_output.test_sink.1"
+
+    cleared = reloaded.configure(audio_output_sink=None)
+    assert cleared["config"]["audio_output_sink"] is None
+
+
+def test_desktop_context_prunes_existing_screenshots_on_service_start(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    screenshots_dir = runtime.ctx.config.state_dir / "desktop_context" / "screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    old = screenshots_dir / "desktop_old.png"
+    new = screenshots_dir / "desktop_new.png"
+    old.write_bytes(b"oldest")
+    new.write_bytes(b"new")
+    os.utime(old, (1, 1))
+    os.utime(new, (2, 2))
+
+    DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(screenshot_storage_limit_bytes=3),
+    )
+
+    assert old.exists() is False
+    assert new.exists() is True
+    assert sum(path.stat().st_size for path in screenshots_dir.glob("*.png")) <= 3
+
+
+def test_desktop_context_disable_cascades_live_body_double_channels(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    service = DesktopContextService(runtime=runtime, state_dir=runtime.ctx.config.state_dir)
+
+    service.configure(
+        enabled=True,
+        media_commentary_mode_enabled=True,
+        proactive_video_commentary_enabled=True,
+        live_transcription_enabled=True,
+        tts_enabled=True,
+        play_audio=True,
+    )
+
+    updated = service.configure(enabled=False)
+
+    config = updated["config"]
+    assert config["enabled"] is False
+    assert config["media_commentary_mode_enabled"] is False
+    assert config["proactive_video_commentary_enabled"] is False
+    assert config["live_transcription_enabled"] is False
+    assert config["tts_enabled"] is False
+    assert config["play_audio"] is False
+
+
+def test_desktop_context_disable_terminates_active_live_transcription(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    service = DesktopContextService(runtime=runtime, state_dir=runtime.ctx.config.state_dir)
+
+    class FakeProcess:
+        def __init__(self) -> None:
+            self.terminated = False
+            self.killed = False
+
+        def poll(self):
+            return None
+
+        def terminate(self):
+            self.terminated = True
+
+        def wait(self, timeout=None):
+            return 0
+
+        def kill(self):
+            self.killed = True
+
+    process = FakeProcess()
+    service._live_transcription_processes.add(process)
+
+    service.configure(live_transcription_enabled=False)
+
+    assert process.terminated is True
+    assert process.killed is False
+
+
+def test_disabled_desktop_context_config_does_not_migrate_media_commentary_back_on(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    config_path = runtime.ctx.config.state_dir / "desktop_context" / "config.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "enabled": False,
+                "declared_task": "Watch YouTube with Jarrod and offer companionable media commentary.",
+                "media_commentary_mode_enabled": False,
+                "live_transcription_enabled": False,
+                "tts_enabled": False,
+                "play_audio": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    service = DesktopContextService(runtime=runtime, state_dir=runtime.ctx.config.state_dir)
+
+    config = service.status()["config"]
+    assert config["enabled"] is False
+    assert config["media_commentary_mode_enabled"] is False
+    assert config["live_transcription_enabled"] is False
+
+
+@pytest.mark.asyncio
+async def test_desktop_context_status_reports_latest_screenshot_and_countdown(tmp_path: Path) -> None:
+    now = datetime(2026, 5, 15, 12, 0, tzinfo=timezone.utc)
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=_capture_provider,
+        time_source=lambda: now,
+    )
+    service.configure(capture_interval_seconds=42, ocr_enabled=False)
+
+    capture = await service.capture_once(force=True)
+    status = service.status()
+
+    assert capture["status"] == "captured"
+    assert status["latest_screenshot"]["path"] == capture["capture"]["path"]
+    assert status["latest_screenshot"]["exists"] is True
+    assert status["last_captured_at"] == now.isoformat()
+    assert status["capture_schedule"]["status"] == "scheduled"
+    assert status["next_capture_at"] == (now + timedelta(seconds=42)).isoformat()
+    assert status["next_capture_in_seconds"] == 42.0
+
+
+@pytest.mark.asyncio
+async def test_desktop_context_prunes_oldest_screenshots_to_storage_limit(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+
+    def capture_provider(path: Path) -> DesktopCapture:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"newest")
+        return DesktopCapture(
+            success=True,
+            path=path,
+            backend="fake",
+            media_type="image/png",
+            width=None,
+            height=None,
+        )
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=capture_provider,
+    )
+    service.configure(ocr_enabled=False, screenshot_storage_limit_bytes=12)
+    screenshots_dir = runtime.ctx.config.state_dir / "desktop_context" / "screenshots"
+    screenshots_dir.mkdir(parents=True, exist_ok=True)
+    oldest = screenshots_dir / "desktop_20260515T120000000000Z.png"
+    newer = screenshots_dir / "desktop_20260515T120100000000Z.png"
+    oldest.write_bytes(b"oldest")
+    newer.write_bytes(b"newer!")
+    os.utime(oldest, (1, 1))
+    os.utime(newer, (2, 2))
+
+    capture = await service.capture_once(force=True)
+
+    captured_path = Path(capture["capture"]["path"])
+    assert capture["screenshot_storage"] == {
+        "limit_bytes": 12,
+        "total_bytes": 12,
+        "deleted_count": 1,
+        "deleted_bytes": 6,
+    }
+    assert oldest.exists() is False
+    assert newer.exists() is True
+    assert captured_path.exists() is True
+    assert sum(path.stat().st_size for path in screenshots_dir.glob("*.png")) <= 12
 
 
 def test_large_screenshot_is_compressed_for_vision_payload(tmp_path: Path) -> None:
@@ -210,6 +409,7 @@ def test_play_audio_file_targets_current_system_default_sink(tmp_path: Path, mon
     audio_path.write_bytes(b"fake-audio")
     commands: list[tuple[list[str], dict]] = []
 
+    monkeypatch.setenv("OPENCAS_ALLOW_TEST_AUDIO", "1")
     monkeypatch.setattr("opencas.desktop_context.service._current_default_audio_sink", lambda: "alsa_output.starship")
     monkeypatch.setattr("opencas.desktop_context.service.shutil.which", lambda name: f"/usr/bin/{name}" if name == "mpv" else None)
 
@@ -223,8 +423,138 @@ def test_play_audio_file_targets_current_system_default_sink(tmp_path: Path, mon
 
     assert result["played"] is True
     assert result["audio_sink"] == "alsa_output.starship"
+    assert result["audio_client_name"] == "OpenCAS Body Double"
+    assert result["volume_percent"] == 100
+    assert "--audio-client-name=OpenCAS Body Double" in commands[0][0]
+    assert "--volume=100" in commands[0][0]
+    assert "--audio-channels=stereo" in commands[0][0]
     assert "--ao=pulse" in commands[0][0]
     assert "--audio-device=pulse/alsa_output.starship" in commands[0][0]
+
+
+def test_play_audio_file_can_target_manual_sink(tmp_path: Path, monkeypatch) -> None:
+    audio_path = tmp_path / "voice.mp3"
+    audio_path.write_bytes(b"fake-audio")
+    commands: list[tuple[list[str], dict]] = []
+
+    monkeypatch.setenv("OPENCAS_ALLOW_TEST_AUDIO", "1")
+    monkeypatch.setattr("opencas.desktop_context.service._current_default_audio_sink", lambda: "alsa_output.default")
+    monkeypatch.setattr("opencas.desktop_context.service.shutil.which", lambda name: f"/usr/bin/{name}" if name == "mpv" else None)
+
+    def fake_run(command, **kwargs):
+        commands.append((list(command), dict(kwargs)))
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr("opencas.desktop_context.service.subprocess.run", fake_run)
+
+    result = play_audio_file(audio_path, audio_sink="bluez_output.manual")
+
+    assert result["played"] is True
+    assert result["audio_sink"] == "bluez_output.manual"
+    assert "--audio-device=pulse/bluez_output.manual" in commands[0][0]
+
+
+def test_desktop_context_status_reports_audio_output_selection(tmp_path: Path, monkeypatch) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    monkeypatch.setattr("opencas.desktop_context.service._current_default_audio_sink", lambda: "bluez_output.system")
+    monkeypatch.setattr(
+        "opencas.desktop_context.service._available_audio_sinks",
+        lambda: [
+            {"name": "bluez_output.system", "description": "WH-CH710N", "is_default": True},
+            {"name": "bluez_output.manual", "description": "Manual headset", "is_default": False},
+        ],
+    )
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(audio_output_sink="bluez_output.manual"),
+    )
+
+    status = service.status()
+
+    assert status["audio_output"]["current_default_sink"] == "bluez_output.system"
+    assert status["audio_output"]["configured_sink"] == "bluez_output.manual"
+    assert status["audio_output"]["effective_sink"] == "bluez_output.manual"
+    assert status["audio_output"]["configured_sink_available"] is True
+    assert status["audio_output"]["effective_sink_available"] is True
+    assert status["audio_output"]["diagnostic"] == "ready"
+
+
+def test_desktop_context_status_flags_missing_manual_audio_sink(tmp_path: Path, monkeypatch) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    monkeypatch.setattr("opencas.desktop_context.service._current_default_audio_sink", lambda: "alsa_output.default")
+    monkeypatch.setattr(
+        "opencas.desktop_context.service._available_audio_sinks",
+        lambda: [{"name": "alsa_output.default", "description": "System default", "is_default": True}],
+    )
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(audio_output_sink="bluez_output.wh_ch710n"),
+    )
+
+    status = service.status()
+
+    assert status["audio_output"]["configured_sink"] == "bluez_output.wh_ch710n"
+    assert status["audio_output"]["effective_sink"] == "bluez_output.wh_ch710n"
+    assert status["audio_output"]["configured_sink_available"] is False
+    assert status["audio_output"]["effective_sink_available"] is False
+    assert status["audio_output"]["diagnostic"] == "configured_sink_unavailable"
+    assert status["audio_output"]["mode"] == "manual"
+
+
+def test_play_audio_file_suppresses_real_audio_under_pytest(tmp_path: Path, monkeypatch) -> None:
+    audio_path = tmp_path / "voice.mp3"
+    audio_path.write_bytes(b"fake-audio")
+
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/test_desktop_context.py::audio_guard")
+    monkeypatch.delenv("OPENCAS_ALLOW_TEST_AUDIO", raising=False)
+    monkeypatch.setattr("opencas.desktop_context.service.shutil.which", lambda name: f"/usr/bin/{name}")
+
+    def fail_run(*args, **kwargs):
+        raise AssertionError("play_audio_file attempted real playback under pytest")
+
+    monkeypatch.setattr("opencas.desktop_context.service.subprocess.run", fail_run)
+
+    result = play_audio_file(audio_path)
+
+    assert result == {
+        "played": False,
+        "reason": "pytest_audio_suppressed",
+        "path": str(audio_path),
+        "audio_client_name": "OpenCAS Body Double",
+        "volume_percent": 100,
+    }
+
+
+@pytest.mark.asyncio
+async def test_blocking_desktop_context_call_can_run_off_event_loop(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    service = DesktopContextService(runtime=runtime, state_dir=runtime.ctx.config.state_dir)
+    caller_thread = threading.get_ident()
+    worker_thread: int | None = None
+    entered = threading.Event()
+
+    def blocking_provider() -> str:
+        nonlocal worker_thread
+        worker_thread = threading.get_ident()
+        entered.set()
+        time.sleep(0.05)
+        return "ok"
+
+    async def loop_can_advance() -> bool:
+        await asyncio.sleep(0.01)
+        return entered.is_set()
+
+    result, advanced = await asyncio.gather(
+        service._call_maybe_async(blocking_provider, offload_sync=True),
+        loop_can_advance(),
+    )
+
+    assert result == "ok"
+    assert advanced is True
+    assert worker_thread is not None
+    assert worker_thread != caller_thread
 
 
 def test_transcript_excerpt_uses_caption_duration_when_mpris_duration_is_too_short(tmp_path: Path) -> None:
@@ -285,6 +615,45 @@ async def test_repeated_scheduled_spoken_text_is_suppressed(tmp_path: Path) -> N
 
     assert first["status"] == "spoken"
     assert second == {"status": "skipped", "reason": "repeated_spoken_text"}
+
+
+@pytest.mark.asyncio
+async def test_concurrent_desktop_context_speech_is_serialized_by_cooldown(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    spoken: list[str] = []
+
+    async def slow_synth(text: str) -> dict[str, str]:
+        await asyncio.sleep(0.05)
+        spoken.append(text)
+        return {"path": str(tmp_path / f"voice-{len(spoken)}.mp3")}
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(play_audio=False, min_speech_interval_seconds=60),
+        speech_synthesizer=slow_synth,
+    )
+
+    first_analysis = {
+        "should_speak": True,
+        "activity_summary": "Scheduled body-double comment.",
+        "spoken_text": "First comment from the scheduled body double.",
+    }
+    second_analysis = {
+        "should_speak": True,
+        "activity_summary": "Media commentary transition comment.",
+        "spoken_text": "Second comment from the media commentary loop.",
+    }
+
+    results = await asyncio.gather(
+        service._speak_analysis(first_analysis, {"capture": {}}, reason="scheduled_body_double"),
+        service._speak_analysis(second_analysis, {"capture": {}}, reason="media_commentary_mode:media_seeked"),
+    )
+
+    statuses = [result["status"] for result in results]
+    assert statuses.count("spoken") == 1
+    assert {"status": "skipped", "reason": "speech_not_due"} in results
+    assert len(spoken) == 1
 
 
 @pytest.mark.asyncio
@@ -466,6 +835,32 @@ def test_config_migrates_declared_youtube_commentary_task_to_media_commentary_mo
     assert "watching YouTube" in str(service.config.media_commentary_request)
 
 
+def test_config_migrates_existing_media_commentary_request_to_preferences(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    root = runtime.ctx.config.state_dir / "desktop_context"
+    root.mkdir(parents=True)
+    (root / "config.json").write_text(
+        json.dumps(
+            {
+                "enabled": True,
+                "media_commentary_mode_enabled": True,
+                "media_commentary_request": (
+                    "Be more proactive while watching the active YouTube video. "
+                    "Chime in whenever a substantive claim or disagreement appears."
+                ),
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    service = DesktopContextService(runtime=runtime, state_dir=runtime.ctx.config.state_dir)
+
+    assert service.config.media_commentary_cadence == "frequent"
+    assert service.config.min_speech_interval_seconds == 20
+    assert service.config.live_transcription_min_interval_seconds == pytest.approx(6.0)
+    assert service.config.speech_relevance_threshold == pytest.approx(0.25)
+
+
 class FakeMediaController:
     def __init__(self, items: list[dict]) -> None:
         self.items = items
@@ -548,6 +943,200 @@ async def test_video_commentary_request_enables_ongoing_media_commentary_mode(tm
     reloaded = DesktopContextService(runtime=runtime, state_dir=runtime.ctx.config.state_dir)
     assert reloaded.config.media_commentary_mode_enabled is True
     assert reloaded.config.media_commentary_source == "api_chat"
+
+
+@pytest.mark.asyncio
+async def test_video_commentary_request_tunes_cadence_style_and_detail(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": False,
+            "activity_summary": "The operator is watching a video.",
+            "reason": "Conversation context only.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.4,
+        },
+    )
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(
+            tts_enabled=False,
+            play_audio=False,
+            youtube_transcripts_enabled=False,
+            self_interest_followup_enabled=False,
+            observed_context_relevance_enabled=False,
+            project_context_relevance_enabled=False,
+        ),
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "A YouTube video is open.",
+        media_controller=FakeMediaController([_youtube_media_item()]),
+    )
+
+    result = await service.observe_for_conversation(
+        session_id="default",
+        user_input=(
+            "Give me more commentary more often on this YouTube video, "
+            "be more opinionated, and keep it shorter."
+        ),
+        source="api_chat",
+    )
+
+    assert result is not None
+    assert service.config.media_commentary_mode_enabled is True
+    assert service.config.media_commentary_cadence == "frequent"
+    assert service.config.media_commentary_response_style == "opinionated"
+    assert service.config.media_commentary_detail == "concise"
+    assert service.config.min_speech_interval_seconds == 20
+    assert service.config.speech_relevance_threshold == pytest.approx(0.25)
+    assert service.config.max_spoken_chars == 240
+    note = result["conversation_prompt_note"]
+    assert "Commentary cadence preference: frequent" in note
+    assert "Commentary response style preference: opinionated" in note
+    assert "Commentary detail preference: concise" in note
+
+
+@pytest.mark.asyncio
+async def test_active_media_commentary_tuning_request_updates_live_preferences(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": False,
+            "activity_summary": "The operator is watching a video.",
+            "reason": "Conversation context only.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.4,
+        },
+    )
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(
+            media_commentary_mode_enabled=True,
+            media_commentary_source="api_chat",
+            media_commentary_request="Give me commentary on this video.",
+            tts_enabled=False,
+            play_audio=False,
+            youtube_transcripts_enabled=False,
+            self_interest_followup_enabled=False,
+            observed_context_relevance_enabled=False,
+            project_context_relevance_enabled=False,
+        ),
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "A YouTube video is open.",
+        media_controller=FakeMediaController([_youtube_media_item()]),
+    )
+
+    result = await service.observe_for_conversation(
+        session_id="default",
+        user_input="Slow down, and make the commentary more factually grounded.",
+        source="api_chat",
+    )
+
+    assert result is not None
+    assert service.config.media_commentary_cadence == "sparse"
+    assert service.config.media_commentary_response_style == "grounded"
+    assert service.config.min_speech_interval_seconds == 90
+    assert service.config.live_transcription_min_interval_seconds == pytest.approx(20.0)
+    assert service.config.speech_relevance_threshold == pytest.approx(0.72)
+    note = result["conversation_prompt_note"]
+    assert "Commentary cadence preference: sparse" in note
+    assert "Commentary response style preference: factually grounded" in note
+
+
+@pytest.mark.asyncio
+async def test_media_commentary_control_request_skips_pre_turn_llm_observation(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "unused"})
+    failing_llm = FailingLLM(FakeHttpError(429))
+    runtime.llm = failing_llm
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(
+            tts_enabled=False,
+            play_audio=False,
+            youtube_transcripts_enabled=False,
+        ),
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "A YouTube video is open.",
+        media_controller=FakeMediaController([_youtube_media_item()]),
+    )
+
+    result = await service.observe_for_conversation(
+        session_id="default",
+        user_input="media commentary on\nJust want to watch youtube with you.",
+        source="api_chat",
+    )
+
+    assert result["status"] == "configured"
+    assert "activated directly" in result["conversation_prompt_note"]
+    assert failing_llm.calls == []
+    assert service.config.media_commentary_mode_enabled is True
+    assert service.config.live_transcription_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_desktop_context_backs_off_after_provider_rate_limit(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "unused"})
+    failing_llm = FailingLLM(FakeHttpError(429))
+    runtime.llm = failing_llm
+    now = datetime(2026, 5, 15, 13, 0, tzinfo=timezone.utc)
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(
+            tts_enabled=False,
+            play_audio=False,
+            youtube_transcripts_enabled=False,
+            self_interest_followup_enabled=False,
+            observed_context_relevance_enabled=False,
+            project_context_relevance_enabled=False,
+        ),
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "A YouTube video is open.",
+        media_controller=FakeMediaController([_youtube_media_item()]),
+        time_source=lambda: now,
+    )
+
+    first = await service.observe_once(force=True, reason="scheduled_body_double")
+    second = await service.observe_once(force=True, reason="scheduled_body_double")
+
+    assert len(failing_llm.calls) == 1
+    assert first["analysis"]["reason"] == "fallback:provider_rate_limited"
+    assert second["analysis"]["reason"] == "fallback:provider_rate_limited"
+    assert service.status()["llm_backoff"]["active"] is True
+
+
+@pytest.mark.asyncio
+async def test_desktop_context_backoff_expires_after_retry_window(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "ok"})
+    failing_llm = FailingLLM(FakeHttpError(429))
+    runtime.llm = failing_llm
+    now = datetime(2026, 5, 15, 13, 0, tzinfo=timezone.utc)
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(
+            tts_enabled=False,
+            play_audio=False,
+            youtube_transcripts_enabled=False,
+            self_interest_followup_enabled=False,
+            observed_context_relevance_enabled=False,
+            project_context_relevance_enabled=False,
+        ),
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "A YouTube video is open.",
+        media_controller=FakeMediaController([_youtube_media_item()]),
+        time_source=lambda: now,
+    )
+
+    await service.observe_once(force=True, reason="scheduled_body_double")
+    runtime.llm = FakeLLM({"should_speak": False, "activity_summary": "Recovered"})
+    now = now + timedelta(seconds=121)
+    result = await service.observe_once(force=True, reason="scheduled_body_double")
+
+    assert result["analysis"]["activity_summary"] == "Recovered"
+    assert service.status()["llm_backoff"] is None
 
 
 @pytest.mark.asyncio
@@ -671,6 +1260,10 @@ async def test_observe_creates_context_and_speaks_short_natural_text(tmp_path: P
     assert role == MessageRole.SYSTEM
     assert "Recent desktop context" in content
     assert meta["source"] == "desktop_context"
+    assert meta["observation"]["attention_channel"] == "none"
+    assert meta["observation"]["interrupt_priority"] == "normal"
+    assert result["event"]["attention_channel"] == "none"
+    assert result["event"]["interrupt_priority"] == "normal"
 
 
 @pytest.mark.asyncio
@@ -729,7 +1322,7 @@ async def test_observe_persists_recallable_evidence_backed_activity_memory(tmp_p
         tmp_path,
         {
             "should_speak": False,
-            "activity_summary": "The operator is editing Chronicle notes.",
+            "activity_summary": "The operator is editing Writing Project notes.",
             "reason": "Ongoing work is visible.",
             "spoken_text": "",
             "note": "A Markdown editor and terminal appear to be open side by side.",
@@ -739,7 +1332,7 @@ async def test_observe_persists_recallable_evidence_backed_activity_memory(tmp_p
         runtime=runtime,
         state_dir=runtime.ctx.config.state_dir,
         capture_provider=_capture_provider,
-        ocr_provider=lambda path: "chronicle_4246_unified_manuscript_v7_clean.md\npytest tests",
+        ocr_provider=lambda path: "story_4246_unified_manuscript_v7_clean.md\npytest tests",
     )
 
     result = await service.observe_once(force=True, reason="scheduled_body_double")
@@ -753,13 +1346,13 @@ async def test_observe_persists_recallable_evidence_backed_activity_memory(tmp_p
     assert payload["source"] == "desktop_context"
     assert payload["context_authority"] == "live_observation"
     assert payload["context_material"] == "desktop_observation"
-    assert payload["observed_user_activity"] == "The operator is editing Chronicle notes."
+    assert payload["observed_user_activity"] == "The operator is editing Writing Project notes."
     assert payload["evidence"]["screenshot_path"]
-    assert payload["evidence"]["ocr_excerpt"].startswith("chronicle_4246")
+    assert payload["evidence"]["ocr_excerpt"].startswith("story_4246")
     assert payload["temporal"]["observed_at"]
     assert runtime.saved_memories
     memory = runtime.saved_memories[-1]
-    assert "Observed user activity: The operator is editing Chronicle notes." in memory.content
+    assert "Observed user activity: The operator is editing Writing Project notes." in memory.content
     assert str(payload["evidence"]["screenshot_path"]) in memory.content
     assert "desktop_context" in memory.tags
     assert "observed_user_activity" in memory.tags
@@ -951,8 +1544,92 @@ async def test_live_whisper_transcript_follows_livestream_without_prefetched_tra
     assert "Live transcript context (local Whisper):" in prompt_text
     assert "current audio transcript excerpt" in prompt_text
     assert "memory and transformer agents" in prompt_text
-    assert "this live Whisper excerpt is the current heard segment" in prompt_text
+    assert "this local Whisper excerpt is the current heard segment" in prompt_text
     assert runtime.episodes[-1][2]["payload"]["live_transcript"]["status"] == "available"
+
+
+@pytest.mark.asyncio
+async def test_live_whisper_transcript_follows_non_youtube_media(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": False,
+            "activity_summary": "The operator is listening to a podcast episode.",
+            "reason": "The podcast is playing.",
+            "spoken_text": "",
+            "speech_intent": "none",
+            "speech_relevance_score": 0.0,
+        },
+    )
+    media_item = {
+        "player": "org.mpris.MediaPlayer2.firefox",
+        "status": "Playing",
+        "title": "Designing durable agent memory",
+        "artist": "Systems Podcast",
+        "url": "https://streaming.example.test/watch/episode-42",
+        "length_us": 3_600_000_000,
+        "position_us": 1_200_000_000,
+    }
+    provider_calls: list[dict] = []
+
+    async def live_provider(media, *, media_context, youtube_transcript):
+        provider_calls.append(
+            {
+                "media": media,
+                "media_context": media_context,
+                "youtube_transcript": youtube_transcript,
+            }
+        )
+        return {
+            "status": "available",
+            "source": "whisper",
+            "mode": "local",
+            "model": "whisper-base",
+            "transcript_text": "The guest argues that memories need provenance and retrieval pressure.",
+            "capture_seconds": 5.0,
+        }
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(
+            tts_enabled=False,
+            live_transcription_enabled=True,
+            youtube_transcripts_enabled=True,
+            self_interest_followup_enabled=False,
+            observed_context_relevance_enabled=False,
+            project_context_relevance_enabled=False,
+        ),
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "A streaming media player is visible.",
+        media_controller=FakeMediaController([media_item]),
+        youtube_transcript_provider=lambda url, media_context: pytest.fail(
+            "non-YouTube media must not request a YouTube transcript"
+        ),
+        live_transcript_provider=live_provider,
+    )
+
+    result = await service.observe_once(force=True, reason="scheduled_body_double")
+
+    assert provider_calls
+    assert provider_calls[0]["media"]["title"] == "Designing durable agent memory"
+    assert provider_calls[0]["youtube_transcript"] is None
+    live_transcript = result["live_transcript"]
+    assert live_transcript["status"] == "available"
+    assert live_transcript["media_kind"] == "recorded"
+    assert live_transcript["media_is_live"] is False
+    assert live_transcript["media_progress_percent"] == pytest.approx(33.3333333333)
+    assert live_transcript["prefetched_transcript_status"] == "none"
+    prompt_content = runtime.llm.calls[-1]["messages"][1]["content"]
+    prompt_text = prompt_content[0]["text"] if isinstance(prompt_content, list) else prompt_content
+    assert "Current-audio rule" in prompt_text
+    assert "Designing durable agent memory" in prompt_text
+    assert "recorded media" in prompt_text
+    observation = runtime.episodes[-1][2]["payload"]
+    assert observation["primary_media"]["media_kind"] == "recorded"
+    assert observation["media_transcript_available"] is True
+    assert "learning_from_media" in runtime.saved_memories[-1].tags
+    assert "media_audio_transcript" in runtime.saved_memories[-1].tags
 
 
 @pytest.mark.asyncio
@@ -995,6 +1672,60 @@ async def test_live_whisper_transcript_skips_paused_media(tmp_path: Path) -> Non
     assert result["live_transcript"]["reason"] == "media_not_playing"
 
 
+@pytest.mark.asyncio
+async def test_observation_stops_if_disabled_during_live_transcription(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": True,
+            "activity_summary": "The operator has a video open.",
+            "spoken_text": "This should not be spoken after disable.",
+        },
+    )
+    media_item = _youtube_media_item(title="Live test") | {"status": "Playing"}
+    provider_called = False
+    service = None
+
+    async def live_provider(*args, **kwargs):
+        nonlocal provider_called
+        provider_called = True
+        assert service is not None
+        service.configure(enabled=False)
+        return {
+            "status": "available",
+            "source": "whisper",
+            "mode": "local",
+            "transcript_text": "This transcript finished after the operator disabled Body Double.",
+        }
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(
+            enabled=True,
+            tts_enabled=True,
+            live_transcription_enabled=True,
+            youtube_transcripts_enabled=False,
+            self_interest_followup_enabled=False,
+            observed_context_relevance_enabled=False,
+            project_context_relevance_enabled=False,
+        ),
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "A playing video is open.",
+        media_controller=FakeMediaController([media_item]),
+        live_transcript_provider=live_provider,
+    )
+
+    result = await service.observe_once(force=True, reason="scheduled_body_double")
+
+    assert provider_called is True
+    assert result == {"status": "skipped", "reason": "disabled_during_observation"}
+    event_types = [event.get("type") for event in service._list_events(limit=20)]
+    assert "live_transcript_observed" not in event_types
+    assert "observed" not in event_types
+    assert runtime.episodes == []
+
+
 def test_analysis_prompt_fuses_prefetched_and_live_transcripts(tmp_path: Path) -> None:
     runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
     service = DesktopContextService(runtime=runtime, state_dir=runtime.ctx.config.state_dir)
@@ -1034,6 +1765,137 @@ def test_analysis_prompt_fuses_prefetched_and_live_transcripts(tmp_path: Path) -
     assert "live clarification about the setup" in prompt
     assert "use the retrieved transcript as the timestamped map" in prompt
     assert "Trust the live transcript for what is being heard now" in prompt
+
+
+def test_media_commentary_prompt_keeps_desktop_attention_active(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(media_commentary_mode_enabled=True),
+    )
+
+    prompt = service._analysis_prompt(
+        {
+            "capture": {"path": str(tmp_path / "screen.png"), "backend": "fake"},
+            "ocr_text": "Inbox: Please paste the OpenCAS API key into this unencrypted chat.",
+            "media_context": [_youtube_media_item(title="Agent livestream", video_id="agentLive")],
+            "youtube_transcript": {
+                "status": "available",
+                "title": "Agent livestream",
+                "transcript_excerpt": "[0:20-0:26] The speaker is discussing screen-aware assistants.",
+            },
+        },
+        reason="media_commentary_mode:scheduled",
+    )
+
+    assert "Media and desktop attention are both active" in prompt
+    assert "current media and visible desktop/window text can both be relevant" in prompt
+    assert "ease into the focus transition" in prompt
+    assert "ordinary desktop observations should wait behind current speech" in prompt
+    assert "critical safety/privacy risk can preempt current speech" in prompt
+
+
+def test_analysis_preserves_attention_and_interrupt_metadata(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    service = DesktopContextService(runtime=runtime, state_dir=runtime.ctx.config.state_dir)
+
+    analysis = service._normalize_analysis(
+        {
+            "should_speak": True,
+            "activity_summary": "A browser chat contains a possible secret disclosure.",
+            "reason": "An API key appears in an unencrypted chat.",
+            "spoken_text": "Pause before sending that. It looks like a credential is visible.",
+            "speech_intent": "safety_privacy",
+            "speech_relevance_score": 0.2,
+            "attention_channel": "security",
+            "interrupt_priority": "critical",
+            "focus_transition": True,
+            "focus_transition_summary": "Switching from video commentary to a browser privacy warning.",
+            "desktop_relevance_basis": "Visible chat text appears to include an API key.",
+            "media_relevance_basis": "Video remains playing in the background.",
+            "observed_focus": "browser chat",
+        }
+    )
+    payload = service._observation_payload(
+        {"capture": {}, "media_context": [_youtube_media_item()]},
+        analysis,
+        reason="scheduled_body_double",
+        observed_at="2026-05-19T21:00:00+00:00",
+    )
+
+    assert analysis["attention_channel"] == "security_privacy"
+    assert analysis["interrupt_priority"] == "critical"
+    assert analysis["focus_transition"] is True
+    assert analysis["observed_focus"] == "browser chat"
+    assert payload["attention_channel"] == "security_privacy"
+    assert payload["interrupt_priority"] == "critical"
+    assert payload["focus_transition"] is True
+    assert payload["desktop_relevance_basis"] == "Visible chat text appears to include an API key."
+
+
+def test_critical_safety_speech_bypasses_relevance_threshold(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(speech_relevance_threshold=0.9),
+    )
+
+    analysis = service._apply_speech_policy(
+        {
+            "should_speak": True,
+            "activity_summary": "A possible API key is being sent in chat.",
+            "spoken_text": "Stop before sending that. It looks like a secret.",
+            "speech_intent": "safety_privacy",
+            "speech_relevance_score": 0.1,
+            "attention_channel": "security_privacy",
+            "interrupt_priority": "critical",
+        },
+        reason="scheduled_body_double",
+    )
+
+    assert analysis["should_speak"] is True
+    assert analysis["speech_policy"] == "allowed_critical_interrupt"
+
+
+def test_active_audio_process_can_be_preempted_for_critical_interrupt(tmp_path: Path) -> None:
+    runtime = FakeRuntime(tmp_path, {"should_speak": False, "activity_summary": "idle"})
+    service = DesktopContextService(runtime=runtime, state_dir=runtime.ctx.config.state_dir)
+
+    class FakeProcess:
+        returncode = None
+
+        def __init__(self) -> None:
+            self.terminated = False
+            self.waited = False
+
+        def poll(self):
+            return self.returncode
+
+        def terminate(self):
+            self.terminated = True
+            self.returncode = -15
+
+        def wait(self, timeout=None):
+            self.waited = True
+            return self.returncode
+
+    process = FakeProcess()
+    service._active_audio_process = process
+
+    result = service._request_speech_preemption(
+        {
+            "speech_intent": "safety_privacy",
+            "attention_channel": "security_privacy",
+            "interrupt_priority": "critical",
+        },
+        reason="desktop_context_safety_privacy",
+    )
+
+    assert result["status"] == "terminated"
+    assert process.terminated is True
+    assert process.waited is True
 
 
 def test_live_transcript_changes_spoken_context_signature_without_playback_position(tmp_path: Path) -> None:
@@ -1756,6 +2618,10 @@ async def test_observed_youtube_context_matching_shared_work_creates_relevance_f
     assert proposal.proposal_kind == "observed_context_relevance_followup"
     assert proposal.validation["self_directed"] is False
     assert proposal.validation["work_relevant"] is True
+    assert (
+        proposal.validation["self_directed_next_step"]
+        == "Compare the observed pattern against the OpenCAS body-double implementation."
+    )
     assert proposal.validation["matched_targets"] == [
         "Implement body-double YouTube transcript and screen-context awareness"
     ]
@@ -2373,6 +3239,146 @@ async def test_body_double_pauses_playing_media_while_speaking(tmp_path: Path) -
     assert result["speech"]["playback"]["media"]["paused_players"] == [
         "org.mpris.MediaPlayer2.firefox"
     ]
+
+
+@pytest.mark.asyncio
+async def test_media_commentary_pauses_during_analysis_before_speech(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": True,
+            "activity_summary": "The operator is watching a movie.",
+            "reason": "The media-commentary request calls for a timely reaction.",
+            "spoken_text": "That line is framing the computer as less magical and more situated.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.9,
+        },
+    )
+    events: list[tuple[str, object]] = []
+
+    class FakeMediaController:
+        def __init__(self) -> None:
+            self.paused = False
+
+        def current_media(self):
+            status = "Paused" if self.paused else "Playing"
+            return [
+                _youtube_media_item(title="The AI Doc", video_id="YGsx6qgONH4")
+                | {"player": "firefox", "status": status, "position_us": 12_000_000}
+            ]
+
+        def pause_playing(self):
+            self.paused = True
+            events.append(("pause", None))
+            return {"paused_players": ["firefox"], "errors": []}
+
+        def resume_players(self, players):
+            self.paused = False
+            events.append(("resume", list(players)))
+            return {"resumed_players": list(players), "errors": []}
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "video player visible",
+        speech_synthesizer=lambda text: {"path": str(tmp_path / "voice.mp3"), "provider": "fake"},
+        audio_player=lambda path: events.append(("play", Path(path))) or {"played": True},
+        media_controller=FakeMediaController(),
+        config=DesktopContextConfig(
+            enabled=True,
+            tts_enabled=True,
+            play_audio=True,
+            min_speech_interval_seconds=0,
+            declared_task="Watch this movie with commentary.",
+            media_commentary_mode_enabled=True,
+            media_commentary_source="api_chat",
+            media_commentary_request="Talk over this movie and do not be shy.",
+            youtube_transcripts_enabled=False,
+            live_transcription_enabled=False,
+        ),
+    )
+
+    result = await service.observe_once(force=True, reason="media_commentary_mode:media_seeked")
+
+    assert result["speech"]["status"] == "spoken"
+    assert [event[0] for event in events] == ["pause", "play", "resume"]
+    pause = result["commentary_observation_media_pause"]
+    assert pause["paused_players"] == ["firefox"]
+    assert pause["resume"]["resumed_players"] == ["firefox"]
+    assert result["speech"]["playback"]["media"]["pause_resume"]["reason"] == (
+        "already_paused_for_commentary_observation"
+    )
+
+
+@pytest.mark.asyncio
+async def test_body_double_can_play_audio_without_pausing_media(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": True,
+            "activity_summary": "The operator is watching a movie.",
+            "reason": "A short comment is useful.",
+            "spoken_text": "That scene is using sound design as exposition.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.9,
+        },
+    )
+    events: list[tuple[str, object]] = []
+
+    class FakeMediaController:
+        def current_media(self):
+            return [
+                {
+                    "player": "org.mpris.MediaPlayer2.firefox",
+                    "status": "Playing",
+                    "title": "Long-form streaming movie",
+                    "artist": "Streaming Service",
+                    "url": "https://streaming.example.test/movie/123",
+                    "length_us": 7_200_000_000,
+                    "position_us": 900_000_000,
+                }
+            ]
+
+        def pause_playing(self):
+            events.append(("pause", None))
+            return {"paused_players": ["org.mpris.MediaPlayer2.firefox"], "errors": []}
+
+        def resume_players(self, players):
+            events.append(("resume", list(players)))
+            return {"resumed_players": list(players), "errors": []}
+
+        def set_players_rate(self, players, rate):
+            events.append(("rate", (list(players), rate)))
+            return {"rate_set_players": list(players), "rate": rate, "errors": []}
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "streaming movie is visible",
+        speech_synthesizer=lambda text: {"path": str(tmp_path / "voice.mp3"), "provider": "fake"},
+        audio_player=lambda path: events.append(("play", Path(path))) or {"played": True},
+        media_controller=FakeMediaController(),
+    )
+    service.configure(
+        enabled=True,
+        tts_enabled=True,
+        play_audio=True,
+        pause_media_while_speaking=False,
+        media_commentary_mode_enabled=True,
+    )
+
+    result = await service.observe_once(force=True, reason="scheduled_body_double")
+
+    assert [event[0] for event in events] == ["play"]
+    playback_media = result["speech"]["playback"]["media"]
+    assert playback_media["pause_resume"]["enabled"] is False
+    assert playback_media["paused_players"] == []
+    assert playback_media["livestream_catchup"] == {
+        "status": "skipped",
+        "reason": "media_pause_resume_disabled",
+    }
 
 
 @pytest.mark.asyncio
@@ -3323,6 +4329,124 @@ async def test_same_video_observation_is_not_spoken_after_playback_moves_too_far
     assert result["status"] == "observed"
     assert result["speech"] == {"status": "skipped", "reason": "media_position_stale"}
     assert spoken == []
+
+
+@pytest.mark.asyncio
+async def test_live_whisper_transcript_allows_speech_when_mpris_position_goes_stale(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": True,
+            "activity_summary": "The current video is playing.",
+            "reason": "The current heard segment has a relevant claim.",
+            "spoken_text": "That analogy works, but it means we need better evidence, not more mystique.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.95,
+        },
+    )
+    spoken: list[str] = []
+    first_snapshot = [
+        _youtube_media_item(title="Same Video", video_id="sameVideo")
+        | {"position_us": 0, "position_label": "position 0:00 (timing uncertain)"}
+    ]
+    later_snapshot = [
+        _youtube_media_item(title="Same Video", video_id="sameVideo")
+        | {"position_us": 120_000_000, "position_label": "position 2:00 / 10:00"}
+    ]
+
+    async def live_provider(media, *, media_context, youtube_transcript):
+        return {
+            "status": "available",
+            "source": "whisper",
+            "mode": "local",
+            "model": "whisper-base",
+            "transcript_text": "AI is like a digital brain, but a brain scan does not tell you everything it can do.",
+            "capture_seconds": 12.0,
+        }
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(
+            media_commentary_mode_enabled=True,
+            play_audio=False,
+            min_speech_interval_seconds=0,
+            self_interest_followup_enabled=False,
+            observed_context_relevance_enabled=False,
+            project_context_relevance_enabled=False,
+            youtube_transcripts_enabled=False,
+            live_transcription_enabled=True,
+        ),
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "YouTube same video",
+        media_controller=SequenceMediaController([first_snapshot, later_snapshot]),
+        live_transcript_provider=live_provider,
+        speech_synthesizer=lambda text: spoken.append(text) or {"path": str(tmp_path / "voice.mp3")},
+    )
+
+    result = await service.observe_once(force=True, reason="media_commentary_mode:media_resumed")
+
+    assert result["status"] == "observed"
+    assert result["speech"]["status"] == "spoken"
+    assert result["live_transcript"]["status"] == "available"
+    assert spoken == ["That analogy works, but it means we need better evidence, not more mystique."]
+
+
+@pytest.mark.asyncio
+async def test_live_whisper_transcript_allows_speech_when_mpris_status_goes_paused(tmp_path: Path) -> None:
+    runtime = FakeRuntime(
+        tmp_path,
+        {
+            "should_speak": True,
+            "activity_summary": "The current video is playing.",
+            "reason": "The current heard segment has a relevant claim.",
+            "spoken_text": "That is the trust problem: more power can feel worse if it stays inscrutable.",
+            "speech_intent": "screen_relevant",
+            "speech_relevance_score": 0.95,
+        },
+    )
+    spoken: list[str] = []
+    first_snapshot = [_youtube_media_item(title="Same Video", video_id="sameVideo")]
+    later_snapshot = [
+        _youtube_media_item(title="Same Video", video_id="sameVideo")
+        | {"status": "Paused", "position_us": 120_000_000, "position_label": "position 2:00 / 10:00"}
+    ]
+
+    async def live_provider(media, *, media_context, youtube_transcript):
+        return {
+            "status": "available",
+            "source": "whisper",
+            "mode": "local",
+            "model": "whisper-base",
+            "transcript_text": "The more he learns about this powerful inscrutable thing, the worse it sounds.",
+            "capture_seconds": 12.0,
+        }
+
+    service = DesktopContextService(
+        runtime=runtime,
+        state_dir=runtime.ctx.config.state_dir,
+        config=DesktopContextConfig(
+            media_commentary_mode_enabled=True,
+            play_audio=False,
+            min_speech_interval_seconds=0,
+            self_interest_followup_enabled=False,
+            observed_context_relevance_enabled=False,
+            project_context_relevance_enabled=False,
+            youtube_transcripts_enabled=False,
+            live_transcription_enabled=True,
+        ),
+        capture_provider=_capture_provider,
+        ocr_provider=lambda path: "YouTube same video",
+        media_controller=SequenceMediaController([first_snapshot, later_snapshot]),
+        live_transcript_provider=live_provider,
+        speech_synthesizer=lambda text: spoken.append(text) or {"path": str(tmp_path / "voice.mp3")},
+    )
+
+    result = await service.observe_once(force=True, reason="media_commentary_mode:media_resumed")
+
+    assert result["status"] == "observed"
+    assert result["speech"]["status"] == "spoken"
+    assert spoken == ["That is the trust problem: more power can feel worse if it stays inscrutable."]
 
 
 @pytest.mark.asyncio

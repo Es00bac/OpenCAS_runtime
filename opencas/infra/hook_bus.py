@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import dataclasses
+import logging
 from typing import Any, Callable, Dict, List, Optional
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclasses.dataclass
@@ -70,15 +74,24 @@ class HookBus:
             if not wrappers:
                 self._wrapper_map.pop(key, None)
 
-    def run(self, hook_name: str, context: Dict[str, Any]) -> HookResult:
+    def run(
+        self,
+        hook_name: str,
+        context: Dict[str, Any],
+        *,
+        isolate_handler_failures: bool = False,
+    ) -> HookResult:
         """Run all handlers for *hook_name* in registration order.
 
         Short-circuits on the first handler that returns *allowed=False*.
         Applies any *mutated_context* from the last successful handler.
         """
         if self._typed_registry is not None:
-            from .hook_registry import HookResult as TypedHookResult
-            result = self._typed_registry.run(hook_name, context)
+            result = self._typed_registry.run(
+                hook_name,
+                context,
+                isolate_handler_failures=isolate_handler_failures,
+            )
             return HookResult(
                 allowed=result.allowed,
                 reason=result.reason,
@@ -87,7 +100,13 @@ class HookBus:
         handlers = list(self._handlers.get(hook_name, []))
         current_context = dict(context)
         for handler in handlers:
-            result = handler(hook_name, current_context)
+            try:
+                result = handler(hook_name, current_context)
+            except Exception as exc:
+                if not isolate_handler_failures:
+                    raise
+                self._trace_handler_failure(hook_name, handler, exc, current_context)
+                continue
             if result.mutated_context is not None:
                 current_context = result.mutated_context
             if not result.allowed:
@@ -97,3 +116,27 @@ class HookBus:
                     mutated_context=current_context,
                 )
         return HookResult(allowed=True, mutated_context=current_context)
+
+    @staticmethod
+    def _trace_handler_failure(
+        hook_name: str,
+        handler: HookHandler,
+        exc: Exception,
+        context: Dict[str, Any],
+    ) -> None:
+        payload = {
+            "hook_name": hook_name,
+            "handler": getattr(handler, "__name__", repr(handler)),
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+        tracer = context.get("tracer")
+        if tracer is not None and hasattr(tracer, "log"):
+            try:
+                from opencas.telemetry import EventKind
+
+                tracer.log(EventKind.TOOL_CALL, "hook_handler_failed", payload)
+                return
+            except Exception:
+                logger.exception("failed to trace hook handler failure")
+        logger.warning("hook handler failed: %s", payload)

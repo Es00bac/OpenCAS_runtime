@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import asyncio
-from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
-from uuid import uuid4
+from typing import Any, Dict, List
 
 import numpy as np
 import pytest
@@ -14,7 +11,6 @@ from opencas.autonomy.models import ActionRiskTier
 from opencas.tools.models import ToolResult
 from opencas.tools.registry import ToolEntry
 from opencas.tools.tool_embedding_index import (
-    TOOL_SEMANTIC_HINTS,
     ToolEmbeddingIndex,
     _build_tool_semantic_text,
 )
@@ -91,6 +87,12 @@ class TestSemanticText:
         entry = _entry("custom_tool_xyz", "Does something custom.")
         text = _build_tool_semantic_text(entry)
         assert text == "custom_tool_xyz: Does something custom."
+
+    def test_tui_playwright_helpers_have_semantic_hints(self):
+        text = _build_tool_semantic_text(_entry("tui_playwright_keys", "Send keys."))
+
+        assert "Ctrl-C" in text
+        assert "browser-targetable TUI" in text
 
 
 class TestBuild:
@@ -222,12 +224,89 @@ class TestToolUseLoopIntegration:
         _stub_approval = type("_A", (), {})()
         _stub_runtime = type("_RT", (), {})()
 
-        loop = ToolUseLoop(llm=_stub_llm, tools=tools_reg, approval=_stub_approval)
-        ctx = ToolUseContext(runtime=_stub_runtime, session_id="t", plan_mode=False)
+        loop = ToolUseLoop(llm=_stub_llm, tools=tools_reg, approval=_stub_approval)  # type: ignore[arg-type]
+        ctx = ToolUseContext(runtime=_stub_runtime, session_id="t", plan_mode=False)  # type: ignore[arg-type]
 
         # Keyword "cpu" should surface system_status via fallback
         selected = loop._filter_tools(ctx, objective="check the cpu load")
         names = {t.name for t in selected}
+        assert "system_status" in names
+
+    def test_filter_tools_surfaces_readonly_email_backends(self):
+        """General email requests should surface both gws and local IMAP tools."""
+        from opencas.tools.context import ToolUseContext
+        from opencas.tools.loop import ToolUseLoop
+
+        tools_reg = ToolRegistry()
+        for name in (
+            "google_workspace_gmail_headlines",
+            "google_workspace_gmail_get_message",
+            "himalaya_email_headlines",
+            "himalaya_email_read_message",
+        ):
+            tools_reg.register(
+                name,
+                f"{name} test stub",
+                lambda n, a: ToolResult(success=True, output="", metadata={}),
+                ActionRiskTier.READONLY,
+                {"type": "object"},
+            )
+
+        _stub_llm = type("_L", (), {"model_routing": type("_R", (), {"auto_escalation": True})()})()
+        _stub_approval = type("_A", (), {})()
+        _stub_runtime = type("_RT", (), {})()
+
+        loop = ToolUseLoop(llm=_stub_llm, tools=tools_reg, approval=_stub_approval)  # type: ignore[arg-type]
+        ctx = ToolUseContext(runtime=_stub_runtime, session_id="t", plan_mode=False)  # type: ignore[arg-type]
+
+        selected = loop._filter_tools(ctx, objective="anything important in my email inbox?")
+        names = {t.name for t in selected}
+        assert "google_workspace_gmail_headlines" in names
+        assert "himalaya_email_headlines" in names
+
+    def test_filter_tools_excludes_disabled_plugin_tools(self):
+        """Disabled plugin tools must not be offered to the model."""
+        from opencas.tools.context import ToolUseContext
+        from opencas.tools.loop import ToolUseLoop
+        from types import SimpleNamespace
+
+        tools_reg = ToolRegistry()
+        tools_reg.register(
+            "desktop_context_configure",
+            "Configure desktop context",
+            lambda n, a: ToolResult(success=True, output="", metadata={}),
+            ActionRiskTier.READONLY,
+            {"type": "object"},
+            plugin_id="desktop_context",
+        )
+        tools_reg.register(
+            "system_status",
+            "Host stats",
+            lambda n, a: ToolResult(success=True, output="", metadata={}),
+            ActionRiskTier.READONLY,
+            {"type": "object"},
+        )
+
+        _stub_llm = type("_L", (), {"model_routing": type("_R", (), {"auto_escalation": True})()})()
+        _stub_approval = type("_A", (), {})()
+        runtime = SimpleNamespace(
+            ctx=SimpleNamespace(
+                plugin_lifecycle=SimpleNamespace(
+                    is_tool_disabled=lambda name: name == "desktop_context_configure"
+                )
+            )
+        )
+
+        loop = ToolUseLoop(llm=_stub_llm, tools=tools_reg, approval=_stub_approval)
+        ctx = ToolUseContext(runtime=runtime, session_id="t", plan_mode=False)
+
+        selected = loop._filter_tools(
+            ctx,
+            objective="check cpu and turn body double off",
+            cognitive_tool_names={"desktop_context_configure", "system_status"},
+        )
+        names = {tool.name for tool in selected}
+        assert "desktop_context_configure" not in names
         assert "system_status" in names
 
 

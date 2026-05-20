@@ -1317,6 +1317,61 @@ textarea:focus,
   overflow: hidden;
 }
 
+.memory-activity-panel {
+  overflow: hidden;
+}
+
+.memory-activity-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.memory-activity-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.activity-chip {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(34, 211, 238, 0.28);
+  background: rgba(8, 47, 73, 0.36);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 10px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.activity-chip strong,
+.activity-chip small {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-chip small,
+.activity-chip em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.activity-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  background: #22d3ee;
+  box-shadow: 0 0 18px rgba(34, 211, 238, 0.78);
+}
+
 .memory-health-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
@@ -1352,9 +1407,46 @@ textarea:focus,
   min-height: clamp(420px, calc(100vh - 360px), 760px);
 }
 
+.memory-flow-wrap {
+  position: relative;
+  min-height: clamp(420px, calc(100vh - 360px), 760px);
+}
+
 .memory-atlas-wrap canvas {
   width: 100% !important;
   height: clamp(420px, calc(100vh - 360px), 760px) !important;
+}
+
+.memory-flow-wrap canvas {
+  width: 100% !important;
+  height: clamp(420px, calc(100vh - 360px), 760px) !important;
+}
+
+.memory-shell.atlas-expanded .memory-health-panel,
+.memory-shell.atlas-expanded .memory-activity-panel,
+.memory-shell.atlas-expanded .memory-workbench {
+  display: none;
+}
+
+.memory-shell.atlas-expanded .memory-layout {
+  min-height: calc(100vh - 138px);
+  grid-template-columns: minmax(250px, 300px) minmax(0, 1fr) minmax(300px, 360px);
+}
+
+.memory-shell.atlas-expanded .memory-atlas-panel,
+.memory-shell.atlas-expanded .memory-controls,
+.memory-shell.atlas-expanded .memory-detail-panel {
+  min-height: calc(100vh - 154px);
+}
+
+.memory-shell.atlas-expanded .memory-atlas-wrap,
+.memory-shell.atlas-expanded .memory-flow-wrap {
+  min-height: calc(100vh - 278px);
+}
+
+.memory-shell.atlas-expanded .memory-atlas-wrap canvas,
+.memory-shell.atlas-expanded .memory-flow-wrap canvas {
+  height: calc(100vh - 278px) !important;
 }
 
 .memory-retrieval-results {

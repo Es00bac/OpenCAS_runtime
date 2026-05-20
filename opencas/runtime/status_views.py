@@ -6,10 +6,15 @@ main runtime loop so `AgentRuntime` can stay focused on orchestration.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional
+import json
+import os
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from opencas.autonomy.commitment import CommitmentStatus, commitment_operator_snapshot
-from opencas.runtime.consolidation_state import load_consolidation_runtime_state
+from opencas.runtime.consolidation_state import (
+    CONSOLIDATION_RUNTIME_SUMMARY_KEYS,
+    load_consolidation_runtime_state,
+)
 from opencas.runtime.consolidation_worker import load_consolidation_worker_status
 
 if TYPE_CHECKING:
@@ -72,25 +77,30 @@ def build_consolidation_status(runtime: "AgentRuntime") -> Dict[str, Any]:
             return {"available": False}
         persisted = load_consolidation_runtime_state(state_dir)
         worker_status = load_consolidation_worker_status(state_dir)
+        worker_result = _completed_worker_result(worker_status)
         last_run_at = persisted.get("last_run_at")
         if not last_run_at:
-            return {"available": False, "worker": worker_status or None}
+            return {"available": False, "worker": _worker_status_for_monitor(worker_status)}
+        source = worker_result or persisted
         return {
             "available": True,
-            "timestamp": last_run_at,
-            "result_id": persisted.get("last_result_id"),
-            "clusters_formed": 0,
-            "memories_created": 0,
-            "commitments_consolidated": 0,
-            "commitment_clusters_formed": 0,
-            "commitment_work_objects_created": 0,
-            "commitments_extracted_from_chat": 0,
-            "episodes_pruned": 0,
+            "timestamp": source.get("timestamp") or last_run_at,
+            "result_id": source.get("result_id") or persisted.get("last_result_id"),
+            "clusters_formed": source.get("clusters_formed", 0),
+            "memories_created": source.get("memories_created", 0),
+            "commitments_consolidated": source.get("commitments_consolidated", 0),
+            "commitment_clusters_formed": source.get("commitment_clusters_formed", 0),
+            "commitment_work_objects_created": source.get("commitment_work_objects_created", 0),
+            "commitments_extracted_from_chat": source.get("commitments_extracted_from_chat", 0),
+            "episodes_pruned": source.get("episodes_pruned", 0),
+            "budget_exhausted": source.get("budget_exhausted"),
+            "budget_reason": source.get("budget_reason"),
             "persisted_only": True,
-            "worker": worker_status or None,
+            "worker": _worker_status_for_monitor(worker_status),
         }
     state_dir = getattr(getattr(getattr(runtime, "ctx", None), "config", None), "state_dir", None)
     worker_status = load_consolidation_worker_status(state_dir) if state_dir is not None else {}
+    live_worker = worker_status if _worker_status_is_live(worker_status) else None
     return {
         "available": True,
         "timestamp": result.get("timestamp"),
@@ -102,9 +112,56 @@ def build_consolidation_status(runtime: "AgentRuntime") -> Dict[str, Any]:
         "commitment_work_objects_created": result.get("commitment_work_objects_created", 0),
         "commitments_extracted_from_chat": result.get("commitments_extracted_from_chat", 0),
         "episodes_pruned": result.get("episodes_pruned", 0),
+        "nightly_dream": result.get("nightly_dream"),
         "persisted_only": False,
-        "worker": result.get("worker") or worker_status or None,
+        "worker": live_worker or result.get("worker") or worker_status or None,
     }
+
+
+def _worker_status_is_live(worker_status: Dict[str, Any]) -> bool:
+    if str(worker_status.get("status") or "").lower() != "running":
+        return False
+    pid = worker_status.get("pid")
+    if pid is None:
+        return True
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except (PermissionError, OSError, TypeError, ValueError):
+        return True
+    return True
+
+
+def _completed_worker_result(worker_status: Dict[str, Any]) -> Dict[str, Any]:
+    """Load the completed worker result file for restart-safe monitor metrics."""
+    if str(worker_status.get("status") or "").lower() != "completed":
+        return {}
+    result_path = str(worker_status.get("result_path") or "").strip()
+    if not result_path:
+        return {}
+    try:
+        payload = json.loads(open(result_path, encoding="utf-8").read())
+    except Exception:
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    if not any(key in payload for key in CONSOLIDATION_RUNTIME_SUMMARY_KEYS):
+        return {}
+    return payload
+
+
+def _worker_status_for_monitor(worker_status: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    if not worker_status:
+        return None
+    if _worker_status_is_live(worker_status):
+        return worker_status
+    if str(worker_status.get("status") or "").lower() in {"running", "started"}:
+        payload = dict(worker_status)
+        payload["status"] = "stale_running"
+        payload["pid_alive"] = False
+        return payload
+    return worker_status
 
 
 async def build_workflow_status(

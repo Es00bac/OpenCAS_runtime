@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import time
@@ -12,6 +13,8 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional, Sequence
 
 import numpy as np
 import logging
+
+from open_llm_auth.auth.manager import ProviderManager
 
 from opencas.embeddings.models import EmbeddingHealth, EmbeddingRecord
 
@@ -37,8 +40,9 @@ class EmbeddingCache:
         import aiosqlite
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._db = await aiosqlite.connect(str(self.db_path))
+        self._db = await aiosqlite.connect(str(self.db_path), timeout=30)
         await self._db.execute("PRAGMA journal_mode=WAL")
+        await self._db.execute("PRAGMA busy_timeout=30000")
         await self._db.execute("PRAGMA synchronous=NORMAL")
         await self._db.executescript(
             """
@@ -89,8 +93,48 @@ class EmbeddingCache:
             return None
         return self._row_to_record(row)
 
+    async def get_many(self, identifiers: Sequence[str]) -> Dict[str, EmbeddingRecord]:
+        """Return embedding records keyed by both source_hash and embedding_id.
+
+        Callers such as retrieval reranking often have a mixed list of source
+        hashes and embedding ids. Fetching them in batches avoids hundreds of
+        sequential SQLite round-trips on recall-heavy turns while preserving the
+        existing single-record lookup contract.
+        """
+
+        assert self._db is not None
+        unique_ids = [
+            item
+            for item in dict.fromkeys(str(identifier or "").strip() for identifier in identifiers)
+            if item
+        ]
+        if not unique_ids:
+            return {}
+
+        records: Dict[str, EmbeddingRecord] = {}
+        chunk_size = 400
+        for offset in range(0, len(unique_ids), chunk_size):
+            chunk = unique_ids[offset : offset + chunk_size]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = await self._db.execute(
+                f"""
+                SELECT *
+                FROM embeddings
+                WHERE source_hash IN ({placeholders})
+                   OR embedding_id IN ({placeholders})
+                """,
+                tuple(chunk + chunk),
+            )
+            rows = await cursor.fetchall()
+            for row in rows:
+                record = self._row_to_record(row)
+                records[str(record.source_hash)] = record
+                records[str(record.embedding_id)] = record
+        return records
+
     async def put(self, record: EmbeddingRecord) -> None:
         assert self._db is not None
+        record.meta = dict(record.meta or {})
         await self._db.execute(
             """
             INSERT INTO embeddings (
@@ -117,16 +161,126 @@ class EmbeddingCache:
             ),
         )
         await self._db.commit()
+        meta_dirty = False
         if self.vector_backend is not None:
             try:
-                await self.vector_backend.upsert(record)
+                ok = await self.vector_backend.upsert(record)
+                record.meta["vector_status"] = "ok" if ok else "stale"
+                meta_dirty = True
+                if not ok:
+                    logger.warning(
+                        "Embedding vector backend rejected upsert for %s",
+                        record.source_hash,
+                    )
             except Exception:
-                pass
+                record.meta["vector_status"] = "stale"
+                meta_dirty = True
+                logger.warning(
+                    "Embedding vector backend upsert failed for %s",
+                    record.source_hash,
+                    exc_info=True,
+                )
+        else:
+            record.meta["vector_status"] = "skipped"
+            meta_dirty = True
         if self.hnsw_backend is not None:
             try:
-                await self.hnsw_backend.upsert(record)
+                ok = await self.hnsw_backend.upsert(record)
+                record.meta["hnsw_status"] = "ok" if ok else "stale"
+                meta_dirty = True
+                if not ok:
+                    logger.warning(
+                        "Embedding HNSW backend rejected upsert for %s",
+                        record.source_hash,
+                    )
             except Exception:
-                pass
+                record.meta["hnsw_status"] = "stale"
+                meta_dirty = True
+                logger.warning(
+                    "Embedding HNSW backend upsert failed for %s",
+                    record.source_hash,
+                    exc_info=True,
+                )
+        else:
+            record.meta["hnsw_status"] = "skipped"
+            meta_dirty = True
+        if meta_dirty:
+            await self._update_record_meta(record.source_hash, record.meta)
+
+    async def reindex_stale(self, limit: int = 1000) -> Dict[str, int]:
+        """Retry vector backend writes for cache rows marked stale."""
+        assert self._db is not None
+        cursor = await self._db.execute(
+            """
+            SELECT * FROM embeddings
+            WHERE meta LIKE '%vector_status%stale%'
+               OR meta LIKE '%hnsw_status%stale%'
+            ORDER BY updated_at ASC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        )
+        rows = await cursor.fetchall()
+        stats = {
+            "records_checked": len(rows),
+            "vector_reindexed": 0,
+            "hnsw_reindexed": 0,
+            "failed": 0,
+        }
+        for row in rows:
+            record = self._row_to_record(row)
+            meta_dirty = False
+            if record.meta.get("vector_status") == "stale":
+                if self.vector_backend is None:
+                    record.meta["vector_status"] = "skipped"
+                    meta_dirty = True
+                else:
+                    try:
+                        ok = await self.vector_backend.upsert(record)
+                    except Exception:
+                        ok = False
+                        logger.warning(
+                            "Embedding vector backend reindex failed for %s",
+                            record.source_hash,
+                            exc_info=True,
+                        )
+                    if ok:
+                        record.meta["vector_status"] = "ok"
+                        stats["vector_reindexed"] += 1
+                        meta_dirty = True
+                    else:
+                        stats["failed"] += 1
+            if record.meta.get("hnsw_status") == "stale":
+                if self.hnsw_backend is None:
+                    record.meta["hnsw_status"] = "skipped"
+                    meta_dirty = True
+                else:
+                    try:
+                        ok = await self.hnsw_backend.upsert(record)
+                    except Exception:
+                        ok = False
+                        logger.warning(
+                            "Embedding HNSW backend reindex failed for %s",
+                            record.source_hash,
+                            exc_info=True,
+                        )
+                    if ok:
+                        record.meta["hnsw_status"] = "ok"
+                        stats["hnsw_reindexed"] += 1
+                        meta_dirty = True
+                    else:
+                        stats["failed"] += 1
+            if meta_dirty:
+                await self._update_record_meta(record.source_hash, record.meta)
+        return stats
+
+    async def _update_record_meta(self, source_hash: str, meta: Dict[str, Any]) -> None:
+        assert self._db is not None
+        await self._db.execute(
+            "UPDATE embeddings SET meta = ? WHERE source_hash = ?",
+            (json.dumps(meta), source_hash),
+        )
+        await self._db.commit()
 
     async def health(self) -> EmbeddingHealth:
         assert self._db is not None
@@ -184,6 +338,7 @@ class EmbeddingCache:
         limit: int = 10,
         model_id: Optional[str] = None,
         project_id: Optional[str] = None,
+        task_type: Optional[str] = None,
         query_text: Optional[str] = None,
         max_scan_rows: int = 2000,
     ) -> List[tuple[EmbeddingRecord, float]]:
@@ -199,6 +354,7 @@ class EmbeddingCache:
                     limit=limit,
                     model_id=model_id,
                     project_id=project_id,
+                    task_type=task_type,
                     with_scores=True,
                 )
                 if hits:
@@ -206,6 +362,8 @@ class EmbeddingCache:
                     for source_hash, sim in hits:
                         record = await self.get(source_hash)
                         if record is not None:
+                            if task_type and record.meta.get("task_type") != task_type:
+                                continue
                             scored.append((record, sim))
                     if scored:
                         latency_ms = (time.perf_counter() - start) * 1000
@@ -222,6 +380,7 @@ class EmbeddingCache:
                     limit=limit,
                     model_id=model_id,
                     project_id=project_id,
+                    task_type=task_type,
                     with_scores=True,
                 )
                 if hits:
@@ -229,6 +388,8 @@ class EmbeddingCache:
                     for source_hash, sim in hits:
                         record = await self.get(source_hash)
                         if record is not None:
+                            if task_type and record.meta.get("task_type") != task_type:
+                                continue
                             scored.append((record, sim))
                     if scored:
                         latency_ms = (time.perf_counter() - start) * 1000
@@ -263,6 +424,10 @@ class EmbeddingCache:
                 meta_project = record.meta.get("project_id") if record.meta else None
                 if meta_project != project_id:
                     continue
+            if task_type:
+                meta_task_type = record.meta.get("task_type") if record.meta else None
+                if meta_task_type != task_type:
+                    continue
             cand = np.array(record.vector, dtype=np.float32)
             if cand.shape != query.shape:
                 continue
@@ -285,6 +450,10 @@ class EmbeddingCache:
                 if project_id:
                     meta_project = record.meta.get("project_id") if record.meta else None
                     if meta_project != project_id:
+                        continue
+                if task_type:
+                    meta_task_type = record.meta.get("task_type") if record.meta else None
+                    if meta_task_type != task_type:
                         continue
                 text = (record.meta.get("text") or "").lower()
                 if not text:
@@ -337,12 +506,14 @@ class EmbeddingService:
         cache: EmbeddingCache,
         embed_fn: Callable[[str], Coroutine[Any, Any, Sequence[float]]] | None = None,
         embed_batch_fn: Callable[[List[str]], Coroutine[Any, Any, List[Sequence[float]]]] | None = None,
-        model_id: str = "local-fallback",
+        model_id: Optional[str] = None,
         expected_dimension: Optional[int] = None,
         store=None,
     ) -> None:
         self.cache = cache
-        self.model_id = model_id
+        self.local_embedding_model_id = ProviderManager.default_embedding_model_ref()
+        self.offline_embedding_model_id = ProviderManager.offline_embedding_model_ref()
+        self.model_id = model_id or self.offline_embedding_model_id
         self.expected_dimension = expected_dimension
         self._embed_fn = embed_fn or self._fallback_embed_wrapper
         self._has_custom_embed_fn = embed_fn is not None
@@ -351,38 +522,11 @@ class EmbeddingService:
         self._hit_count = 0
         self.store = store
         self._embed_history: deque = deque(maxlen=1000)
-        self._local_gemma: Optional[Any] = None
-
-    async def _get_local_gemma(self):
-        if self._local_gemma is None:
-            try:
-                from opencas.embeddings.local_gemma import GemmaEmbedder
-                self._local_gemma = GemmaEmbedder()
-            except Exception as e:
-                logger.warning(f"Could not initialize local Gemma embedder: {e}")
-                self._local_gemma = False # Sentinel for failure
-        return self._local_gemma
 
     async def _fallback_embed_wrapper(self, text: str) -> List[float]:
-        gemma = await self._get_local_gemma() if self.model_id == "google/embeddinggemma-300m" else None
-        if gemma:
-            try:
-                return await gemma.embed(text)
-            except Exception as e:
-                logger.warning(f"Local Gemma embed failed, using hash: {e}")
-
-        # Ultimate fallback
         return list(await self._fallback_embed(text, dim=self._fallback_hash_dimension()))
 
     async def _fallback_embed_batch_wrapper(self, texts: List[str]) -> List[List[float]]:
-        gemma = await self._get_local_gemma() if self.model_id == "google/embeddinggemma-300m" else None
-        if gemma:
-            try:
-                return await gemma.embed_batch(texts)
-            except Exception as e:
-                logger.warning(f"Local Gemma batch embed failed, using serial hash: {e}")
-
-        # Ultimate fallback (serial hashing)
         results = []
         for t in texts:
             results.append(list(await self._fallback_embed(t, dim=self._fallback_hash_dimension())))
@@ -408,7 +552,16 @@ class EmbeddingService:
         if not texts:
             return []
 
-        source_hashes = [self._build_source_hash(t, task_type=task_type) for t in texts]
+        project_id = (meta or {}).get("project_id")
+        project_scope = str(project_id) if project_id else None
+        source_hashes = [
+            self._build_source_hash(
+                t,
+                task_type=task_type,
+                project_id=project_scope,
+            )
+            for t in texts
+        ]
         self._request_count += len(texts)
 
         # 1. Try cache
@@ -416,7 +569,10 @@ class EmbeddingService:
         missing_indices: List[int] = []
         for i, source_hash in enumerate(source_hashes):
             cached = await self.cache.get(source_hash)
-            if cached is not None and self._cached_record_is_usable(cached):
+            if cached is not None and self._cached_record_is_usable(
+                cached,
+                project_id=project_scope,
+            ):
                 self._hit_count += 1
                 results[i] = cached
             else:
@@ -440,10 +596,12 @@ class EmbeddingService:
                 for text in missing_texts:
                     vectors.append(await self._embed_fn(text))
             else:
-                # Fallback to local Gemma or serial hashing
+                # Fallback to deterministic hashing. Production OpenCAS paths
+                # should provide embed_fn/embed_batch_fn so model execution is
+                # resolved by OpenLLMAuth, including local embedding runtimes.
                 vectors = await self._fallback_embed_batch_wrapper(missing_texts)
-                if self.model_id != "local-fallback" and not self._local_gemma:
-                    actual_model_id = "local-fallback"
+                if self.model_id != self.offline_embedding_model_id:
+                    actual_model_id = self.offline_embedding_model_id
                     degraded_reason = (
                         f"No live embedding provider available for {self.model_id}; "
                         "using deterministic hash fallback"
@@ -451,7 +609,7 @@ class EmbeddingService:
         except Exception as exc:
             degraded_reason = f"{type(exc).__name__}: {exc}"
             vectors = await self._fallback_embed_batch_wrapper(missing_texts)
-            actual_model_id = "local-gemma-300m" if self._local_gemma else "local-fallback"
+            actual_model_id = self.offline_embedding_model_id
 
         coerced_vectors: List[List[float]] = []
         dimension_meta: List[Dict[str, Any]] = []
@@ -550,8 +708,12 @@ class EmbeddingService:
         return await self.cache.recent_records(limit=limit)
 
     def _fallback_hash_dimension(self) -> int:
-        if self.model_id == "google/embeddinggemma-300m":
-            return 768
+        if self.model_id == self.local_embedding_model_id:
+            definition = ProviderManager.local_embedding_model_definition(self.local_embedding_model_id) or {}
+            try:
+                return int(definition.get("dimensions") or self.expected_dimension or 256)
+            except (TypeError, ValueError):
+                return int(self.expected_dimension or 256)
         return 256
 
     @staticmethod
@@ -572,12 +734,23 @@ class EmbeddingService:
             vec = vec / norm
         return vec.tolist()
 
-    def _build_source_hash(self, text: str, task_type: str) -> str:
-        payload = "\0".join([self.model_id, task_type, text])
+    def _build_source_hash(
+        self,
+        text: str,
+        task_type: str,
+        project_id: Optional[str] = None,
+    ) -> str:
+        payload = "\0".join([self.model_id, task_type, project_id or "", text])
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
-    def _cached_record_is_usable(self, record: EmbeddingRecord) -> bool:
+    def _cached_record_is_usable(
+        self,
+        record: EmbeddingRecord,
+        project_id: Optional[str] = None,
+    ) -> bool:
         if record.model_id != self.model_id:
+            return False
+        if project_id is not None and record.meta.get("project_id") != project_id:
             return False
         if self.expected_dimension is not None and record.dimension != self.expected_dimension:
             return False

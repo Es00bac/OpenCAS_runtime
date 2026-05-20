@@ -9,6 +9,23 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, Optional
 
+DEFAULT_BUSY_TIMEOUT_MS = 30000
+
+
+def _configure_sqlite_connection(raw: sqlite3.Connection) -> None:
+    """Apply OpenCAS' concurrency defaults to a new SQLite connection."""
+    try:
+        raw.execute(f"PRAGMA busy_timeout={DEFAULT_BUSY_TIMEOUT_MS}")
+    except sqlite3.Error:
+        pass
+    try:
+        raw.execute("PRAGMA journal_mode=WAL")
+    except sqlite3.Error:
+        pass
+    try:
+        raw.execute("PRAGMA synchronous=NORMAL")
+    except sqlite3.Error:
+        pass
 
 class _CompatCursor:
     """Minimal async cursor wrapper backed by sqlite3 + asyncio.to_thread."""
@@ -31,15 +48,15 @@ class _CompatCursor:
 
     async def fetchone(self) -> Any:
         async with self._connection._lock:
-            return self._cursor.fetchone()
+            return await asyncio.to_thread(self._cursor.fetchone)
 
     async def fetchall(self) -> list[Any]:
         async with self._connection._lock:
-            return self._cursor.fetchall()
+            return await asyncio.to_thread(self._cursor.fetchall)
 
     async def close(self) -> None:
         async with self._connection._lock:
-            self._cursor.close()
+            await asyncio.to_thread(self._cursor.close)
 
 
 class _CompatExecuteContext:
@@ -90,30 +107,34 @@ class _CompatConnection:
     ) -> _CompatExecuteContext:
         async def _run() -> _CompatCursor:
             async with self._lock:
-                cursor = self._conn.execute(sql, tuple(parameters or ()))
+                cursor = await asyncio.to_thread(
+                    self._conn.execute,
+                    sql,
+                    tuple(parameters or ()),
+                )
             return _CompatCursor(self, cursor)
 
         return _CompatExecuteContext(_run)
 
     async def executemany(self, sql: str, parameters: Iterable[Iterable[Any]]) -> None:
         async with self._lock:
-            self._conn.executemany(sql, list(parameters))
+            await asyncio.to_thread(self._conn.executemany, sql, list(parameters))
 
     async def executescript(self, sql: str) -> None:
         async with self._lock:
-            self._conn.executescript(sql)
+            await asyncio.to_thread(self._conn.executescript, sql)
 
     async def commit(self) -> None:
         async with self._lock:
-            self._conn.commit()
+            await asyncio.to_thread(self._conn.commit)
 
     async def rollback(self) -> None:
         async with self._lock:
-            self._conn.rollback()
+            await asyncio.to_thread(self._conn.rollback)
 
     async def close(self) -> None:
         async with self._lock:
-            self._conn.close()
+            await asyncio.to_thread(self._conn.close)
 
 
 def patch_aiosqlite_for_python314() -> None:
@@ -140,7 +161,9 @@ def patch_aiosqlite_for_python314() -> None:
     async def _connect(database: str | Path, **kwargs: Any) -> _CompatConnection:
         kwargs = dict(kwargs)
         kwargs.setdefault("check_same_thread", False)
+        kwargs.setdefault("timeout", DEFAULT_BUSY_TIMEOUT_MS / 1000)
         raw = sqlite3.connect(str(database), **kwargs)
+        _configure_sqlite_connection(raw)
         return _CompatConnection(raw)
 
     aiosqlite.connect = _connect

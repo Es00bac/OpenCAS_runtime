@@ -7,7 +7,7 @@ import pytest_asyncio
 
 from opencas.autonomy.commitment import Commitment, CommitmentStatus
 from opencas.autonomy.commitment_store import CommitmentStore
-from opencas.autonomy.executive import ExecutiveState, ExecutiveSnapshot
+from opencas.autonomy.executive import ExecutiveSnapshot, ExecutiveState
 from opencas.autonomy.models import WorkObject, WorkStage
 from opencas.identity import IdentityManager, IdentityStore
 
@@ -42,8 +42,8 @@ def test_load_save_snapshot(executive: ExecutiveState, tmp_path: Path) -> None:
     assert fresh.intention == "test intention"
     assert "goal one" in fresh.active_goals
     assert "goal two" in fresh.active_goals
-    assert "repair /package" in fresh.parked_goals
-    assert fresh.parked_goal_metadata["repair /package"]["reason"] == "machine_fragment_goal"
+    assert "repair /package" not in fresh.active_goals
+    assert "repair /package" not in fresh.parked_goals
 
 
 def test_load_snapshot_archives_large_parked_residue(identity: IdentityManager, tmp_path: Path) -> None:
@@ -55,9 +55,9 @@ def test_load_snapshot_archives_large_parked_residue(identity: IdentityManager, 
             "memory",
             "assist",
             "build",
-            "repair /package",
-            "repair /npx",
-            "test -01",
+            "care",
+            "continuity",
+            "fix",
             "verify tsconfig",
         ],
         parked_goal_reasons={
@@ -65,9 +65,9 @@ def test_load_snapshot_archives_large_parked_residue(identity: IdentityManager, 
             "memory": "abstract_theme_goal",
             "assist": "abstract_theme_goal",
             "build": "generic_verb_without_binding",
-            "repair /package": "machine_fragment_goal",
-            "repair /npx": "machine_fragment_goal",
-            "test -01": "numbered_fragment_goal",
+            "care": "abstract_theme_goal",
+            "continuity": "abstract_theme_goal",
+            "fix": "generic_verb_without_binding",
             "verify tsconfig": "evidence_deferred",
         },
         parked_goal_metadata={
@@ -75,9 +75,9 @@ def test_load_snapshot_archives_large_parked_residue(identity: IdentityManager, 
             "memory": {"reason": "abstract_theme_goal"},
             "assist": {"reason": "abstract_theme_goal"},
             "build": {"reason": "generic_verb_without_binding"},
-            "repair /package": {"reason": "machine_fragment_goal", "source_artifact": "repair /package"},
-            "repair /npx": {"reason": "machine_fragment_goal", "source_artifact": "repair /npx"},
-            "test -01": {"reason": "numbered_fragment_goal"},
+            "care": {"reason": "abstract_theme_goal"},
+            "continuity": {"reason": "abstract_theme_goal"},
+            "fix": {"reason": "generic_verb_without_binding"},
             "verify tsconfig": {
                 "reason": "evidence_deferred",
                 "wake_trigger": "TypeScript failure or direct user request",
@@ -93,14 +93,14 @@ def test_load_snapshot_archives_large_parked_residue(identity: IdentityManager, 
 
     assert fresh.parked_goals == ["verify tsconfig"]
     assert len(fresh.archived_parked_goals) == 7
-    assert "repair /package" in fresh.archived_parked_goals
-    archived_metadata = fresh.archived_parked_goal_metadata["repair /package"]
+    assert "persistence" in fresh.archived_parked_goals
+    archived_metadata = fresh.archived_parked_goal_metadata["persistence"]
     assert archived_metadata["archive_reason"] == "residue_compaction"
     assert "archived_at" in archived_metadata
 
     saved = ExecutiveSnapshot.model_validate_json(path.read_text(encoding="utf-8"))
     assert saved.parked_goals == ["verify tsconfig"]
-    assert "repair /package" in saved.archived_parked_goals
+    assert "persistence" in saved.archived_parked_goals
 
 
 def test_restore_goals_from_identity(identity: IdentityManager, tmp_path: Path) -> None:
@@ -115,7 +115,7 @@ def test_restore_goals_from_identity(identity: IdentityManager, tmp_path: Path) 
     assert "from identity" in executive.active_goals
 
 
-def test_restore_goals_from_identity_parks_machine_fragments(identity: IdentityManager) -> None:
+def test_restore_goals_from_identity_rejects_machine_fragments(identity: IdentityManager) -> None:
     identity.self_model.current_goals = [
         "rewrite the readme",
         "repair /package",
@@ -129,7 +129,8 @@ def test_restore_goals_from_identity_parks_machine_fragments(identity: IdentityM
 
     assert count == 1
     assert executive.active_goals == ["rewrite the readme"]
-    assert executive.parked_goals == ["repair /package", "test -01", "memory"]
+    assert executive.parked_goals == ["memory"]
+    assert identity.self_model.current_goals == ["rewrite the readme"]
 
 
 @pytest.mark.asyncio
@@ -169,6 +170,28 @@ async def test_check_goal_resolution_with_commitments(exec_with_commitments) -> 
     assert "rewrite the readme" in resolved
     fetched = await store.get(str(c.commitment_id))
     assert fetched.status == CommitmentStatus.COMPLETED
+
+
+@pytest.mark.asyncio
+async def test_check_goal_resolution_does_not_complete_software_verify_commitment_by_overlap(
+    exec_with_commitments,
+) -> None:
+    executive, store = exec_with_commitments
+    c = Commitment(
+        content="Build and verify kPony Qt6 email client with cmake.",
+        priority=8.0,
+        tags=["software", "build"],
+        meta={"project_type": "software"},
+    )
+    await store.save(c)
+
+    resolved = await executive.check_goal_resolution(
+        "I wrote the kPony Qt6 email client source files, but the build has not been run yet."
+    )
+
+    assert c.content not in resolved
+    fetched = await store.get(str(c.commitment_id))
+    assert fetched.status == CommitmentStatus.ACTIVE
 
 
 @pytest.mark.asyncio

@@ -3,7 +3,7 @@
 import pytest
 import pytest_asyncio
 
-from opencas.somatic import AppraisalEventType, SomaticAppraisalEvent, SomaticManager
+from opencas.somatic import AppraisalEventType, SomaticManager
 from opencas.somatic.models import PrimaryEmotion
 from opencas.somatic.store import SomaticStore
 
@@ -73,7 +73,6 @@ async def test_appraise_generated_returns_affect(manager):
 async def test_reconcile_detects_masking(manager):
     """High internal tension + calm expressed text → masking detected."""
     from opencas.somatic.models import SomaticState, AffectState
-    from datetime import datetime, timezone
 
     # Simulate high-tension internal state
     pre = SomaticState(tension=0.8, valence=-0.2, certainty=0.7)

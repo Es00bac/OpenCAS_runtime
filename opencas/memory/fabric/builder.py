@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 from opencas.memory import EdgeKind, Episode, EpisodeEdge, MemoryStore
 from opencas.telemetry import Tracer
@@ -55,9 +55,6 @@ class FabricBuilder:
         prune_threshold: float = 0.05,
     ) -> int:
         """Rebuild episode edges for the given candidates."""
-        # 1. Global decay
-        await self.store.decay_all_edges(decay)
-
         # Ensure every candidate has an embedding_id so the indexer can match
         for ep in episodes:
             if not ep.embedding_id:
@@ -75,8 +72,16 @@ class FabricBuilder:
         edges_to_save: List[EpisodeEdge] = []
         edges_created = 0
         processed_pairs: set[frozenset[str]] = set()
+        decayed_edge_ids: set[str] = set()
 
         for ep in episodes:
+            source_id = str(ep.episode_id)
+            decayed = await self.store.decay_edges_for(
+                source_id,
+                decay=decay,
+                exclude_edge_ids=list(decayed_edge_ids),
+            )
+            decayed_edge_ids.update(decayed)
             candidates = await self.indexer.candidates(ep)
             if not candidates:
                 continue
@@ -85,7 +90,6 @@ class FabricBuilder:
                 if cand.episode_id not in episode_map:
                     continue
                 ep_b = episode_map[cand.episode_id]
-                source_id = str(ep.episode_id)
                 target_id = str(ep_b.episode_id)
                 if source_id == target_id:
                     continue

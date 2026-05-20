@@ -53,7 +53,14 @@ class TelemetryStore:
 
     def _all_files(self) -> List[Path]:
         """Return daily JSONL files sorted newest first."""
-        files = sorted(self.base_path.glob("*.jsonl"), reverse=True)
+        files = sorted(
+            (
+                path
+                for path in self.base_path.glob("*.jsonl")
+                if _parse_date_from_filename(path.name) is not None
+            ),
+            reverse=True,
+        )
         return files
 
     def prune_old_files(self, max_age_days: int = 30, *, now: Optional[datetime] = None) -> int:
@@ -91,7 +98,7 @@ class TelemetryStore:
         for filepath in self._all_files():
             if len(results) >= limit:
                 break
-            for event in self._read_file(filepath):
+            for event in self._read_file_reverse(filepath):
                 if kind_set and event.kind not in kind_set:
                     continue
                 if session_id and event.session_id != session_id:
@@ -127,6 +134,37 @@ class TelemetryStore:
                 except (json.JSONDecodeError, ValueError):
                     # Skip corrupt lines rather than crash
                     continue
+
+    @staticmethod
+    def _read_file_reverse(filepath: Path) -> Iterator[TelemetryEvent]:
+        if not filepath.exists():
+            return
+        with open(filepath, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            position = f.tell()
+            buffer = b""
+            block_size = 64 * 1024
+            while position > 0:
+                read_size = min(block_size, position)
+                position -= read_size
+                f.seek(position)
+                data = f.read(read_size) + buffer
+                lines = data.split(b"\n")
+                buffer = lines[0]
+                for raw_line in reversed(lines[1:]):
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    try:
+                        yield TelemetryEvent.from_jsonl(line.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                        continue
+            line = buffer.strip()
+            if line:
+                try:
+                    yield TelemetryEvent.from_jsonl(line.decode("utf-8"))
+                except (UnicodeDecodeError, json.JSONDecodeError, ValueError):
+                    pass
 
 
 def _parse_date_from_filename(filename: str) -> Optional[datetime.date]:

@@ -1,15 +1,16 @@
 """Tests for MemoryRetriever multi-signal fusion, MMR, temporal decay, and diversity."""
 
-import pytest
-import pytest_asyncio
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from opencas.context.retriever import MemoryRetriever
+import pytest
+import pytest_asyncio
+
+from opencas.cognition import CognitiveStateStore
 from opencas.context.models import RetrievalResult
+from opencas.context.retriever import MemoryRetriever
 from opencas.embeddings import EmbeddingCache, EmbeddingService
 from opencas.memory import Episode, EpisodeEdge, EpisodeKind, Memory, MemoryStore
-from opencas.memory.fabric.graph import EpisodeGraph
 from opencas.somatic.models import AffectState, PrimaryEmotion
 
 
@@ -72,6 +73,45 @@ async def test_retrieve_fuses_semantic_and_keyword(store: MemoryStore, retriever
     source_types = {r.source_type for r in results}
     assert "episode" in source_types
     assert "memory" in source_types
+
+
+@pytest.mark.asyncio
+async def test_cognitive_state_biases_retrieval_candidates(store: MemoryStore, tmp_path: Path) -> None:
+    cognitive = CognitiveStateStore(tmp_path / "cognitive.db")
+    await cognitive.connect()
+    try:
+        await cognitive.upsert_attention("blue task", strength=0.95, source="test")
+        await store.save_episode(Episode(kind=EpisodeKind.OBSERVATION, content="anchor blue task evidence"))
+        await store.save_episode(Episode(kind=EpisodeKind.OBSERVATION, content="anchor red task evidence"))
+        cache = EmbeddingCache(":memory:")
+        await cache.connect()
+        try:
+            retriever = MemoryRetriever(
+                memory=store,
+                embeddings=EmbeddingService(cache=cache, model_id="local-fallback"),
+                cognitive_state_store=cognitive,
+            )
+            weights = {
+                name: 0.0
+                for name in retriever.DEFAULT_FUSION_WEIGHTS
+            }
+            weights["cognitive_focus_score"] = 1.0
+
+            inspection = await retriever.inspect(
+                "anchor",
+                expand_graph=False,
+                min_confidence=0.0,
+                weights=weights,
+            )
+
+            blue = next(item for item in inspection["candidates"] if "blue task" in item["content"])
+            red = next(item for item in inspection["candidates"] if "red task" in item["content"])
+            assert blue["cognitive_focus_score"] > red["cognitive_focus_score"]
+            assert "blue task" in blue["cognitive_focus_reason"]
+        finally:
+            await cache.close()
+    finally:
+        await cognitive.close()
 
 
 @pytest.mark.asyncio

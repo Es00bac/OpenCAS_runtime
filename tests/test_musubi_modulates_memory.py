@@ -4,10 +4,9 @@ import pytest
 import pytest_asyncio
 from pathlib import Path
 
-from opencas.autonomy import WorkObject
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
-from opencas.memory import Episode, EpisodeKind
-from opencas.relational import RelationalEngine, MusubiStore, MusubiState
+from opencas.memory import EpisodeKind
+from opencas.relational import MusubiState
 from opencas.runtime import AgentRuntime
 
 

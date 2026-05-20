@@ -1,5 +1,7 @@
 """Tests for RepairExecutor explicit phases."""
 
+import asyncio
+import subprocess
 from types import SimpleNamespace
 
 import pytest
@@ -7,7 +9,8 @@ import pytest_asyncio
 
 from opencas.autonomy.models import ActionRiskTier
 from opencas.context.models import MessageRole
-from opencas.execution import ExecutionPhase, ExecutionStage, RepairExecutor, RepairTask
+from opencas.execution import ExecutionPhase, ExecutionStage, PhaseRecord, RepairExecutor, RepairTask
+from opencas.execution.store import TaskStore
 from opencas.tools import FileSystemToolAdapter, ShellToolAdapter, ToolRegistry, ToolUseResult
 
 
@@ -38,10 +41,115 @@ async def test_executor_records_all_phases(executor):
 
 
 @pytest.mark.asyncio
+async def test_executor_persists_phase_start_before_handler_finishes(tmp_path):
+    store = await TaskStore(tmp_path / "tasks.db").connect()
+    try:
+        executor = RepairExecutor(tools=ToolRegistry(), store=store)
+        task = RepairTask(objective="slow phase")
+        await store.save(task)
+        started = asyncio.Event()
+        finish = asyncio.Event()
+
+        async def slow_handler(_task):
+            started.set()
+            await finish.wait()
+            return "slow done"
+
+        phase_task = asyncio.create_task(
+            executor._run_phase(task, ExecutionPhase.EXECUTE, slow_handler)
+        )
+        await asyncio.wait_for(started.wait(), timeout=1.0)
+
+        in_progress = await store.get(str(task.task_id))
+        assert in_progress is not None
+        assert in_progress.phases[-1].phase == ExecutionPhase.EXECUTE
+        assert in_progress.phases[-1].success is None
+        assert in_progress.phases[-1].ended_at is None
+
+        finish.set()
+        record = await asyncio.wait_for(phase_task, timeout=1.0)
+        assert record.success is True
+
+        completed = await store.get(str(task.task_id))
+        assert completed is not None
+        assert completed.phases[-1].success is True
+        assert completed.phases[-1].output == "slow done"
+        assert completed.phases[-1].ended_at is not None
+    finally:
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_executor_tool_loop_timeout_returns_recoverable_execute_failure(executor):
+    class SlowToolLoop:
+        async def run(self, **_kwargs):
+            await asyncio.sleep(30)
+
+    runtime = SimpleNamespace(tool_loop=SlowToolLoop(), scheduler=None)
+    executor.runtime = runtime
+    task = RepairTask(
+        objective="background project task",
+        meta={"tool_loop_timeout_seconds": 0.01},
+    )
+
+    output = await executor._execute_plan(task, "continue")
+
+    assert "tool loop timed out" in output
+    assert output.startswith("execute failed:")
+    assert task.meta["tool_loop_timeout"]["reason"] == "tool_loop_execution_timeout"
+
+
+@pytest.mark.asyncio
+async def test_executor_tool_loop_timeout_records_workspace_artifact_progress(executor, tmp_path):
+    workspace = tmp_path / "workspace" / "novels" / "book"
+    workspace.mkdir(parents=True)
+    artifact = workspace / "drafts" / "chapter_31.md"
+
+    class SlowWritingToolLoop:
+        async def run(self, **_kwargs):
+            artifact.parent.mkdir(parents=True, exist_ok=True)
+            artifact.write_text("new manuscript prose\n", encoding="utf-8")
+            await asyncio.sleep(30)
+
+    runtime = SimpleNamespace(tool_loop=SlowWritingToolLoop(), scheduler=None)
+    executor.runtime = runtime
+    task = RepairTask(
+        objective="continue writing project",
+        meta={
+            "tool_loop_timeout_seconds": 0.01,
+            "workspace_abs_path": str(workspace),
+        },
+    )
+
+    output = await executor._execute_plan(task, "continue")
+    record = PhaseRecord(phase=ExecutionPhase.EXECUTE, success=False, output=output)
+
+    assert "tool loop timed out" in output
+    assert task.meta["tool_loop_timeout"]["artifact_progress_paths"] == [str(artifact)]
+    assert RepairExecutor._artifact_progress_boundary(task, record)
+    assert str(artifact) in RepairExecutor._artifact_paths_touched(task, [])
+
+
+@pytest.mark.asyncio
 async def test_executor_snapshot_phase_when_scratch_dir_set(executor, tmp_path):
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    subprocess.run(["git", "init"], cwd=scratch, check=True, capture_output=True)
+    subprocess.run(
+        ["git", "config", "user.email", "test@test.com"],
+        cwd=scratch,
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        ["git", "config", "user.name", "Test"],
+        cwd=scratch,
+        check=True,
+        capture_output=True,
+    )
     task = RepairTask(
         objective="check file.txt",
-        scratch_dir=str(tmp_path / "scratch"),
+        scratch_dir=str(scratch),
     )
     result = await executor.run(task)
     assert result.success is True
@@ -83,10 +191,55 @@ async def test_executor_tool_loop_halted_fails_task(executor):
 
 
 @pytest.mark.asyncio
+async def test_executor_max_tool_iterations_fails_task(executor):
+    task = RepairTask(objective="iteration capped task", max_attempts=1)
+    executor._execute_plan = lambda _task, _plan: "Reached maximum number of tool-use iterations."
+    result = await executor.run(task)
+    exec_phase = [p for p in task.phases if p.phase == ExecutionPhase.EXECUTE][0]
+    assert exec_phase.success is False
+    assert result.success is False
+    assert result.stage == ExecutionStage.FAILED
+
+
+@pytest.mark.asyncio
+async def test_executor_max_iterations_with_artifact_progress_recovers(executor, tmp_path):
+    target = tmp_path / "chapter.md"
+    task = RepairTask(objective="long artifact task", max_attempts=1)
+
+    def _execute_with_artifact_progress(_task, _plan):
+        _task.meta["last_tool_loop"] = {
+            "iterations": 32,
+            "guard_fired": False,
+            "tool_call_count": 1,
+        }
+        _task.meta["last_tool_calls"] = [
+            {"id": "call-1", "name": "fs_write_file", "args": {"file_path": str(target)}}
+        ]
+        return "Reached maximum number of tool-use iterations."
+
+    executor._execute_plan = _execute_with_artifact_progress
+
+    result = await executor.run(task)
+
+    exec_phase = [p for p in task.phases if p.phase == ExecutionPhase.EXECUTE][0]
+    assert exec_phase.success is False
+    assert result.success is False
+    assert result.stage == ExecutionStage.RECOVERING
+    assert result.output == "Artifact progress boundary reached; will continue."
+
+
+@pytest.mark.asyncio
 async def test_executor_runtime_guard_fired_result_fails_task(executor):
     async def _run(**kwargs):
         return ToolUseResult(
             final_output="I made partial progress before pausing after a long tool run.",
+            tool_calls=[
+                {
+                    "id": "call-1",
+                    "name": "runtime_status",
+                    "args": {},
+                }
+            ],
             guard_fired=True,
             guard_reason="Tool loop circuit breaker: exceeded 24 consecutive tool calls in this session.",
         )
@@ -101,6 +254,8 @@ async def test_executor_runtime_guard_fired_result_fails_task(executor):
     exec_phase = [p for p in task.phases if p.phase == ExecutionPhase.EXECUTE][0]
     assert exec_phase.success is False
     assert "tool loop guard fired" in exec_phase.output.lower()
+    assert task.meta["last_tool_calls"][0]["name"] == "runtime_status"
+    assert task.meta["last_tool_loop"]["guard_fired"] is True
     assert result.success is False
     assert result.stage == ExecutionStage.FAILED
 
@@ -119,7 +274,7 @@ async def test_executor_frames_project_return_as_self_continuity(executor):
             return [
                 SimpleNamespace(
                     role=MessageRole.USER,
-                    content="Keep working on Chronicle 4246 until it feels complete.",
+                    content="Keep working on writing project 4246 until it feels complete.",
                 ),
                 SimpleNamespace(
                     role=MessageRole.ASSISTANT,
@@ -135,17 +290,20 @@ async def test_executor_frames_project_return_as_self_continuity(executor):
     executor.runtime = SimpleNamespace(
         tool_loop=SimpleNamespace(run=_run),
         scheduler=None,
-        ctx=SimpleNamespace(context_store=_FakeContextStore()),
+        ctx=SimpleNamespace(
+            context_store=_FakeContextStore(),
+            identity=SimpleNamespace(self_model=SimpleNamespace(name="TestAgent")),
+        ),
     )
     task = RepairTask(
-        objective="Return to project \"Chronicle 4246\".",
+        objective="Return to project \"writing project 4246\".",
         meta={
             "source": "schedule",
-            "project_key": "chronicle-4246",
-            "project_title": "Chronicle 4246",
+            "project_key": "writing-project-4246",
+            "project_title": "writing project 4246",
             "source_session_id": "telegram:private:1",
             "project_intent": (
-                "revise and finish the Chronicle 4246 manuscript until Bulma is satisfied, "
+                "revise and finish the writing project 4246 manuscript until explicit completion evidence exists, "
                 "using critique as input without narrowing the project to naming research"
             ),
             "next_step": "Fold the Onnen naming decision into the manuscript.",
@@ -157,20 +315,141 @@ async def test_executor_frames_project_return_as_self_continuity(executor):
     assert output == "returned to the project"
     assert captured["session_lookup"]["session_id"] == "telegram:private:1"
     system_message = captured["messages"][0]["content"]
-    assert "You are Bulma returning to your own creative project" in system_message
+    assert "You are TestAgent returning to your own creative project" in system_message
+    assert "You are an OpenCAS agent" not in system_message
     assert "not an external contractor" in system_message
-    assert "Chronicle 4246" in system_message
-    assert "revise and finish the Chronicle 4246 manuscript" in system_message
+    assert "writing project 4246" in system_message
+    assert "revise and finish the writing project 4246 manuscript" in system_message
     assert "fold the Onnen naming decision" in system_message
-    assert "Keep working on Chronicle 4246" in system_message
+    assert "Keep working on writing project 4246" in system_message
     assert "creating a workflow scaffold is not manuscript progress" in system_message
     assert "before claiming a chapter, scene, word count, or manuscript milestone" in system_message
 
 
 @pytest.mark.asyncio
+async def test_executor_rejects_new_project_sibling_materialization_trace(executor, tmp_path):
+    workspace = tmp_path / "workspace"
+    target = workspace / "novels" / "the-glass-tide"
+    source = workspace / "novels" / "the-orchard-of-second-species"
+    target.mkdir(parents=True)
+    source.mkdir(parents=True)
+
+    async def _run(**_kwargs):
+        return ToolUseResult(
+            final_output=(
+                f"Copied directories from sibling project {source} into {target}. "
+                "Current manuscript word count: 100,202 words."
+            ),
+            tool_calls=[
+                {
+                    "name": "bash_run_command",
+                    "args": {
+                        "command": (
+                            f"python3 - <<'PY'\n"
+                            f"import shutil\n"
+                            f"shutil.copytree('{source}', '{target}', dirs_exist_ok=True)\n"
+                            f"PY"
+                        )
+                    },
+                }
+            ],
+        )
+
+    executor.runtime = SimpleNamespace(
+        tool_loop=SimpleNamespace(run=_run),
+        scheduler=None,
+        ctx=SimpleNamespace(
+            context_store=None,
+            identity=SimpleNamespace(self_model=SimpleNamespace(name="TestAgent")),
+            config=SimpleNamespace(
+                primary_workspace_root=lambda: tmp_path,
+                agent_workspace_root=lambda: workspace,
+            ),
+        ),
+    )
+    task = RepairTask(
+        objective="Return to project \"The Glass Tide\" and finish the new project.",
+        meta={
+            "source": "schedule",
+            "project_key": "the-glass-tide",
+            "project_title": "The Glass Tide",
+            "project_type": "writing",
+            "workspace_abs_path": str(target),
+            "workspace_rel_path": "workspace/novels/the-glass-tide",
+            "requested_workspace_abs_path": str(workspace / "novels"),
+            "requested_workspace_kind": "parent",
+            "project_start_contract": {
+                "new_project": True,
+                "source_copy_policy": "no_sibling_materialization",
+                "target_workspace_abs_path": str(target),
+                "requested_parent_abs_path": str(workspace / "novels"),
+                "forbidden_source_paths": [str(source)],
+            },
+        },
+    )
+
+    output = await executor._execute_plan(task, "inspect the target and continue")
+
+    assert output.startswith("execute failed:")
+    assert "sibling" in output
+    assert task.meta["project_contract_failure"]["tool_call_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_executor_frames_software_project_return_without_creative_manuscript_language(executor):
+    captured = {}
+    workspace = executor.tools._tools["fs_read_file"].adapter.allowed_roots[0] / "workspace"  # type: ignore[attr-defined]
+    project_root = workspace / "kPony"
+    (project_root / "src").mkdir(parents=True)
+    (project_root / "CMakeLists.txt").write_text("cmake_minimum_required(VERSION 3.20)\n", encoding="utf-8")
+
+    async def _run(**kwargs):
+        captured["messages"] = kwargs["messages"]
+        return ToolUseResult(final_output="continued software project")
+
+    executor.runtime = SimpleNamespace(
+        tool_loop=SimpleNamespace(run=_run),
+        scheduler=None,
+        ctx=SimpleNamespace(
+            context_store=None,
+            identity=SimpleNamespace(self_model=SimpleNamespace(name="TestAgent")),
+            config=SimpleNamespace(
+                primary_workspace_root=lambda: workspace.parent,
+                agent_workspace_root=lambda: workspace,
+            ),
+        ),
+    )
+    task = RepairTask(
+        objective="Return to project \"kPony\".",
+        meta={
+            "source": "schedule",
+            "project_key": "kpony",
+            "project_title": "kPony",
+            "project_type": "software",
+            "project_intent": "continue building kPony until it builds and has proof",
+            "next_step": "Run cmake and fix any Qt6 build errors.",
+        },
+    )
+
+    output = await executor._execute_plan(task, "build and verify")
+
+    assert output == "continued software project"
+    system_message = captured["messages"][0]["content"]
+    assert "software project" in system_message
+    assert "You are TestAgent returning to your own software project" in system_message
+    assert "You are an OpenCAS agent" not in system_message
+    assert f"Canonical workspace project root: {project_root}" in system_message
+    assert "Workspace-relative project root: workspace/kPony" in system_message
+    assert "Do not create a new scratch project" in system_message
+    assert "build, test" in system_message
+    assert "creative project" not in system_message
+    assert "manuscript" not in system_message
+
+
+@pytest.mark.asyncio
 async def test_executor_persists_unsaved_writing_task_final_output(executor, tmp_path):
     workspace = tmp_path / "workspace"
-    output_path = workspace / "Chronicles" / "4246" / "chapter_02_v2.md"
+    output_path = workspace / "Writing Projects" / "4246" / "chapter_02_v2.md"
     final_output = "# Chapter 2\n\n" + ("The revised chapter continues with concrete dramatized prose.\n" * 120)
 
     async def _run(**kwargs):
@@ -209,12 +488,12 @@ async def test_executor_persists_unsaved_writing_task_final_output(executor, tmp
 @pytest.mark.asyncio
 async def test_executor_persists_only_artifact_body_from_wrapped_writing_response(executor, tmp_path):
     workspace = tmp_path / "workspace"
-    output_path = workspace / "Chronicles" / "4246" / "chapter_03_v2.md"
+    output_path = workspace / "Writing Projects" / "4246" / "chapter_03_v2.md"
     prose = "Cauldron's heat rolled under the stone while Maren watched the commons breathe.\n" * 130
     final_output = (
         "Now let me deliver the composed prose.\n\n"
         "---\n\n"
-        "## Chronicle 4246 — Chapter 3: Cauldron's Ghost\n\n"
+        "## writing project 4246 — Chapter 3: Cauldron's Ghost\n\n"
         "**Status:** Composed prose, not yet persisted to artifact. Blocker: no `fs_write_file` tool.\n\n"
         "---\n\n"
         "### Scene 1 — Thermal Commons\n\n"
@@ -255,7 +534,7 @@ async def test_executor_persists_only_artifact_body_from_wrapped_writing_respons
     await executor._execute_plan(task, "write the chapter")
 
     persisted = output_path.read_text(encoding="utf-8")
-    assert persisted.startswith("## Chronicle 4246")
+    assert persisted.startswith("## writing project 4246")
     assert "Now let me deliver" not in persisted
     assert "not yet persisted" not in persisted
     assert "Session Status Report" not in persisted
@@ -266,7 +545,7 @@ async def test_executor_persists_only_artifact_body_from_wrapped_writing_respons
 @pytest.mark.asyncio
 async def test_executor_rejects_false_writing_task_completion_summary(executor, tmp_path):
     workspace = tmp_path / "workspace"
-    output_path = workspace / "Chronicles" / "4246" / "chapter_03_v2.md"
+    output_path = workspace / "Writing Projects" / "4246" / "chapter_03_v2.md"
     output_path.parent.mkdir(parents=True)
     scaffold = (
         "# Chapter 3\n\n"
@@ -318,7 +597,7 @@ async def test_executor_rejects_false_writing_task_completion_summary(executor, 
 @pytest.mark.asyncio
 async def test_executor_rejects_verification_report_as_writing_artifact(executor, tmp_path):
     workspace = tmp_path / "workspace"
-    output_path = workspace / "Chronicles" / "4246" / "chronicle_4246_ch4_draft.md"
+    output_path = workspace / "Writing Projects" / "4246" / "story_4246_ch4_draft.md"
     final_output = (
         "The scaffold file exists but I need a way to write content.\n\n"
         "Given my current tool constraints, I'll present the complete Chapter 4 draft here.\n\n"
@@ -344,7 +623,7 @@ async def test_executor_rejects_verification_report_as_writing_artifact(executor
                     "id": "call-1",
                     "name": "workflow_create_writing_task",
                     "args": {
-                        "title": "Chronicle 4246 — Chapter 4 draft",
+                        "title": "writing project 4246 — Chapter 4 draft",
                         "description": "Draft Chapter 4 as full novel prose.",
                         "output_path": str(output_path),
                     },
@@ -360,7 +639,7 @@ async def test_executor_rejects_verification_report_as_writing_artifact(executor
         ),
     )
 
-    task = RepairTask(objective="Draft Chapter 4 of Chronicle 4246 as full novel prose.")
+    task = RepairTask(objective="Draft Chapter 4 of writing project 4246 as full novel prose.")
     output = await executor._execute_plan(task, "write the chapter")
 
     assert output.startswith("execute failed: writing task did not produce draft prose")
@@ -372,7 +651,7 @@ async def test_executor_rejects_verification_report_as_writing_artifact(executor
 @pytest.mark.asyncio
 async def test_executor_does_not_overwrite_existing_writing_artifact(executor, tmp_path):
     workspace = tmp_path / "workspace"
-    output_path = workspace / "Chronicles" / "4246" / "chapter_02_v2.md"
+    output_path = workspace / "Writing Projects" / "4246" / "chapter_02_v2.md"
     output_path.parent.mkdir(parents=True)
     existing = "# Chapter 2\n\n" + ("Existing saved manuscript prose.\n" * 20)
     output_path.write_text(existing, encoding="utf-8")
@@ -410,8 +689,8 @@ async def test_executor_does_not_overwrite_existing_writing_artifact(executor, t
 @pytest.mark.asyncio
 async def test_executor_rejects_artifact_update_blocker_without_write_or_return(executor, tmp_path):
     workspace = tmp_path / "workspace"
-    expansion_path = workspace / "Chronicles" / "4246" / "chronicle_4246_ch3_expansion.md"
-    manuscript_path = workspace / "Chronicles" / "4246" / "chronicle_4246.md"
+    expansion_path = workspace / "Writing Projects" / "4246" / "story_4246_ch3_expansion.md"
+    manuscript_path = workspace / "Writing Projects" / "4246" / "story_4246.md"
     expansion_path.parent.mkdir(parents=True)
     expansion_path.write_text("## Chapter 3\n\nExpanded prose.\n", encoding="utf-8")
     manuscript_path.write_text("## Chapter 3\n\nCompressed prose.\n", encoding="utf-8")
@@ -421,8 +700,8 @@ async def test_executor_rejects_artifact_update_blocker_without_write_or_return(
         "## Blocker: No file-write tool available\n\n"
         "I have read-only file tools. I do not have `fs_write_file`, `fs_edit_file`, "
         "or any file modification tool in my current tool set. I cannot perform the actual "
-        "integration edit to `chronicle_4246.md`.\n\n"
-        "**Manuscript progress status: NOT claimed.** Target artifact `chronicle_4246.md` "
+        "integration edit to `story_4246.md`.\n\n"
+        "**Manuscript progress status: NOT claimed.** Target artifact `story_4246.md` "
         "has not been modified. The next OpenCAS pass with write capability can execute the edit."
     )
 
@@ -486,7 +765,7 @@ async def test_executor_plan_includes_shadow_registry_guidance(tmp_path):
                         "available": True,
                         "prompt_block": (
                             "Related blocked-intention clusters:\n"
-                            "- 2x retry_blocked for workspace/Chronicles/4246/chronicle_4246.md\n"
+                            "- 2x retry_blocked for workspace/writing/4246/story_4246.md\n"
                             "Safer alternatives:\n"
                             "- Prefer deterministic review of the existing artifact.\n"
                             "- Prefer one narrow edit and stop after verification.\n"
@@ -497,10 +776,10 @@ async def test_executor_plan_includes_shadow_registry_guidance(tmp_path):
         ),
     )
     task = RepairTask(
-        objective="Continue Chronicle 4246 from the existing manuscript.",
+        objective="Continue writing project 4246 from the existing manuscript.",
         meta={
             "resume_project": {
-                "canonical_artifact_path": "workspace/Chronicles/4246/chronicle_4246.md",
+                "canonical_artifact_path": "workspace/writing/4246/story_4246.md",
             }
         },
     )

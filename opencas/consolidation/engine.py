@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone, timedelta
 import re
 from collections import Counter
@@ -118,6 +117,16 @@ class NightlyConsolidationEngine:
             max_candidates = min(max_candidates, budget_max_candidates)
 
         try:
+            try:
+                await self.embeddings.cache.reindex_stale()
+            except Exception as exc:
+                if self.tracer:
+                    self.tracer.log(
+                        EventKind.CONSOLIDATION_RUN,
+                        "embedding_reindex_stale_failed",
+                        {"error": str(exc)},
+                    )
+
             # 1. Gather candidate episodes
             candidates = await self.memory.list_non_compacted_episodes(limit=max_candidates)
             result.candidate_episodes = len(candidates)
@@ -516,7 +525,7 @@ class NightlyConsolidationEngine:
                 self.tracer.log(
                     EventKind.TOOL_CALL,
                     "consolidation_belief_decay_failed",
-                    {"error": str(exc), "decayed_count": len(decayed)},
+                    {"error": str(exc), "decayed_count": decayed},
                 )
         return decayed
 

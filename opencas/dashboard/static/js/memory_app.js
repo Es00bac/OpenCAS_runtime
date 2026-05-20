@@ -46,6 +46,7 @@
       edgeKind: '',
       projectionMethod: 'auto',
       includeMemories: 'true',
+      includeContextProposals: 'true',
       showEdges: 'true',
       colorBy: 'emotion',
       viewMode: 'atlas',
@@ -73,6 +74,24 @@
       somaticLoading: false,
       musubiLoading: false,
       globalStats: null,
+      memoryActivity: { active_nodes: [], active_node_ids: [], events: [], stats: {} },
+      memoryActivityLoading: false,
+      memoryActivityTimer: null,
+      cognitiveFlow: { stats: {}, nodes: [], edges: [] },
+      cognitiveFlowLoading: false,
+      cognitiveFlowTimer: null,
+      cognitiveFlowRenderFrame: null,
+      cognitiveFlowResizeHandler: null,
+      cognitiveFlowMode: 'projection',
+      cognitiveFlowShowSpanFlow: true,
+      cognitiveFlowShowSequential: true,
+      cognitiveFlowWindowSeconds: 180,
+      cognitiveFlowLimit: 120,
+      cognitiveFlowKindFilter: '',
+      cognitiveFlowIncludeNoise: false,
+      cognitiveFlowSelectedNodeId: '',
+      cognitiveFlowNodePositions: [],
+      atlasExpanded: false,
       initMemory() {
         global.__openCASMemoryApp = this;
         this.loadGlobalStats();
@@ -80,6 +99,201 @@
         this.loadLandscape();
         this.loadSomaticState();
         this.loadMusubiState();
+        this.startMemoryActivityPolling();
+        this.startCognitiveFlowPolling();
+        this.cognitiveFlowResizeHandler = () => {
+          if (this.cognitiveFlowMode === 'flow') {
+            this.scheduleCognitiveFlowRender();
+          }
+        };
+        window.addEventListener('resize', this.cognitiveFlowResizeHandler);
+      },
+      destroy() {
+        if (this.memoryActivityTimer) {
+          clearInterval(this.memoryActivityTimer);
+          this.memoryActivityTimer = null;
+        }
+        if (this.cognitiveFlowTimer) {
+          clearInterval(this.cognitiveFlowTimer);
+          this.cognitiveFlowTimer = null;
+        }
+        if (this.cognitiveFlowRenderFrame) {
+          cancelAnimationFrame(this.cognitiveFlowRenderFrame);
+          this.cognitiveFlowRenderFrame = null;
+        }
+        if (this.cognitiveFlowResizeHandler) {
+          window.removeEventListener('resize', this.cognitiveFlowResizeHandler);
+          this.cognitiveFlowResizeHandler = null;
+        }
+      },
+      startMemoryActivityPolling() {
+        if (this.memoryActivityTimer) clearInterval(this.memoryActivityTimer);
+        this.loadMemoryActivity();
+        this.memoryActivityTimer = setInterval(() => this.loadMemoryActivity(), 2500);
+      },
+      startCognitiveFlowPolling() {
+        if (this.cognitiveFlowTimer) clearInterval(this.cognitiveFlowTimer);
+        this.loadCognitiveFlow();
+        this.cognitiveFlowTimer = setInterval(() => this.loadCognitiveFlow(), 3000);
+      },
+      setCognitiveFlowMode(mode) {
+        this.cognitiveFlowMode = mode;
+        if (mode === 'flow') {
+          const nodes = this.cognitiveFlow?.nodes || [];
+          if (!this.cognitiveFlowSelectedNodeId && nodes.length) {
+            this.cognitiveFlowSelectedNodeId = nodes[nodes.length - 1]?.event_id || '';
+          } else if (this.cognitiveFlowSelectedNodeId) {
+            const found = nodes.some(node => node.event_id === this.cognitiveFlowSelectedNodeId);
+            if (!found) {
+              this.cognitiveFlowSelectedNodeId = nodes.length ? nodes[nodes.length - 1]?.event_id : '';
+            }
+          }
+          this.scheduleCognitiveFlowRender();
+        } else {
+          this.renderLandscapeChart();
+        }
+      },
+      toggleAtlasExpanded() {
+        this.atlasExpanded = !this.atlasExpanded;
+        if (this.cognitiveFlowMode === 'flow') {
+          this.scheduleCognitiveFlowRender();
+        } else {
+          setTimeout(() => this.renderLandscapeChart(), 80);
+        }
+      },
+      scheduleCognitiveFlowRender() {
+        if (this.cognitiveFlowRenderFrame) {
+          cancelAnimationFrame(this.cognitiveFlowRenderFrame);
+          this.cognitiveFlowRenderFrame = null;
+        }
+        this.cognitiveFlowRenderFrame = requestAnimationFrame(() => {
+          this.cognitiveFlowRenderFrame = requestAnimationFrame(() => {
+            this.cognitiveFlowRenderFrame = null;
+            this.renderCognitiveFlow();
+          });
+        });
+      },
+      openCognitiveFlowPopout() {
+        const params = new URLSearchParams({
+          window_seconds: String(this.cognitiveFlowWindowSeconds),
+          limit: String(this.cognitiveFlowLimit),
+          include_noise: String(this.cognitiveFlowIncludeNoise),
+          show_span_flow: String(this.cognitiveFlowShowSpanFlow),
+          show_sequential_links: String(this.cognitiveFlowShowSequential),
+          mode: 'flow',
+        });
+        if (this.sessionId) params.set('session_id', this.sessionId);
+        if (this.cognitiveFlowKindFilter.trim()) {
+          params.set('kind_filter', this.cognitiveFlowKindFilter.trim());
+        }
+        if (this.cognitiveFlowSelectedNodeId) {
+          params.set('selected_event_id', this.cognitiveFlowSelectedNodeId);
+        }
+        const url = `/dashboard/static/cognitive-flow.html?${params.toString()}`;
+        const popout = window.open(
+          url,
+          'opencas-cognitive-flow',
+          'noopener,noreferrer,width=1500,height=900',
+        );
+        if (popout) popout.focus();
+      },
+      cognitiveFlowNodeById(nodeId) {
+        if (!nodeId) return null;
+        return (this.cognitiveFlow?.nodes || []).find(node => (node.event_id || node.node_id) === nodeId) || null;
+      },
+      selectedCognitiveFlowNode() {
+        return this.cognitiveFlowNodeById(this.cognitiveFlowSelectedNodeId);
+      },
+      selectCognitiveFlowNode(nodeId) {
+        this.cognitiveFlowSelectedNodeId = nodeId || '';
+        if (this.cognitiveFlowMode === 'flow') {
+          this.renderCognitiveFlow();
+        }
+      },
+      openAtlasNodeFromFlow(nodeRef) {
+        if (!nodeRef) return;
+        this.selectedNodeId = nodeRef;
+        this.nodeDetail = null;
+        this.selectNodeById(nodeRef);
+      },
+      cognitiveFlowAtlasNodeCandidates(node) {
+        if (!node) return [];
+        const seen = new Set();
+        const candidates = [];
+        const add = (nodeRef, source) => {
+          if (!nodeRef) return;
+          const normalized = String(nodeRef);
+          if (!normalized || seen.has(normalized)) return;
+          seen.add(normalized);
+          candidates.push({
+            node_id: normalized,
+            source: source || 'linked',
+            known: !!this.findNode(normalized),
+          });
+        };
+        add(node.node_ref, 'node_ref');
+        if (node.source_type && node.source_id) {
+          add(`${node.source_type}:${node.source_id}`, node.source_type);
+        }
+        if (node.source_id && !node.source_type) {
+          add(node.source_id, 'source_id');
+        }
+        add(node.event_payload?.memory_event_id, 'event_payload.memory_event_id');
+        add(node.source_id, 'source_id');
+        const payload = node.event_payload?.payload || {};
+        if (typeof payload === 'object' && payload !== null) {
+          add(payload.node_id, 'event_payload.payload.node_id');
+          if (payload.memory_id) add(payload.memory_id, 'event_payload.payload.memory_id');
+          if (payload.referenced_event_id) add(payload.referenced_event_id, 'event_payload.payload.referenced_event_id');
+          if (payload.episode_id) add(`episode:${payload.episode_id}`, 'event_payload.payload.episode_id');
+          if (payload.memory_event_id) add(`memory:${payload.memory_event_id}`, 'event_payload.payload.memory_event_id');
+        }
+        return candidates;
+      },
+      async loadMemoryActivity() {
+        this.memoryActivityLoading = true;
+        try {
+          const response = await fetch('/api/memory/activity?window_seconds=180&limit=80');
+          if (response.ok) {
+            this.memoryActivity = await response.json();
+            this.refreshLandscapeChartOverlay();
+          }
+        } catch (e) { console.error(e); }
+        this.memoryActivityLoading = false;
+      },
+      async loadCognitiveFlow() {
+        this.cognitiveFlowLoading = true;
+        try {
+          const params = new URLSearchParams({
+            window_seconds: String(this.cognitiveFlowWindowSeconds),
+            limit: String(this.cognitiveFlowLimit),
+            include_noise: String(this.cognitiveFlowIncludeNoise),
+            show_span_flow: String(this.cognitiveFlowShowSpanFlow),
+            show_sequential_links: String(this.cognitiveFlowShowSequential),
+          });
+          if (this.sessionId.trim()) params.set('session_id', this.sessionId.trim());
+          if (this.cognitiveFlowKindFilter.trim()) params.set('kind_filter', this.cognitiveFlowKindFilter.trim());
+          const response = await fetch('/api/memory/cognitive-flow?' + params.toString());
+          if (response.ok) {
+            this.cognitiveFlow = await response.json();
+            const nodes = this.cognitiveFlow?.nodes || [];
+            if (!nodes.length) {
+              this.cognitiveFlowSelectedNodeId = '';
+            } else if (this.cognitiveFlowSelectedNodeId) {
+              const keep = nodes.some(node => node.event_id === this.cognitiveFlowSelectedNodeId);
+              if (!keep) {
+                this.cognitiveFlowSelectedNodeId = nodes[nodes.length - 1]?.event_id || '';
+              }
+            } else {
+              this.cognitiveFlowSelectedNodeId = nodes[nodes.length - 1]?.event_id || '';
+            }
+            if (this.cognitiveFlowMode === 'flow') this.scheduleCognitiveFlowRender();
+          }
+        } catch (e) {
+          console.error(e);
+          this.cognitiveFlow = { stats: { available: false }, nodes: [], edges: [] };
+        }
+        this.cognitiveFlowLoading = false;
       },
       async loadGlobalStats() {
         try {
@@ -94,6 +308,7 @@
             limit: String(this.limit),
             min_edge_confidence: String(this.minEdgeConfidence),
             include_memories: String(String(this.includeMemories) === 'true'),
+            include_context_proposals: String(String(this.includeContextProposals) === 'true'),
             method: this.projectionMethod,
           });
           if (this.query.trim()) params.set('query', this.query.trim());
@@ -127,6 +342,7 @@
         this.edgeKind = '';
         this.projectionMethod = 'auto';
         this.includeMemories = 'true';
+        this.includeContextProposals = 'true';
         this.showEdges = 'true';
         this.colorBy = 'emotion';
         this.viewMode = 'atlas';
@@ -216,7 +432,7 @@
       },
       edgeKindOptions() {
         const visible = Object.keys(this.landscape?.stats?.edge_kind_distribution || {});
-        const allKinds = ['semantic', 'emotional', 'temporal', 'conceptual', 'relational', 'causal', 'distilled_from'];
+        const allKinds = ['semantic', 'emotional', 'temporal', 'conceptual', 'relational', 'causal', 'distilled_from', 'proposal_evidence', 'context_proposal'];
         return Array.from(new Set([...allKinds, ...visible])).sort();
       },
       visibleNodes() {
@@ -327,6 +543,12 @@
       retrievalNodeIdSet() {
         return new Set((this.retrieval?.results || []).map(item => item.node_id).filter(Boolean));
       },
+      activityByNode() {
+        return new Map((this.memoryActivity?.active_nodes || []).map(item => [item.node_id, item]));
+      },
+      activityForNode(nodeId) {
+        return this.activityByNode().get(nodeId) || null;
+      },
       nodeColor(node) {
         const emotion = node.affect?.primary_emotion || 'none';
         const emotionPalette = {
@@ -347,8 +569,15 @@
           compaction: '#facc15',
           consolidation: '#e879f9',
           memory: '#a78bfa',
+          memory_association: '#f59e0b',
+          project_next_step: '#22c55e',
+          bad_idea_to_avoid: '#f87171',
+          context_note: '#38bdf8',
         };
         if (this.colorBy === 'kind') {
+          if (node.node_type === 'context_proposal') {
+            return '#f59e0b';
+          }
           return kindPalette[node.kind] || '#94a3b8';
         }
         if (this.colorBy === 'embedding_model') {
@@ -382,6 +611,66 @@
         }
         return 5 + Math.min(Number(node.salience || 0), 10) * 0.9;
       },
+      nodeFillColor(node, selectedHighlights, activityByNode) {
+        const color = this.nodeColor(node);
+        const hasOverlay = this.showRetrievalOnAtlas && selectedHighlights.size > 0;
+        if (hasOverlay && !selectedHighlights.has(node.node_id) && node.node_id !== this.selectedNodeId) {
+          return color.replace(/[\d.]+\)$/, '0.15)').replace(/#([0-9a-f]{6})/i, (_match, hex) => {
+            const r = parseInt(hex.slice(0, 2), 16);
+            const g = parseInt(hex.slice(2, 4), 16);
+            const b = parseInt(hex.slice(4, 6), 16);
+            return `rgba(${r},${g},${b},0.15)`;
+          });
+        }
+        return color;
+      },
+      chartNodeStyle(nodes) {
+        const selectedHighlights = this.retrievalNodeIdSet();
+        const activityByNode = this.activityByNode();
+        const hasOverlay = this.showRetrievalOnAtlas && selectedHighlights.size > 0;
+        return {
+          backgroundColor: nodes.map(node => this.nodeFillColor(node, selectedHighlights, activityByNode)),
+          pointRadius: nodes.map(node => {
+            const base = this.nodeRadius(node);
+            const activity = activityByNode.get(node.node_id);
+            if (activity) return base * (1.0 + Math.min(0.65, Number(activity.intensity || 0) * 0.65));
+            if (hasOverlay && selectedHighlights.has(node.node_id)) return base * 1.4;
+            return base;
+          }),
+          pointBorderWidth: nodes.map(node => {
+            if (node.node_id === this.selectedNodeId) return 3;
+            if (activityByNode.has(node.node_id)) return 3;
+            if (hasOverlay && selectedHighlights.has(node.node_id)) return 2.5;
+            return selectedHighlights.has(node.node_id) ? 2 : 1;
+          }),
+          pointBorderColor: nodes.map(node => {
+            if (node.node_id === this.selectedNodeId) return '#f8fafc';
+            if (activityByNode.has(node.node_id)) return '#22d3ee';
+            if (hasOverlay && selectedHighlights.has(node.node_id)) return '#facc15';
+            return selectedHighlights.has(node.node_id) ? '#facc15' : 'rgba(15, 23, 42, 0.85)';
+          }),
+          pointStyle: nodes.map(node => {
+            if (node.node_type === 'context_proposal') return 'star';
+            if (node.node_type === 'memory') return 'rectRounded';
+            if (node.kind === 'action') return 'triangle';
+            if (node.kind === 'compaction') return 'rect';
+            if (node.kind === 'consolidation') return 'rectRot';
+            return 'circle';
+          }),
+        };
+      },
+      refreshLandscapeChartOverlay() {
+        if (!this.landscapeChart) return;
+        const chart = global.Alpine?.raw ? global.Alpine.raw(this.landscapeChart) : this.landscapeChart;
+        const nodes = this.displayNodes();
+        const dataset = chart.data.datasets[0];
+        if (!dataset || dataset.data.length !== nodes.length) {
+          this.renderLandscapeChart();
+          return;
+        }
+        Object.assign(dataset, this.chartNodeStyle(nodes));
+        chart.update('none');
+      },
       edgeColor(edge) {
         const palette = {
           semantic: 'rgba(56, 189, 248, 0.35)',
@@ -391,8 +680,356 @@
           relational: 'rgba(34, 197, 94, 0.35)',
           causal: 'rgba(248, 113, 113, 0.35)',
           distilled_from: 'rgba(148, 163, 184, 0.28)',
+          proposal_evidence: 'rgba(245, 158, 11, 0.42)',
         };
         return palette[edge.kind] || 'rgba(148, 163, 184, 0.28)';
+      },
+      flowColor(node) {
+        const kind = node.kind || 'telemetry';
+        const palette = {
+          span_start: '#38bdf8',
+          span_end: '#f59e0b',
+          llm_call: '#f97316',
+          tool_call: '#22c55e',
+          memory_noted: '#e879f9',
+          memory_activated: '#f59e0b',
+          memory_compact: '#facc15',
+          memory_write: '#a78bfa',
+          action_backlink: '#ef4444',
+          consolidation_run: '#fb7185',
+          turn: '#34d399',
+          warning: '#fcd34d',
+          error: '#fb7185',
+          flow_order: '#22d3ee',
+          span_hierarchy: '#94a3b8',
+          continuity_backlink: '#f59e0b',
+          action_backlink: '#ef4444',
+        };
+        return palette[kind] || palette[kind.toLowerCase()] || '#94a3b8';
+      },
+      flowRadius(node) {
+        if (node.noted_as_such) return 7;
+        if (node.is_span_gate) return 8;
+        return 5;
+      },
+      flowEdgeColor(kind) {
+        const palette = {
+          flow_order: 'rgba(56, 189, 248, 0.5)',
+          span_hierarchy: 'rgba(168, 85, 247, 0.45)',
+          lane_order: 'rgba(34, 211, 238, 0.28)',
+          cognitive_sequence: 'rgba(248, 250, 252, 0.42)',
+          continuity_backlink: 'rgba(34, 211, 238, 0.6)',
+          action_backlink: 'rgba(248, 113, 113, 0.55)',
+          default: 'rgba(148, 163, 184, 0.35)',
+        };
+        return palette[kind] || palette.default;
+      },
+      cognitiveFlowSummaryMarkup() {
+        const stats = this.cognitiveFlow?.stats || {};
+        if (!stats.available) {
+          return '<p class="muted">Cognitive flow stream is not available in this runtime.</p>';
+        }
+        if (!this.cognitiveFlow?.nodes?.length) {
+          return '<p class="muted">No cognitive-flow events in the selected window.</p>';
+        }
+        const lanes = Object.keys(stats.lane_distribution || {}).length;
+        return `<div class="stat-grid">
+          <div><div class="stat-value">${this.cognitiveFlow.event_count || 0}</div><div class="stat-label">Events</div></div>
+          <div><div class="stat-value">${stats.edge_count || (this.cognitiveFlow.edges || []).length || 0}</div><div class="stat-label">Flow Edges</div></div>
+          <div><div class="stat-value">${lanes}</div><div class="stat-label">Lanes</div></div>
+          <div><div class="stat-value">${stats.readable_thought_count ?? stats.high_signal_event_count ?? 0}</div><div class="stat-label">Readable Thoughts</div></div>
+          <div><div class="stat-value">${stats.excluded_noise_event_count ?? 0}</div><div class="stat-label">Hidden Noise</div></div>
+          <div><div class="stat-value">${(stats.temporal_missing_node_count || 0) + (stats.temporal_missing_edge_count || 0)}</div><div class="stat-label">Missing Time Metadata</div></div>
+        </div>`;
+      },
+      cognitiveFlowSelectionMarkup() {
+        const node = this.selectedCognitiveFlowNode();
+        if (!node) {
+          return '<p class="muted">Select an event in the flow canvas to inspect subsystem flow details, links, and payload context.</p>';
+        }
+        const eventId = node.event_id || node.node_id || '';
+        const links = this.cognitiveFlow?.edges || [];
+        const nodeMap = new Map((this.cognitiveFlow?.nodes || []).map(item => [item.event_id || item.node_id, item]));
+        const incoming = links
+          .filter(edge => edge.target_node_id === eventId)
+          .map(edge => ({
+            edge,
+            sourceId: edge.source_node_id,
+            sourceNode: nodeMap.get(edge.source_node_id),
+          }))
+          .slice(0, 10);
+        const outgoing = links
+          .filter(edge => edge.source_node_id === eventId)
+          .map(edge => ({
+            edge,
+            targetId: edge.target_node_id,
+            targetNode: nodeMap.get(edge.target_node_id),
+          }))
+          .slice(0, 10);
+        const payload = node.event_payload || {};
+        const candidates = this.cognitiveFlowAtlasNodeCandidates(node);
+        const isDecisionSignal = Boolean(node.decision_signal);
+        let html = '<div class="stack">';
+        html += `<div class="pill-row">
+          <span class="badge">${escapeHtml(node.subsystem || 'system')}</span>
+          <span class="badge">${escapeHtml(node.kind || 'event')}</span>
+          <span class="badge">${escapeHtml(node.pipeline_stage || 'processing')}</span>
+          ${node.is_span_gate ? '<span class="badge warn">span gate</span>' : ''}
+          ${isDecisionSignal ? '<span class="badge warn">decision signal</span>' : ''}
+        </div>`;
+        html += `<p class="muted">Time: ${formatDateTime(node.timestamp)} • Event: ${escapeHtml(eventId)}</p>`;
+        html += `<p class="muted">Span: ${escapeHtml(node.span_id || '-')}${node.parent_span_id ? ` • Parent: ${escapeHtml(node.parent_span_id)}` : ''}</p>`;
+        html += `<p class="muted">Source: ${escapeHtml(node.source_type || 'telemetry')} / ${escapeHtml(node.source_id || '-')} • ${escapeHtml(node.activation_source || '-')}</p>`;
+        if (node.source_label) {
+          html += `<p class="muted">Source label: ${escapeHtml(node.source_label)}</p>`;
+        }
+        if (node.label) {
+          html += `<p><strong>${escapeHtml(node.label)}</strong></p>`;
+        }
+        if (node.message) {
+          html += `<p class="muted">Message: ${escapeHtml(node.message)}</p>`;
+        }
+        if (node.event_message) {
+          html += `<p class="muted">Event message: ${escapeHtml(node.event_message)}</p>`;
+        }
+        if (node.thought_text) {
+          html += `<h5 class="mt-3">Observable thought</h5><p>${escapeHtml(node.thought_text)}</p>`;
+        }
+        if (node.reasoning_text) {
+          html += `<h5 class="mt-3">Reasoning evidence</h5><p>${escapeHtml(node.reasoning_text)}</p>`;
+        }
+        if (node.evidence_text) {
+          html += `<h5 class="mt-3">Referenced evidence</h5><p>${escapeHtml(node.evidence_text)}</p>`;
+        }
+        if (node.noted_as_such) {
+          html += `<p class="muted">Marked as notable memory activity.</p>`;
+        }
+        if (candidates.length) {
+          html += '<h5 class="mt-3">Linked memory nodes</h5><div class="pill-row">';
+          candidates.forEach(candidate => {
+            if (candidate.known) {
+              html += `<button class="btn-link" onclick="window.__openCASMemoryApp.openAtlasNodeFromFlow('${escapeHtml(candidate.node_id)}')">${escapeHtml(candidate.node_id)} <small>[${escapeHtml(candidate.source)}]</small></button>`;
+            } else {
+              html += `<span class="badge">${escapeHtml(candidate.node_id)} <small>${escapeHtml(candidate.source)}</small></span>`;
+            }
+          });
+          html += '</div>';
+        }
+        html += `<h5 class="mt-4">Payload</h5><pre class="json">${escapeHtml(JSON.stringify(payload, null, 2))}</pre>`;
+        if (incoming.length || outgoing.length) {
+          html += '<h5 class="mt-4">Connected flow edges</h5>';
+          html += '<table class="data-table"><thead><tr><th>Direction</th><th>Connected Event</th><th>Kind</th><th>Strength</th><th>Action</th></tr></thead><tbody>';
+          incoming.forEach(item => {
+            const label = item.sourceNode?.label || item.sourceNode?.kind || item.sourceId || '-';
+            html += `<tr>
+              <td>in</td>
+              <td>${escapeHtml(label)}</td>
+              <td>${escapeHtml(item.edge.kind || '-')}</td>
+              <td>${escapeHtml(String(item.edge.strength ?? '-'))}</td>
+              <td><button class="btn-link" onclick="window.__openCASMemoryApp.selectCognitiveFlowNode('${escapeHtml(item.sourceId || '')}')">focus</button></td>
+            </tr>`;
+          });
+          outgoing.forEach(item => {
+            const label = item.targetNode?.label || item.targetNode?.kind || item.targetId || '-';
+            html += `<tr>
+              <td>out</td>
+              <td>${escapeHtml(label)}</td>
+              <td>${escapeHtml(item.edge.kind || '-')}</td>
+              <td>${escapeHtml(String(item.edge.strength ?? '-'))}</td>
+              <td><button class="btn-link" onclick="window.__openCASMemoryApp.selectCognitiveFlowNode('${escapeHtml(item.targetId || '')}')">focus</button></td>
+            </tr>`;
+          });
+          html += '</tbody></table>';
+        }
+        html += '</div>';
+        return html;
+      },
+      cognitiveFlowStripMarkup() {
+        const nodes = this.cognitiveFlow?.nodes || [];
+        if (!nodes.length) {
+          return '<p class="muted">No live events to render yet.</p>';
+        }
+        const head = nodes.slice(-4).reverse();
+        let html = '<div class="memory-activity-strip">';
+        head.forEach(item => {
+          const source = item.activation_source || item.kind || 'telemetry';
+          const subsystem = item.flow_lane || item.subsystem || 'system';
+          const stage = item.pipeline_stage || 'processing';
+          const ts = formatDateTime(item.timestamp);
+          html += `<span class="activity-chip">
+            <span class="activity-dot" style="--pulse:50%"></span>
+            <span>
+              <strong>${escapeHtml(item.thought_text || item.label || item.node_id)}</strong>
+              <small>${escapeHtml(source)} • ${escapeHtml(subsystem)}:${escapeHtml(stage)} • ${escapeHtml(ts || '')}</small>
+            </span>
+          </span>`;
+        });
+        html += '</div>';
+        return html;
+      },
+      cognitiveFlowThoughtLedgerMarkup() {
+        const stats = this.cognitiveFlow?.stats || {};
+        let ledger = Array.isArray(stats.recent_readable_thoughts) ? stats.recent_readable_thoughts : [];
+        if (!ledger.length) {
+          ledger = (this.cognitiveFlow?.nodes || [])
+            .filter(item => !item.is_noise && Number(item.flow_priority || 0) >= 0.25 && item.thought_text)
+            .slice(-8);
+        }
+        if (!ledger.length) {
+          return '<p class="muted">No readable thought records in this flow window. Increase the window or include more telemetry.</p>';
+        }
+        let html = '<div class="stack"><h4 class="mt-0">Readable thought ledger</h4>';
+        html += '<p class="helper-text">High-signal cognitive events rendered as text. Use this when the canvas shape is not enough to understand what Bulma accessed, decided, or reasoned about.</p>';
+        html += '<table class="data-table compact-table"><thead><tr><th>#</th><th>Lane</th><th>Thought / activity evidence</th><th>Reasoning</th><th></th></tr></thead><tbody>';
+        ledger.slice(-8).forEach(item => {
+          const eventId = item.event_id || item.node_id || '';
+          html += `<tr>
+            <td>${escapeHtml(String(item.sequence_index || item.temporal_order_label || '-'))}</td>
+            <td>${escapeHtml(item.flow_lane || item.subsystem || 'system')}</td>
+            <td><strong>${escapeHtml(item.label || item.kind || 'event')}</strong><br>${escapeHtml(item.thought_text || '')}${item.evidence_text ? `<br><small>${escapeHtml(item.evidence_text)}</small>` : ''}</td>
+            <td>${escapeHtml(item.reasoning_text || (item.decision_signal ? 'decision signal' : ''))}</td>
+            <td><button class="btn-link" onclick="window.__openCASMemoryApp.selectCognitiveFlowNode('${escapeHtml(eventId)}')">focus</button></td>
+          </tr>`;
+        });
+        html += '</tbody></table></div>';
+        return html;
+      },
+      renderCognitiveFlow() {
+        const canvas = document.getElementById('memoryFlowCanvas');
+        if (!canvas || this.cognitiveFlowMode !== 'flow') return;
+        const rawNodes = (this.cognitiveFlow?.nodes || []).map(item => ({
+          ...item,
+          timestampMs: Date.parse(item.timestamp || ''),
+        }));
+        const nodes = rawNodes
+          .filter(item => Number.isFinite(item.timestampMs))
+          .sort((a, b) => a.timestampMs - b.timestampMs);
+        const edges = (this.cognitiveFlow?.edges || []).slice();
+        const dpr = window.devicePixelRatio || 1;
+        const rect = canvas.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) {
+          if (this.cognitiveFlowMode === 'flow') {
+            setTimeout(() => this.scheduleCognitiveFlowRender(), 80);
+          }
+          return;
+        }
+        canvas.width = Math.floor(rect.width * dpr);
+        canvas.height = Math.floor(rect.height * dpr);
+        const ctx = canvas.getContext('2d');
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        ctx.clearRect(0, 0, rect.width, rect.height);
+        if (!nodes.length) {
+          this.cognitiveFlowNodePositions = [];
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText('No cognitive events in this window', 12, 24);
+          return;
+        }
+        const nodeById = new Map(nodes.map(node => [node.event_id || node.node_id, node]));
+        const times = nodes.map(node => Date.parse(node.timestamp || ''));
+        const minTime = Math.min(...times);
+        const maxTime = Math.max(...times);
+        const spreadMs = Math.max(1, maxTime - minTime);
+        const lanes = new Map();
+        nodes.forEach((node) => {
+          const lane = node.flow_lane || node.lane_label || node.subsystem || `Lane ${Number(node.span_depth || 0)}`;
+          const bucket = lanes.get(lane) || [];
+          bucket.push({ id: node.event_id || node.node_id, node });
+          lanes.set(lane, bucket);
+        });
+        const sortedLanes = Array.from(lanes.keys()).sort((a, b) => {
+          const first = lanes.get(a)?.[0]?.node;
+          const second = lanes.get(b)?.[0]?.node;
+          return Number(first?.lane_index ?? first?.span_depth ?? 0) - Number(second?.lane_index ?? second?.span_depth ?? 0);
+        });
+        const laneHeight = Math.max(40, Math.floor((rect.height - 100) / (sortedLanes.length || 1)));
+        const plotLeft = 72;
+        const plotRight = rect.width - 20;
+        const plotTop = 24;
+        const plotBottom = rect.height - 42;
+        const plotHeight = Math.max(120, plotBottom - plotTop);
+        const toX = ts => plotLeft + ((ts - minTime) / spreadMs) * (plotRight - plotLeft);
+        const laneMap = new Map();
+        sortedLanes.forEach((lane, index) => {
+          laneMap.set(lane, plotBottom - (index + 0.5) * laneHeight);
+        });
+        const laneCounter = {};
+        const positioned = nodes.map(node => {
+          const lane = node.flow_lane || node.lane_label || node.subsystem || `Lane ${Number(node.span_depth || 0)}`;
+          const baseY = laneMap.get(lane) || (plotBottom - 20);
+          const serial = laneCounter[lane] ? laneCounter[lane] + 1 : 0;
+          laneCounter[lane] = serial;
+          const offset = ((serial % 4) - 1.5) * 10;
+          const t = node.timestampMs;
+          return {
+            ...node,
+            x: toX(t || minTime),
+            y: baseY + offset,
+          };
+        });
+        this.cognitiveFlowNodePositions = positioned;
+        const positionedById = new Map(positioned.map(item => [item.event_id || item.node_id, item]));
+
+        ctx.strokeStyle = 'rgba(0, 229, 255, 0.12)';
+        ctx.lineWidth = 1;
+        sortedLanes.forEach((lane, index) => {
+          const y = laneMap.get(lane) || plotBottom;
+          ctx.beginPath();
+          ctx.moveTo(plotLeft, y);
+          ctx.lineTo(plotRight, y);
+          ctx.stroke();
+          ctx.fillStyle = '#94a3b8';
+          ctx.fillText(String(lane).substring(0, 24), 16, y + 4);
+        });
+
+        edges.forEach(edge => {
+          if (!nodeById.get(edge.source_node_id) || !nodeById.get(edge.target_node_id)) return;
+          const fromPos = positionedById.get(edge.source_node_id);
+          const toPos = positionedById.get(edge.target_node_id);
+          if (!fromPos || !toPos) return;
+          const width = 1.2 + Math.max(0.4, Number(edge.strength || 0.35) * 2.1);
+          ctx.strokeStyle = this.flowEdgeColor(edge.kind || '');
+          ctx.lineWidth = width;
+          const bx1 = fromPos.x;
+          const by1 = fromPos.y;
+          const bx2 = toPos.x;
+          const by2 = toPos.y;
+          ctx.beginPath();
+          ctx.moveTo(bx1, by1);
+          ctx.bezierCurveTo((bx1 + bx2) / 2, by1, (bx1 + bx2) / 2, by2, bx2, by2);
+          ctx.stroke();
+        });
+
+        positioned.forEach((point) => {
+          const r = this.flowRadius(point);
+          ctx.beginPath();
+          ctx.fillStyle = this.flowColor(point);
+          const isSelected = this.cognitiveFlowSelectedNodeId === (point.event_id || point.node_id);
+          ctx.strokeStyle = isSelected ? '#f8fafc' : (point.is_span_gate ? '#facc15' : 'rgba(8, 18, 31, 0.85)');
+          ctx.lineWidth = isSelected ? 2.5 : (point.is_span_gate ? 2 : 1);
+          ctx.arc(point.x, point.y, r, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          const shortLabel = point.label ? point.label.substring(0, 24) : point.kind || 'event';
+          ctx.fillStyle = '#e2e8f0';
+          ctx.fillText(shortLabel, point.x + 8, point.y - 8);
+        });
+        canvas.onclick = (evt) => {
+          const rect = canvas.getBoundingClientRect();
+          const x = evt.clientX - rect.left;
+          const y = evt.clientY - rect.top;
+          let best = null;
+          let bestDist = Infinity;
+          positioned.forEach(point => {
+            const d = Math.hypot(point.x - x, point.y - y);
+            if (d <= (this.flowRadius(point) + 8) && d < bestDist) {
+              bestDist = d;
+              best = point;
+            }
+          });
+          if (best) {
+            this.selectCognitiveFlowNode(best.event_id || best.node_id || '');
+          }
+        };
       },
       renderLandscapeChart() {
         const nodes = this.displayNodes();
@@ -413,7 +1050,6 @@
               nodeIndexById.has(edge.source_node_id) && nodeIndexById.has(edge.target_node_id)
             )
           : [];
-        const selectedHighlights = this.retrievalNodeIdSet();
         const app = this;
         const edgePlugin = {
           id: 'memoryEdges',
@@ -458,48 +1094,50 @@
             context.restore();
           }
         };
-        const hasOverlay = this.showRetrievalOnAtlas && selectedHighlights.size > 0;
+        const activityPlugin = {
+          id: 'memoryActivityPulse',
+          afterDatasetsDraw(chart) {
+            const activityByNode = app.activityByNode();
+            if (!activityByNode.size) return;
+            const meta = chart.getDatasetMeta(0);
+            const chartPoints = meta.data || [];
+            const context = chart.ctx;
+            const phase = (Date.now() % 1600) / 1600;
+            context.save();
+            nodes.forEach((node, index) => {
+              const activity = activityByNode.get(node.node_id);
+              if (!activity) return;
+              const point = chartPoints[index];
+              if (!point) return;
+              const intensity = Math.max(0.1, Math.min(1, Number(activity.intensity || 0)));
+              const base = Number(chart.data.datasets[0].pointRadius[index] || 6);
+              const pulse = base + 8 + intensity * 14 + Math.sin(phase * Math.PI * 2) * 3;
+              context.beginPath();
+              context.strokeStyle = `rgba(34, 211, 238, ${0.25 + intensity * 0.55})`;
+              context.lineWidth = 2 + intensity * 3;
+              context.arc(point.x, point.y, pulse, 0, Math.PI * 2);
+              context.stroke();
+              context.beginPath();
+              context.fillStyle = `rgba(34, 211, 238, ${0.08 + intensity * 0.12})`;
+              context.arc(point.x, point.y, pulse * 0.72, 0, Math.PI * 2);
+              context.fill();
+            });
+            context.restore();
+          }
+        };
+        const style = this.chartNodeStyle(nodes);
         this.landscapeChart = new Chart(ctx, {
           type: 'scatter',
-          plugins: [edgePlugin, haloPlugin],
+          plugins: [edgePlugin, haloPlugin, activityPlugin],
           data: {
             datasets: [{
               label: 'Memory atlas',
               data: nodes.map(node => ({ x: node.x, y: node.y })),
-              backgroundColor: nodes.map(node => {
-                const color = this.nodeColor(node);
-                if (hasOverlay && !selectedHighlights.has(node.node_id) && node.node_id !== this.selectedNodeId) {
-                  return color.replace(/[\d.]+\)$/, '0.15)').replace(/#([0-9a-f]{6})/i, (_match, hex) => {
-                    const r = parseInt(hex.slice(0, 2), 16);
-                    const g = parseInt(hex.slice(2, 4), 16);
-                    const b = parseInt(hex.slice(4, 6), 16);
-                    return `rgba(${r},${g},${b},0.15)`;
-                  });
-                }
-                return color;
-              }),
-              pointRadius: nodes.map(node => {
-                const base = this.nodeRadius(node);
-                if (hasOverlay && selectedHighlights.has(node.node_id)) return base * 1.4;
-                return base;
-              }),
-              pointBorderWidth: nodes.map(node => {
-                if (node.node_id === this.selectedNodeId) return 3;
-                if (hasOverlay && selectedHighlights.has(node.node_id)) return 2.5;
-                return selectedHighlights.has(node.node_id) ? 2 : 1;
-              }),
-              pointBorderColor: nodes.map(node => {
-                if (node.node_id === this.selectedNodeId) return '#f8fafc';
-                if (hasOverlay && selectedHighlights.has(node.node_id)) return '#facc15';
-                return selectedHighlights.has(node.node_id) ? '#facc15' : 'rgba(15, 23, 42, 0.85)';
-              }),
-              pointStyle: nodes.map(node => {
-                if (node.node_type === 'memory') return 'rectRounded';
-                if (node.kind === 'action') return 'triangle';
-                if (node.kind === 'compaction') return 'rect';
-                if (node.kind === 'consolidation') return 'rectRot';
-                return 'circle';
-              }),
+              backgroundColor: style.backgroundColor,
+              pointRadius: style.pointRadius,
+              pointBorderWidth: style.pointBorderWidth,
+              pointBorderColor: style.pointBorderColor,
+              pointStyle: style.pointStyle,
             }]
           },
           options: {
@@ -537,6 +1175,8 @@
                     ];
                     if (node.affect?.primary_emotion) bits.push(`emotion ${node.affect.primary_emotion}`);
                     if (node.embedding_model_id) bits.push(node.embedding_model_id);
+                    const activity = this.activityByNode().get(node.node_id);
+                    if (activity) bits.push(`active ${Number(activity.intensity || 0).toFixed(2)}`);
                     return bits;
                   }
                 }
@@ -557,10 +1197,12 @@
         }
         const episodeCount = Number(stats.visible_episode_count || 0);
         const memoryCount = Number(stats.visible_memory_count || 0);
+        const proposalCount = Number(stats.visible_context_proposal_count || 0);
         const compactedCount = nodes.filter(node => node.compacted).length;
         const identityCoreCount = nodes.filter(node => node.identity_core).length;
-        const avgSalience = nodes.length
-          ? (nodes.reduce((sum, node) => sum + Number(node.salience || 0), 0) / nodes.length)
+        const salienceNodes = nodes.filter(node => node.salience !== null && node.salience !== undefined);
+        const avgSalience = salienceNodes.length
+          ? (salienceNodes.reduce((sum, node) => sum + Number(node.salience || 0), 0) / salienceNodes.length)
           : 0;
         const compactionRatio = episodeCount > 0 ? compactedCount / episodeCount : 0;
         const identityRatio = nodes.length > 0 ? identityCoreCount / nodes.length : 0;
@@ -575,6 +1217,7 @@
             <div class="stat-grid">
               <div><div class="stat-value">${episodeCount}</div><div class="stat-label">Episodes</div></div>
               <div><div class="stat-value">${memoryCount}</div><div class="stat-label">Memories</div></div>
+              <div><div class="stat-value">${proposalCount}</div><div class="stat-label">Proposals</div></div>
               <div><div class="stat-value">${identityCoreCount}</div><div class="stat-label">Identity Core</div></div>
               <div><div class="stat-value">${avgSalience.toFixed(2)}</div><div class="stat-label">Avg Salience</div></div>
             </div>
@@ -600,6 +1243,53 @@
         </div>`;
         return html;
       },
+      memoryActivityMarkup() {
+        const active = this.memoryActivity?.active_nodes || [];
+        const events = this.memoryActivity?.events || [];
+        const stats = this.memoryActivity?.stats || {};
+        const live = active.length > 0;
+        let html = `<div class="memory-activity-head">
+          <div>
+            <h4>Live Memory Activity</h4>
+            <p class="muted">Nodes pulse when retrieval, prompt assembly, or memory maintenance activates them.</p>
+          </div>
+          <div class="pill-row">
+            <span class="badge ${live ? 'ok' : 'badge-dim'}">${live ? 'active' : 'quiet'}</span>
+            <span class="badge">${active.length} firing</span>
+            <span class="badge">${events.length} events</span>
+          </div>
+        </div>`;
+        if (!stats.available) {
+          return html + '<p class="muted">Memory activity telemetry is not available for this runtime.</p>';
+        }
+        if (!active.length) {
+          return html + '<p class="muted">No memory nodes have fired in the current live window.</p>';
+        }
+        html += '<div class="memory-activity-strip">';
+        active.slice(0, 8).forEach(item => {
+          const intensity = Math.round(Number(item.intensity || 0) * 100);
+          const node = this.findNode(item.node_id);
+          const label = node?.label || item.content_preview || item.node_id;
+          const canFocus = Boolean(node);
+          html += `<button class="activity-chip" ${canFocus ? `onclick="window.__openCASMemoryApp.selectNodeById('${escapeHtml(item.node_id)}')"` : ''}>
+            <span class="activity-dot" style="--pulse:${Math.max(12, intensity)}%"></span>
+            <span><strong>${escapeHtml(label)}</strong><small>${escapeHtml(item.activation_source || 'memory')} • ${item.event_count || 1} hits</small></span>
+            <em>${intensity}%</em>
+          </button>`;
+        });
+        html += '</div>';
+        const recent = events.slice(0, 5).map(event => {
+          const label = event.query || event.content_preview || event.node_id;
+          return `<tr>
+            <td>${escapeHtml(event.node_id)}</td>
+            <td>${escapeHtml(event.activation_source || '-')}</td>
+            <td>${escapeHtml(String(event.rank ?? '-'))}</td>
+            <td>${escapeHtml(label || '')}</td>
+          </tr>`;
+        }).join('');
+        html += `<table class="data-table compact-table mt-3"><thead><tr><th>Node</th><th>Source</th><th>Rank</th><th>Signal</th></tr></thead><tbody>${recent}</tbody></table>`;
+        return html;
+      },
       landscapeSummaryMarkup() {
         const stats = this.landscape?.stats || {};
         const projectionGroups = this.landscape?.projection?.groups || [];
@@ -608,11 +1298,13 @@
           return '<p class="muted">Load the atlas to see memory density, embedding families, and edge coverage.</p>';
         }
         const identityCoreCount = nodes.filter(n => n.identity_core).length;
-        const avgSalience = nodes.length ? (nodes.reduce((s, n) => s + Number(n.salience || 0), 0) / nodes.length).toFixed(2) : '-';
+        const salienceNodes = nodes.filter(n => n.salience !== null && n.salience !== undefined);
+        const avgSalience = salienceNodes.length ? (salienceNodes.reduce((s, n) => s + Number(n.salience || 0), 0) / salienceNodes.length).toFixed(2) : '-';
         const kindDist = stats.kind_distribution || {};
         let html = `<div class="stat-grid">
           <div><div class="stat-value">${stats.visible_episode_count || 0}</div><div class="stat-label">Episodes</div></div>
           <div><div class="stat-value">${stats.visible_memory_count || 0}</div><div class="stat-label">Memories</div></div>
+          <div><div class="stat-value">${stats.visible_context_proposal_count || 0}</div><div class="stat-label">Proposals</div></div>
           <div><div class="stat-value">${stats.visible_edge_count || 0}</div><div class="stat-label">Edges</div></div>
           <div><div class="stat-value">${Number(stats.time_span_days || 0).toFixed(1)}d</div><div class="stat-label">Time Span</div></div>
           <div><div class="stat-value">${Number(stats.freshest_visible_age_days || 0).toFixed(1)}d</div><div class="stat-label">Freshest</div></div>
@@ -703,6 +1395,9 @@
           <div class="pill-row">
             <span class="badge">${escapeHtml(node.node_type)}</span>
             <span class="badge">${escapeHtml(node.kind || '-')}</span>
+            ${node.proposal_kind ? `<span class="badge">${escapeHtml(node.proposal_kind)}</span>` : ''}
+            ${node.proposal_status ? `<span class="badge ${node.proposal_status === 'accepted' ? 'ok' : node.proposal_status === 'rejected' ? 'fail' : 'warn'}">${escapeHtml(node.proposal_status)}</span>` : ''}
+            ${node.source_lane ? `<span class="badge">${escapeHtml(node.source_lane)}</span>` : ''}
             ${node.affect?.primary_emotion ? `<span class="badge">${escapeHtml(node.affect.primary_emotion)}</span>` : ''}
             ${node.identity_core ? '<span class="badge badge-gold">★ identity core</span>' : ''}
             ${node.compacted ? '<span class="badge badge-dim">compacted</span>' : ''}
@@ -711,6 +1406,7 @@
           <p class="muted">Created: ${formatDateTime(node.created_at)} • Age: ${escapeHtml(String(node.age_days ?? '-'))}d</p>
           <p class="muted">Embedding: ${escapeHtml(node.embedding_model_id || 'none')} • Group: ${escapeHtml(node.projection_group || '-')}</p>
           <p class="muted">Salience: ${escapeHtml(String(node.salience ?? '-'))} • Confidence: ${escapeHtml(String(node.confidence_score ?? '-'))} • Connections: ${escapeHtml(String(node.connection_count ?? 0))}</p>
+          ${node.authority ? `<p class="muted">Authority: ${escapeHtml(node.authority)} • Snapshot: ${escapeHtml(node.source_snapshot_id || '-')} • Epoch: ${escapeHtml(String(node.source_epoch ?? '-'))}</p>` : ''}
           ${node.somatic_tag ? `<p class="muted">Somatic tag: <span class="badge">${escapeHtml(node.somatic_tag)}</span></p>` : ''}
           ${(node.used_successfully > 0 || node.used_unsuccessfully > 0) ? (() => {
             const total = node.used_successfully + node.used_unsuccessfully;
@@ -740,6 +1436,21 @@
           html += `<h5 class="mt-4">Source Episodes</h5><div class="pill-row">`;
           (node.source_episode_ids || []).forEach(sourceId => {
             html += `<button class="btn-link" onclick="window.__openCASMemoryApp.selectNodeById('episode:${escapeHtml(sourceId)}')">${escapeHtml(sourceId)}</button>`;
+          });
+          html += `</div>`;
+        }
+        if (node.node_type === 'context_proposal' && (node.evidence_refs || []).length) {
+          html += `<h5 class="mt-4">Evidence Refs</h5><div class="pill-row">`;
+          (node.evidence_refs || []).forEach(ref => {
+            const raw = String(ref || '');
+            const episodeNode = raw.startsWith('episode:') ? raw : `episode:${raw}`;
+            const memoryNode = raw.startsWith('memory:') ? raw : `memory:${raw}`;
+            const knownNode = this.findNode(raw) ? raw : this.findNode(episodeNode) ? episodeNode : this.findNode(memoryNode) ? memoryNode : '';
+            if (knownNode) {
+              html += `<button class="btn-link" onclick="window.__openCASMemoryApp.selectNodeById('${escapeHtml(knownNode)}')">${escapeHtml(raw)}</button>`;
+            } else {
+              html += `<span class="badge">${escapeHtml(raw)}</span>`;
+            }
           });
           html += `</div>`;
         }

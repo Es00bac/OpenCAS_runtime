@@ -104,10 +104,20 @@ _COMMITMENT_PATTERNS: tuple[_CommitmentPattern, ...] = (
 )
 
 
-def extract_self_commitments(text: str) -> List[SelfCommitmentCandidate]:
+def extract_self_commitments(
+    text: str,
+    *,
+    user_context: Optional[str] = None,
+) -> List[SelfCommitmentCandidate]:
     """Extract compact self-commitments from assistant conversational text."""
     sentences = [segment.strip() for segment in _SENTENCE_SPLIT_RE.split(text) if segment.strip()]
     commitments: List[SelfCommitmentCandidate] = []
+    contextual = _extract_contextual_assistant_acceptance(
+        sentences=sentences,
+        user_context=user_context,
+    )
+    if contextual is not None:
+        commitments.append(contextual)
     for index, sentence in enumerate(sentences):
         following = " ".join(sentences[index + 1 : index + 4]) if index + 1 < len(sentences) else None
         candidate = _extract_explicit_promise(
@@ -119,6 +129,133 @@ def extract_self_commitments(text: str) -> List[SelfCommitmentCandidate]:
         if candidate is not None:
             commitments.append(candidate)
     return commitments
+
+
+def _extract_contextual_assistant_acceptance(
+    *,
+    sentences: List[str],
+    user_context: Optional[str],
+) -> Optional[SelfCommitmentCandidate]:
+    """Capture explicit acceptance of an ongoing assistant role from the prior user ask."""
+
+    if not user_context:
+        return None
+    user_text = " ".join(str(user_context).split())
+    if not _looks_like_ongoing_support_request(user_text):
+        return None
+
+    source_sentence = ""
+    for sentence in sentences:
+        if re.search(
+            (
+                r"\b(?:i\s+can\s+be|i(?:'ll| will)\s+be)\s+(?:that|your)\s+assistant\b"
+                r"|\b(?:i\s+can|i(?:'ll| will))\s+help\b"
+                r"|\b(?:i\s+can|i(?:'ll| will))\s+support\b"
+            ),
+            sentence,
+            re.IGNORECASE,
+        ):
+            source_sentence = sentence.strip()
+            break
+    if not source_sentence:
+        return None
+
+    target = _normalize_assistant_support_target(user_text)
+    if not target:
+        return None
+    return SelfCommitmentCandidate(
+        content=_clean_commitment_content(f"Support {target}"),
+        trigger="accepted_assistant_role",
+        source_sentence=source_sentence,
+        confidence=0.86,
+        normalization_source="contextual_assistant_acceptance",
+    )
+
+
+def _looks_like_ongoing_support_request(user_text: str) -> bool:
+    if re.search(r"\bcan\s+you\s+be\s+my\s+assistant\b", user_text, re.IGNORECASE):
+        return True
+    if not re.search(
+        r"\b(?:can|could|will|would)\s+you\s+(?:help|support)\s+me\b"
+        r"|\bi\s+need\s+you\s+to\s+(?:help|support)\s+me\b",
+        user_text,
+        re.IGNORECASE,
+    ):
+        return False
+    lowered = user_text.lower()
+    ongoing_markers = (
+        "business model",
+        "cash flow",
+        "cash-flow",
+        "complex project",
+        "high priority",
+        "income",
+        "mission",
+        "multi-step",
+        "multistep",
+        "productive routine",
+        "proactive",
+        "start making money",
+        "start making income",
+    )
+    return any(marker in lowered for marker in ongoing_markers)
+
+
+def _normalize_assistant_support_target(user_text: str) -> Optional[str]:
+    lowered = user_text.lower()
+    if (
+        "productive routine" in lowered
+        and ("business model" in lowered or "income" in lowered or "cash flow" in lowered or "cash-flow" in lowered)
+    ):
+        return (
+            "the operator with developing a productive routine and realistic "
+            "non-employee income/business model"
+        )
+
+    requested_object = _extract_requested_support_object(user_text)
+    if requested_object:
+        return f"the operator with {requested_object}"
+
+    match = re.search(
+        r"\bcan\s+you\s+be\s+my\s+assistant\b(?P<object>.*)$",
+        user_text,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return "the operator with the requested ongoing support"
+    target = match.group("object").strip(" ,.!?:;")
+    target = re.sub(
+        r"^(?:by\s+)?(?:helping\s+(?:me\s+)?(?:with|to)|figuring\s+out|working\s+on|for)\s+",
+        "",
+        target,
+        flags=re.IGNORECASE,
+    ).strip(" ,.!?:;")
+    if not target:
+        return "the operator with the requested ongoing support"
+    return f"the operator with {target}"
+
+
+def _extract_requested_support_object(user_text: str) -> Optional[str]:
+    match = re.search(
+        r"\b(?:can|could|will|would)\s+you\s+(?:help|support)\s+me\b(?P<object>[^.!?]*)"
+        r"|\bi\s+need\s+you\s+to\s+(?:help|support)\s+me\b(?P<object2>[^.!?]*)",
+        user_text,
+        re.IGNORECASE,
+    )
+    if match is None:
+        return None
+    target = (match.group("object") or match.group("object2") or "").strip(" ,.!?:;")
+    target = re.sub(
+        r"^(?:by\s+)?(?:helping\s+(?:me\s+)?(?:with|to)|with|on|to|for)\s+",
+        "",
+        target,
+        flags=re.IGNORECASE,
+    ).strip(" ,.!?:;")
+    if not target or target.lower() in _PRONOUN_OBJECTS:
+        return None
+    if len(target.split()) < 2:
+        return None
+    return target
 
 
 def _extract_explicit_promise(

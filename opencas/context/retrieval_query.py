@@ -26,6 +26,49 @@ def extract_anchor_terms(query: str) -> List[str]:
     return terms
 
 
+def extract_exact_handle_terms(query: str) -> dict[str, List[str]]:
+    """Extract exact operational handles that should bypass fuzzy matching."""
+    paths: List[str] = []
+    checksums: List[str] = []
+
+    absolute_path_pattern = re.compile(
+        r"(?<![A-Za-z0-9_.@+-])(?:(?:~|/|\./|\../)[^\s\"'`<>]+)"
+    )
+    for match in absolute_path_pattern.finditer(query):
+        value = _clean_handle_candidate(match.group(0))
+        if (
+            value
+            and "/" in value
+            and len(value) >= 3
+            and "://" not in value
+            and not value.startswith("//")
+        ):
+            paths.append(value)
+
+    relative_path_pattern = re.compile(
+        r"\b[A-Za-z0-9_.@+-]+(?:/[A-Za-z0-9_.@+-]+)+\b"
+    )
+    for match in relative_path_pattern.finditer(query):
+        value = _clean_handle_candidate(match.group(0))
+        if _looks_like_strong_relative_path(value):
+            paths.append(value)
+
+    explicit_checksum_pattern = re.compile(
+        r"\b(?:checksum|sha256|sha-256|hash)\s*[:=]\s*([a-fA-F0-9]{6,128})\b",
+        re.IGNORECASE,
+    )
+    for match in explicit_checksum_pattern.finditer(query):
+        checksums.append(match.group(1))
+
+    for match in re.finditer(r"\b[a-fA-F0-9]{32,128}\b", query):
+        checksums.append(match.group(0))
+
+    return {
+        "paths": _dedupe_preserve_order(paths),
+        "checksums": _dedupe_preserve_order(checksums),
+    }
+
+
 def detect_personal_recall_intent(query: str) -> bool:
     """Detect whether a query is asking about a past personal event or identity."""
     patterns = [
@@ -81,3 +124,37 @@ def keyword_queries_for(query: str, recall_intent: bool, stopwords: Optional[Set
         seen.add(key)
         deduped.append(candidate)
     return deduped or [query]
+
+
+def _dedupe_preserve_order(values: List[str]) -> List[str]:
+    out: List[str] = []
+    seen: Set[str] = set()
+    for value in values:
+        key = value.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(value)
+    return out
+
+
+def _clean_handle_candidate(value: str) -> str:
+    return value.strip().strip(".,;:!?)]}'\"`")
+
+
+def _looks_like_strong_relative_path(value: str) -> bool:
+    if not value or "/" not in value or "://" in value:
+        return False
+    segments = [segment for segment in value.split("/") if segment]
+    if len(segments) < 2:
+        return False
+    if all(segment.isdigit() for segment in segments):
+        return False
+    last_segment = segments[-1]
+    has_file_extension = bool(re.search(r"\.[A-Za-z0-9]{1,12}$", last_segment))
+    if has_file_extension:
+        return True
+    # A two-segment slash phrase such as "writing/draft" is too weak for an
+    # exact-handle bypass. Three or more nonnumeric segments are much more
+    # likely to be a deliberate relative path.
+    return len(segments) >= 3 and not last_segment.isdigit()

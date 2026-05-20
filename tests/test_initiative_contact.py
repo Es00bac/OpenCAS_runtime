@@ -7,8 +7,10 @@ from types import SimpleNamespace
 import pytest
 
 from opencas.bootstrap import BootstrapConfig, BootstrapPipeline
+from opencas.context.models import MessageRole
 from opencas.daydream import DaydreamReflection
 from opencas.initiative_contact import InitiativeContactConfig, InitiativeContactService
+from opencas.memory import EpisodeKind
 from opencas.runtime import AgentRuntime
 
 
@@ -26,7 +28,10 @@ class _TraceRuntime:
         self._telegram = telegram
         self._activity = "idle"
         self.baa = SimpleNamespace(queue_size=0, held_size=0, active_count=0)
-        self.ctx = SimpleNamespace(daydream_store=None)
+        self.ctx = SimpleNamespace(
+            daydream_store=None,
+            identity=SimpleNamespace(self_model=SimpleNamespace(name="TestAgent")),
+        )
         self.traces: list[tuple[str, dict]] = []
         self.phone_calls: list[dict] = []
 
@@ -47,7 +52,11 @@ class _TraceRuntime:
 
 
 class _LLM:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
     async def chat_completion(self, **_: object) -> dict:
+        self.calls.append(dict(_))
         return {
             "choices": [
                 {
@@ -62,12 +71,63 @@ class _LLM:
         }
 
 
+class _OvereagerLLM:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def chat_completion(self, **_: object) -> dict:
+        self.calls.append(dict(_))
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": (
+                            '{"send": true, "channel": "telegram", "urgency": "normal", '
+                            '"reason": "felt interesting", "message": "I am thinking about something."}'
+                        )
+                    }
+                }
+            ]
+        }
+
+
 class _ReflectionStore:
     def __init__(self) -> None:
         self.saved: list[DaydreamReflection] = []
 
     async def save_reflection(self, reflection: DaydreamReflection) -> None:
         self.saved.append(reflection)
+
+
+class _ContextStore:
+    def __init__(self) -> None:
+        self.entries: list[dict] = []
+
+    async def append(self, session_id: str, role: MessageRole, content: str, meta: dict | None = None) -> None:
+        self.entries.append(
+            {
+                "session_id": session_id,
+                "role": role,
+                "content": content,
+                "meta": meta or {},
+            }
+        )
+
+
+class _MemoryStore:
+    def __init__(self) -> None:
+        self.episodes: list[object] = []
+
+    async def save_episode(self, episode: object) -> None:
+        self.episodes.append(episode)
+
+
+class _CandidateStore:
+    def __init__(self, candidates: list[SimpleNamespace]) -> None:
+        self.candidates = candidates
+
+    async def list_initiatives(self, *, limit: int) -> list[SimpleNamespace]:
+        return self.candidates[:limit]
 
 
 @pytest.mark.asyncio
@@ -93,6 +153,43 @@ async def test_request_contact_sends_telegram_and_records_event(tmp_path: Path) 
     assert result["channel"] == "telegram"
     assert service.status()["sent_today"] == 1
     assert any(event["status"] == "sent" for event in service.store.list_events())
+
+
+@pytest.mark.asyncio
+async def test_request_contact_records_owner_notification_in_agent_context_and_memory(tmp_path: Path) -> None:
+    telegram = _Telegram()
+    runtime = _TraceRuntime(tmp_path, telegram=telegram)
+    runtime.ctx.config = SimpleNamespace(session_id="session-aware", state_dir=tmp_path)
+    runtime.ctx.context_store = _ContextStore()
+    runtime.memory = _MemoryStore()
+    service = InitiativeContactService(
+        runtime=runtime,
+        state_dir=tmp_path,
+        config=InitiativeContactConfig(),
+        time_source=lambda: datetime(2026, 4, 25, 15, 0, tzinfo=timezone.utc),
+    )
+
+    result = await service.request_contact(
+        message="The active background task failed and needs attention.",
+        reason="baa_task_failed",
+        urgency="high",
+        source="baa",
+    )
+
+    assert result["status"] == "sent"
+    [entry] = runtime.ctx.context_store.entries
+    assert entry["session_id"] == "session-aware"
+    assert entry["role"] == MessageRole.SYSTEM
+    assert "Automated owner notification" in entry["content"]
+    assert "The active background task failed" in entry["content"]
+    assert entry["meta"]["event_id"] == result["event_id"]
+    assert entry["meta"]["agent_visible_system_message"] is True
+
+    [episode] = runtime.memory.episodes
+    assert episode.kind == EpisodeKind.OBSERVATION
+    assert episode.session_id == "session-aware"
+    assert "baa_task_failed" in episode.content
+    assert episode.payload["event_id"] == result["event_id"]
 
 
 @pytest.mark.asyncio
@@ -199,6 +296,191 @@ async def test_sent_reflection_contact_updates_experience_context(tmp_path: Path
     assert reflection.experience_context["contact"]["reason"] == "worth sharing"
     assert reflection.experience_context["contact"]["message_preview"] == "The unified graph maps intent."
     assert reflection_store.saved[-1].experience_context["contact"]["reason"] == "worth sharing"
+    assert "You are TestAgent deciding whether to contact your trusted owner" in runtime.llm.calls[0]["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_low_utility_reflection_contact_is_held_even_if_model_says_send(
+    tmp_path: Path,
+) -> None:
+    telegram = _Telegram()
+    runtime = _TraceRuntime(tmp_path, telegram=telegram)
+    runtime.llm = _OvereagerLLM()
+    service = InitiativeContactService(
+        runtime=runtime,
+        state_dir=tmp_path,
+        config=InitiativeContactConfig(),
+        time_source=lambda: datetime(2026, 4, 29, 22, 0, tzinfo=timezone.utc),
+    )
+    reflection = DaydreamReflection(
+        spark_content="I am thinking about something.",
+        synthesis="I am thinking about something.",
+        alignment_score=0.9,
+        novelty_score=0.9,
+        keeper=False,
+    )
+
+    result = await service.consider_reflection(
+        reflection,
+        SimpleNamespace(strategy="accept", reason="low utility"),
+    )
+
+    assert result["status"] == "deferred"
+    assert result["reason"] == "quality_gate_low_utility"
+    assert telegram.messages == []
+
+
+@pytest.mark.asyncio
+async def test_deferred_candidate_is_not_immediately_reevaluated_but_can_return_after_cooldown(
+    tmp_path: Path,
+) -> None:
+    telegram = _Telegram()
+    runtime = _TraceRuntime(tmp_path, telegram=telegram)
+    runtime.llm = _OvereagerLLM()
+    current_time = datetime(2026, 4, 29, 22, 0, tzinfo=timezone.utc)
+    service = InitiativeContactService(
+        runtime=runtime,
+        state_dir=tmp_path,
+        config=InitiativeContactConfig(reevaluate_source_after_minutes=60),
+        time_source=lambda: current_time,
+    )
+    candidate = {
+        "source_id": "source-1",
+        "source_kind": "daydream_signal",
+        "summary": "I am thinking about something.",
+        "label": "I am thinking about something.",
+        "intensity": 0.9,
+        "reason": "low utility",
+    }
+
+    first = await service.consider_candidate(candidate)
+    second = await service.consider_candidate({**candidate, "summary": "This now has a concrete reason to ask."})
+    current_time = datetime(2026, 4, 30, 0, 0, tzinfo=timezone.utc)
+    third = await service.consider_candidate({**candidate, "summary": "This now has a concrete reason to ask."})
+
+    assert first["status"] == "deferred"
+    assert second["status"] == "skipped"
+    assert second["reason"] == "already_evaluated_source"
+    assert third["status"] != "skipped"
+
+
+@pytest.mark.asyncio
+async def test_run_once_respects_per_run_evaluation_budget(tmp_path: Path) -> None:
+    telegram = _Telegram()
+    runtime = _TraceRuntime(tmp_path, telegram=telegram)
+    runtime.llm = _LLM()
+    runtime.ctx.daydream_store = _CandidateStore(
+        [
+            SimpleNamespace(
+                initiative_id=f"candidate-{index}",
+                label=f"Candidate {index}",
+                objective=f"Candidate {index} has a concrete operator-facing implication.",
+                intensity=0.95,
+                focus="budget regression",
+                trigger="daydream",
+                desired_rung="project",
+                tags=["regression"],
+            )
+            for index in range(5)
+        ]
+    )
+    service = InitiativeContactService(
+        runtime=runtime,
+        state_dir=tmp_path,
+        config=InitiativeContactConfig(
+            max_candidates_per_run=5,
+            max_eval_calls_per_run=2,
+            max_eval_calls_per_hour=10,
+            max_eval_calls_per_day=10,
+        ),
+        time_source=lambda: datetime(2026, 4, 29, 22, 0, tzinfo=timezone.utc),
+    )
+
+    result = await service.run_once(limit=10)
+
+    assert len(runtime.llm.calls) == 2
+    assert result["considered"] == 5
+    assert sum(1 for item in result["results"] if item.get("reason") == "run_evaluation_budget_exhausted") == 3
+    assert service.status()["evaluation_budget"]["used_day"] == 2
+
+
+@pytest.mark.asyncio
+async def test_same_source_can_reenter_when_signal_materially_escalates(tmp_path: Path) -> None:
+    telegram = _Telegram()
+    runtime = _TraceRuntime(tmp_path, telegram=telegram)
+    runtime.llm = _LLM()
+    service = InitiativeContactService(
+        runtime=runtime,
+        state_dir=tmp_path,
+        config=InitiativeContactConfig(reevaluate_source_after_minutes=60),
+        time_source=lambda: datetime(2026, 4, 29, 22, 0, tzinfo=timezone.utc),
+    )
+    first_candidate = {
+        "source_id": "source-1",
+        "source_kind": "daydream_signal",
+        "summary": "A vague recurring thought.",
+        "label": "vague thought",
+        "intensity": 0.1,
+        "reason": "low utility",
+    }
+    escalated_candidate = {
+        **first_candidate,
+        "summary": "The active task is blocked in a way that needs owner attention now.",
+        "intensity": 0.96,
+        "tags": ["blocked", "owner_attention"],
+        "raw": {"resolution_strategy": "escalate", "conflict_id": "conflict-1"},
+    }
+
+    first = await service.consider_candidate(first_candidate)
+    second = await service.consider_candidate(escalated_candidate)
+
+    assert first["status"] == "held"
+    assert first["reason"] == "local_hold_low_signal"
+    assert second["status"] == "sent"
+    assert len(runtime.llm.calls) == 1
+    assert telegram.messages
+
+
+@pytest.mark.asyncio
+async def test_semantically_same_candidate_is_not_reevaluated_across_ingress_paths(tmp_path: Path) -> None:
+    telegram = _Telegram()
+    runtime = _TraceRuntime(tmp_path, telegram=telegram)
+    runtime.llm = _OvereagerLLM()
+    service = InitiativeContactService(
+        runtime=runtime,
+        state_dir=tmp_path,
+        config=InitiativeContactConfig(similar_evaluation_cooldown_minutes=60),
+        time_source=lambda: datetime(2026, 4, 29, 22, 0, tzinfo=timezone.utc),
+    )
+    reflection_candidate = {
+        "source_id": "reflection-1",
+        "source_kind": "reflection",
+        "summary": "Chapter 3 should contrast the quiet research room with the archive alarm.",
+        "label": "Chapter 3 contrast",
+        "intensity": 0.9,
+        "reason": "interesting but not urgent",
+    }
+    signal_candidate = {
+        "source_id": "signal-1",
+        "source_kind": "daydream_signal",
+        "summary": "Chapter 3 should contrast the quiet research room with the archive alarm.",
+        "label": "Chapter 3 contrast",
+        "intensity": 0.9,
+        "reason": "same idea routed as signal",
+    }
+
+    first = await service.consider_candidate(reflection_candidate)
+    second = await service.consider_candidate(signal_candidate)
+
+    assert first["status"] == "deferred"
+    assert second["status"] == "held"
+    assert second["reason"] == "similar_candidate_recently_evaluated"
+    assert len(runtime.llm.calls) == 1
+    first_eval = first["evaluation"]
+    second_eval = second["evaluation"]
+    assert first_eval["canonical_id"] == second_eval["canonical_id"]
+    assert first_eval["originating_path"] == "reflection"
+    assert second_eval["originating_path"] == "daydream_signal"
 
 
 @pytest.mark.asyncio

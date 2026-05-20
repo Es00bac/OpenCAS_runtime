@@ -54,12 +54,19 @@ def register_web_and_browser_tools(runtime: Any) -> None:
         [
             ToolRegistrationSpec(
                 name="browser_start",
-                description="Start a Playwright-backed browser session.",
+                description=(
+                    "Start a Playwright-backed browser session and return session_id. "
+                    "This only opens about:blank; it is setup, not useful browser work by itself. "
+                    "Follow with browser_navigate or browser_snapshot, or close/clear if aborting."
+                ),
                 risk_tier=ActionRiskTier.READONLY,
                 schema={
                     "type": "object",
                     "properties": {
-                        "headless": {"type": "boolean", "description": "Run browser headlessly (default true)."},
+                        "headless": {
+                            "type": "boolean",
+                            "description": "Run browser headlessly (default true). Use false only when the operator needs a visible window.",
+                        },
                         "viewport_width": {"type": "integer", "description": "Browser viewport width."},
                         "viewport_height": {"type": "integer", "description": "Browser viewport height."},
                         "scope_key": {"type": "string", "description": "Scope key for browser session isolation."},
@@ -164,7 +171,7 @@ def register_web_and_browser_tools(runtime: Any) -> None:
             ),
             ToolRegistrationSpec(
                 name="browser_close",
-                description="Close and remove a browser session.",
+                description="Close and remove a browser session. Cleanup only; it does not inspect, navigate, or advance browser work by itself.",
                 risk_tier=ActionRiskTier.READONLY,
                 schema={
                     "type": "object",
@@ -177,7 +184,7 @@ def register_web_and_browser_tools(runtime: Any) -> None:
             ),
             ToolRegistrationSpec(
                 name="browser_clear",
-                description="Close and remove all browser sessions in a scope.",
+                description="Close and remove all browser sessions in a scope. Cleanup only; use after work is complete or explicitly aborted.",
                 risk_tier=ActionRiskTier.READONLY,
                 schema={
                     "type": "object",

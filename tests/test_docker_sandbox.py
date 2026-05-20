@@ -4,7 +4,6 @@ from pathlib import Path
 from subprocess import TimeoutExpired
 from unittest.mock import MagicMock, patch
 
-import pytest
 
 from opencas.sandbox import SandboxConfig, SandboxMode
 from opencas.sandbox.docker import DockerSandbox

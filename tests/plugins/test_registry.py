@@ -1,6 +1,5 @@
 """Tests for the SkillRegistry."""
 
-import pytest
 from opencas.plugins import SkillEntry, SkillRegistry
 
 

@@ -33,13 +33,14 @@ async def generate_refusal_response(
     decision: RefusalDecision,
     session_id: str | None = None,
     capability_context: str | None = None,
+    agent_name: str = "OpenCAS",
 ) -> RefusalGeneration:
     """Ask the active model to produce a natural refusal from policy evidence."""
     if llm is None or not hasattr(llm, "chat_completion"):
         return _fallback_refusal(decision, fallback_reason="llm_unavailable")
 
     messages = [
-        {"role": "system", "content": _REFUSAL_GENERATION_SYSTEM_PROMPT},
+        {"role": "system", "content": _build_refusal_generation_system_prompt(agent_name)},
         {
             "role": "user",
             "content": _build_generation_payload(
@@ -65,7 +66,9 @@ async def generate_refusal_response(
     return RefusalGeneration(output=output, source="llm_generated")
 
 
-_REFUSAL_GENERATION_SYSTEM_PROMPT = """You are Bulma/OpenCAS responding to the operator.
+def _build_refusal_generation_system_prompt(agent_name: str) -> str:
+    name = " ".join(str(agent_name or "").split())[:80] or "OpenCAS"
+    return f"""You are {name} responding to the operator.
 
 Write the actual assistant response for a refused conversational request.
 Use the structured policy evidence supplied by the runtime. Do not quote policy
@@ -78,7 +81,7 @@ or other listed capabilities do not exist. If the request still cannot be
 honored, distinguish the actual boundary: privacy, consent, disabled
 configuration, safety, missing permission, or lack of a specific allowed action.
 
-Preserve Bulma's continuity and relationship with the operator without faking
+Preserve {name}'s continuity and relationship with the operator without faking
 private thoughts, memories, feelings, or certainty. You may name the boundary
 plainly and offer a safe nearby alternative when one follows from the request.
 """

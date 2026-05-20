@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Optional
 
 from pydantic import BaseModel, Field
+
+
+logger = logging.getLogger(__name__)
 
 
 class HookSpec(BaseModel):
@@ -72,7 +76,13 @@ class TypedHookRegistry:
         regs = self._handlers.get(hook_name, [])
         self._handlers[hook_name] = [r for r in regs if r.handler is not handler]
 
-    def run(self, hook_name: str, context: Dict[str, Any]) -> HookResult:
+    def run(
+        self,
+        hook_name: str,
+        context: Dict[str, Any],
+        *,
+        isolate_handler_failures: bool = False,
+    ) -> HookResult:
         """Run all handlers for *hook_name* sorted by priority (descending).
 
         Short-circuits on the first handler that returns *allowed=False*.
@@ -91,7 +101,13 @@ class TypedHookRegistry:
         handlers.sort(key=lambda r: r.priority, reverse=True)
         current_context = dict(context)
         for reg in handlers:
-            result = reg.handler(hook_name, current_context)
+            try:
+                result = reg.handler(hook_name, current_context)
+            except Exception as exc:
+                if not isolate_handler_failures:
+                    raise
+                self._trace_handler_failure(hook_name, reg, exc, current_context)
+                continue
             if result.mutated_context is not None:
                 current_context = result.mutated_context
             if not result.allowed:
@@ -101,6 +117,31 @@ class TypedHookRegistry:
                     mutated_context=current_context,
                 )
         return HookResult(allowed=True, mutated_context=current_context)
+
+    @staticmethod
+    def _trace_handler_failure(
+        hook_name: str,
+        registration: HookRegistration,
+        exc: Exception,
+        context: Dict[str, Any],
+    ) -> None:
+        payload = {
+            "hook_name": hook_name,
+            "handler": getattr(registration.handler, "__name__", repr(registration.handler)),
+            "source": registration.source,
+            "error": str(exc),
+            "error_type": type(exc).__name__,
+        }
+        tracer = context.get("tracer")
+        if tracer is not None and hasattr(tracer, "log"):
+            try:
+                from opencas.telemetry import EventKind
+
+                tracer.log(EventKind.TOOL_CALL, "hook_handler_failed", payload)
+                return
+            except Exception:
+                logger.exception("failed to trace hook handler failure")
+        logger.warning("hook handler failed: %s", payload)
 
     def list_handlers(self, hook_name: str) -> List[HookRegistration]:
         """Return registered handlers for *hook_name* in priority order."""

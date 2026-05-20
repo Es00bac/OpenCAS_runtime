@@ -13,6 +13,9 @@ import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
+from opencas.autonomy.mode_utils import normalize_approval_mode
+from opencas.autonomy.models import ApprovalMode
+
 
 CommandHandler = Callable[["TelegramCommandRouter", int, str, List[str]], Awaitable[Optional[str]]]
 
@@ -27,6 +30,7 @@ BOT_COMMAND_MENU: List[Tuple[str, str]] = [
     ("musubi", "Relational resonance (trust/presence/attunement)"),
     ("identity", "Self-model summary"),
     ("user", "How OpenCAS models you"),
+    ("approval_mode", "Get or set approval mode"),
     ("continuity", "Boot count and last session"),
     ("whoami", "Your Telegram pairing info"),
 ]
@@ -52,6 +56,7 @@ class TelegramCommandRouter:
             "identity": _cmd_identity,
             "self": _cmd_identity,
             "user": _cmd_user_model,
+            "approval_mode": _cmd_approval_mode,
             "continuity": _cmd_continuity,
             "whoami": _cmd_whoami,
         }
@@ -304,7 +309,12 @@ async def _cmd_user_model(
         lines.append("")
         lines.append("inferred goals:")
         for goal in um.inferred_goals[:5]:
-            lines.append(f"  • {goal}")
+            if isinstance(goal, dict):
+                text_value = goal.get("text") or goal.get("goal") or goal.get("content")
+            else:
+                text_value = goal
+            if text_value:
+                lines.append(f"  • {text_value}")
     if um.known_boundaries:
         lines.append("")
         lines.append("known boundaries:")
@@ -316,6 +326,30 @@ async def _cmd_user_model(
         for area in um.uncertainty_areas[:5]:
             lines.append(f"  • {area}")
     return "\n".join(lines)
+
+
+async def _cmd_approval_mode(
+    router: "TelegramCommandRouter", chat_id: int, text: str, args: List[str]
+) -> str:
+    approval = getattr(router.runtime, "approval", None)
+    if approval is None:
+        return "Approval ladder is not available."
+
+    if not args:
+        current = getattr(approval, "mode", ApprovalMode.DEFAULT)
+        current_value = current.value if isinstance(current, ApprovalMode) else str(current)
+        return f"Current approval mode: {current_value}"
+
+    try:
+        mode = normalize_approval_mode(args[0])
+    except ValueError:
+        return "Invalid mode. Use one of: default, auto_review, trust_based, yolo."
+
+    set_mode = getattr(approval, "set_mode", None)
+    if not callable(set_mode):
+        return "Approval ladder cannot update mode at runtime."
+    set_mode(mode)
+    return f"Approval mode set to: {mode.value}"
 
 
 async def _cmd_continuity(

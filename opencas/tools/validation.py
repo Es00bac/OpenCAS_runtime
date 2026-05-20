@@ -153,7 +153,7 @@ class SmartCommandValidator(ToolValidator):
         self.greylist = self._load_greylist()
 
     def _load_greylist(self) -> dict:
-        import json, os
+        import json
         if os.path.exists(self.grey_list_path):
             try:
                 with open(self.grey_list_path, 'r') as f:
@@ -187,19 +187,22 @@ class SmartCommandValidator(ToolValidator):
 
     def _break_down_command(self, command: str) -> List[str]:
         """Breaks down a command into base executables without executing them."""
-        import re, shlex
+        import re
+        import shlex
         # Split by logical operators, pipes, and command substitution sequences
         parts = re.split(r'\||&&|\|\||;|\$\(|\`', command)
         sub_commands = []
         for part in parts:
             part = part.replace(')', '').replace('`', '').strip()
-            if not part: continue
+            if not part:
+                continue
             try:
                 tokens = shlex.split(part)
             except ValueError:
                 tokens = part.split()
-            if not tokens: continue
-            
+            if not tokens:
+                continue
+
             first = tokens[0].lower()
             if first in ("sh", "bash", "zsh", "eval", "sudo") and len(tokens) > 1:
                 if "-c" in tokens:
@@ -265,7 +268,7 @@ class SmartCommandValidator(ToolValidator):
         if not overall_allowed:
             return ToolValidationResult(
                 allowed=False,
-                reason=f"Command failed smart validation: " + " ".join(warnings),
+                reason="Command failed smart validation: " + " ".join(warnings),
                 warnings=warnings,
                 command_family=command_family,
                 command_permission_class="dangerous",

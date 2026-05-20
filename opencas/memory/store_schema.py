@@ -57,6 +57,40 @@ CREATE TABLE IF NOT EXISTS compactions (
     removed_count INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS session_anchors (
+    session_id TEXT PRIMARY KEY,
+    created_at TEXT NOT NULL,
+    ended_at TEXT,
+    duration_s REAL,
+    agent_name TEXT NOT NULL,
+    source_system TEXT,
+    episode_kind_tally TEXT NOT NULL DEFAULT '{}',
+    decision_episode_ids TEXT NOT NULL DEFAULT '[]',
+    affect_peaks TEXT NOT NULL DEFAULT '[]',
+    recorded_affect_summary TEXT,
+    artifact_paths_touched TEXT NOT NULL DEFAULT '[]',
+    commitments_opened TEXT NOT NULL DEFAULT '[]',
+    commitments_closed TEXT NOT NULL DEFAULT '[]',
+    identity_mutagen_episode_ids TEXT NOT NULL DEFAULT '[]',
+    compaction_record_ids TEXT NOT NULL DEFAULT '[]',
+    narrative_bridge_message_ids TEXT NOT NULL DEFAULT '[]',
+    continuity_breadcrumb_ids TEXT NOT NULL DEFAULT '[]',
+    evidence_episode_ids TEXT NOT NULL DEFAULT '[]',
+    recall_failure_episode_ids TEXT NOT NULL DEFAULT '[]',
+    recall_recovery_episode_ids TEXT NOT NULL DEFAULT '[]',
+    evidence_hash TEXT,
+    evidence_strength TEXT,
+    gist TEXT,
+    gist_version INTEGER NOT NULL DEFAULT 0,
+    confidence TEXT,
+    gaps_noted TEXT NOT NULL DEFAULT '[]',
+    consolidation_run_id_at_time TEXT,
+    version INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE INDEX IF NOT EXISTS idx_session_anchors_created_at ON session_anchors(created_at);
+CREATE INDEX IF NOT EXISTS idx_session_anchors_gist_version ON session_anchors(gist_version);
+
 CREATE TABLE IF NOT EXISTS episode_edges (
     edge_id TEXT PRIMARY KEY,
     source_id TEXT NOT NULL,
@@ -121,4 +155,9 @@ MEMORY_STORE_MIGRATIONS = [
     "ALTER TABLE episodes ADD COLUMN identity_mutagen INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE memories ADD COLUMN identity_mutagen INTEGER NOT NULL DEFAULT 0",
     "ALTER TABLE memories ADD COLUMN confidence_score REAL NOT NULL DEFAULT 0.8",
+    "ALTER TABLE episodes ADD COLUMN payload TEXT NOT NULL DEFAULT '{}'",
+    "ALTER TABLE session_anchors ADD COLUMN source_system TEXT",
+    "ALTER TABLE session_anchors ADD COLUMN recorded_affect_summary TEXT",
+    "ALTER TABLE session_anchors ADD COLUMN recall_failure_episode_ids TEXT NOT NULL DEFAULT '[]'",
+    "ALTER TABLE session_anchors ADD COLUMN recall_recovery_episode_ids TEXT NOT NULL DEFAULT '[]'",
 ]

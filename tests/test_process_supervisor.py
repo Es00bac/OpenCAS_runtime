@@ -2,7 +2,6 @@
 
 import time
 
-import pytest
 
 from opencas.execution.process_supervisor import (
     _MAX_PROCESS_STREAM_LINE_CHARS,

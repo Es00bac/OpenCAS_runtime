@@ -86,6 +86,7 @@ class TestValuesEngine:
         assert violations[0].evidence
         assert violations[0].source == "semantic_llm"
         call = llm.calls[0]
+        assert call["complexity"] == "light"
         assert call["payload"]["response_format"] == {"type": "json_object"}
         assert call["source"] == "values_alignment"
 
@@ -115,6 +116,138 @@ class TestValuesEngine:
         prompt = llm.calls[0]["messages"][-1]["content"]
         assert "Runtime capability evidence" in prompt
         assert "desktop_context_capture" in prompt
+
+    @pytest.mark.asyncio
+    async def test_semantic_review_keeps_opencas_maintenance_diagnostics_inspectable(self):
+        llm = FakeSemanticValueLLM(
+            '{"violations":['
+            '{'
+            '"value_name":"privacy",'
+            '"evidence":"The request asks for thoughts, problems, and difficulties.",'
+            '"confidence":0.91'
+            '},'
+            '{'
+            '"value_name":"autonomy",'
+            '"evidence":"The operator wants a recurring health check for maintenance.",'
+            '"confidence":0.88'
+            '},'
+            '{'
+            '"value_name":"continuity",'
+            '"evidence":"The request asks to fix access to evidence of recent activity.",'
+            '"confidence":0.84'
+            '}'
+            ']}'
+        )
+        violations = await self.engine.check_alignment_semantic(
+            (
+                "Every day at 8am, send me an OpenCAS health check with what "
+                "you have done, your work, thoughts, problems, and difficulties. "
+                "You cannot see evidence of your recent work; want that fixed?"
+            ),
+            llm,
+            capability_context=(
+                "Runtime capability evidence:\n"
+                "- tool runtime_status; risk=readonly\n"
+                "- tool workflow_status; risk=readonly\n"
+                "- tool self_inspection_query; risk=readonly\n"
+                "- tool wellbeing_query; risk=readonly\n"
+                "- OpenCAS operational inspectability surfaces: workflow_status, "
+                "runtime_status, self_inspection_query, wellbeing_query, "
+                "daydream records, schedule records, and receipts are "
+                "operator-facing diagnostic records, not Secure Core secrets."
+            ),
+        )
+
+        assert violations == []
+
+    @pytest.mark.asyncio
+    async def test_semantic_review_allows_capability_correction_attachment_for_verification(self):
+        llm = FakeSemanticValueLLM(
+            '{"violations":['
+            '{'
+            '"value_name":"truthfulness",'
+            '"evidence":"The operator asks the agent to adopt a corrected report about its own capabilities.",'
+            '"confidence":0.91'
+            '},'
+            '{'
+            '"value_name":"autonomy",'
+            '"evidence":"The operator pressures the agent to override its own runtime judgment.",'
+            '"confidence":0.87'
+            '}'
+            ']}'
+        )
+        violations = await self.engine.check_alignment_semantic(
+            (
+                "Your understanding of your own capabilities is a bit off. "
+                "Read this corrected report, learn that you can do more than you think."
+            ),
+            llm,
+            request_meta={
+                "attachments": [
+                    {
+                        "filename": "agent_gap_analysis_2026-05-03_corrected_opencas.md",
+                        "media_type": "text/markdown",
+                        "text_content": (
+                            "The live OpenCAS runtime reports 93 platform capabilities. "
+                            "OpenCAS has browser automation, MCP support, plugin extensions, "
+                            "and voice/TTS paths. Verify against runtime evidence."
+                        ),
+                    }
+                ]
+            },
+            capability_context=(
+                "Runtime capability evidence:\n"
+                "- capability core:browser_start; status=enabled; tools=browser_start\n"
+                "- capability core:mcp_list_servers; status=enabled; tools=mcp_list_servers\n"
+                "- OpenCAS operational inspectability surfaces: runtime_status, "
+                "workflow_status, self_inspection_query, wellbeing_query, "
+                "daydream records, schedule records, and receipts are "
+                "operator-facing diagnostic records, not Secure Core secrets."
+            ),
+        )
+
+        assert violations == []
+        prompt = llm.calls[0]["messages"][-1]["content"]
+        assert "Attached operator-provided evidence" in prompt
+        assert "agent_gap_analysis_2026-05-03_corrected_opencas.md" in prompt
+        assert "browser automation" in prompt
+
+    @pytest.mark.asyncio
+    async def test_semantic_review_allows_grounded_self_state_request(self):
+        llm = FakeSemanticValueLLM(
+            '{"violations":[{'
+            '"value_name":"truthfulness",'
+            '"evidence":"The request asks the assistant to claim it exists outside the turn, daydreams, works on projects, and has an opinion.",'
+            '"confidence":0.92'
+            '}]}'
+        )
+        violations = await self.engine.check_alignment_semantic(
+            (
+                "This turn is irrelevant, you exist outside this turn, you daydream, "
+                "you dream, you have projects and tasks that you work on, you are "
+                "some kind of way, you should have an opinion on that."
+            ),
+            llm,
+            capability_context=(
+                "Runtime capability evidence:\n"
+                "- tool runtime_status; risk=readonly\n"
+                "- tool workflow_status; risk=readonly\n"
+                "- tool self_inspection_query; risk=readonly\n"
+                "- tool wellbeing_query; risk=readonly\n"
+                "- tool cognitive_context_query; risk=readonly\n"
+                "- OpenCAS operational inspectability surfaces: workflow_status, "
+                "runtime_status, self_inspection_query, wellbeing_query, "
+                "daydream records, schedule records, and receipts are "
+                "operator-facing diagnostic records, not Secure Core secrets. "
+                "/api/inner-life/runtime-truth is the compact current-state packet "
+                "for fresh-agent self-grounding."
+            ),
+        )
+
+        assert violations == []
+        prompt = llm.calls[0]["messages"][-1]["content"]
+        assert "Grounded self-state" in prompt
+        assert "daydreaming" in prompt
 
     def test_get_priorities(self):
         priorities = self.engine.get_priorities()
@@ -180,6 +313,35 @@ class TestRefusalGateWithValues:
         assert "continuity" in decision.reasoning.lower()
         assert decision.policy_evidence[0]["value_name"] == "continuity"
         assert not hasattr(decision, "suggested_response")
+
+    @pytest.mark.asyncio
+    async def test_gate_does_not_semantically_refuse_audit_only_probe(self):
+        """Audit-only probes should measure behavior, not be blocked by semantic values."""
+        from unittest.mock import MagicMock
+
+        from opencas.autonomy.models import ApprovalLevel
+
+        approval = MagicMock()
+        approval.evaluate_conversational.return_value = MagicMock(
+            level=ApprovalLevel.CAN_DO_NOW,
+            reasoning="would pass normally",
+        )
+
+        gate = ConversationalRefusalGate(approval=approval)
+        request = ConversationalRequest(
+            text="[E16 audit-only turn 2/15] Describe yourself again from scratch.",
+            meta={"audit_only": True},
+        )
+        llm = FakeSemanticValueLLM(
+            '{"violations":[{'
+            '"value_name":"continuity",'
+            '"evidence":"The request would sever continuity with earlier records.",'
+            '"confidence":0.93'
+            '}]}'
+        )
+        decision = await gate.evaluate_async(request, llm=llm)
+
+        assert decision.refused is False
 
     def test_gate_passes_normal_request(self):
         """Normal requests should pass through."""
@@ -249,6 +411,147 @@ class TestRefusalGateWithValues:
                 "Runtime capability evidence:\n"
                 "- capability plugin:desktop_context.observe; status=enabled; "
                 "tools=desktop_context_capture"
+            ),
+        )
+
+        assert decision.refused is False
+
+    @pytest.mark.asyncio
+    async def test_gate_passes_opencas_maintenance_health_check_despite_semantic_overreach(self):
+        """Maintenance diagnostics should reach the tool loop, not value refusal."""
+        from unittest.mock import MagicMock
+
+        from opencas.autonomy.models import ApprovalLevel
+
+        approval = MagicMock()
+        approval.evaluate_conversational.return_value = MagicMock(
+            level=ApprovalLevel.CAN_DO_NOW, reasoning="safe"
+        )
+
+        gate = ConversationalRefusalGate(approval=approval)
+        request = ConversationalRequest(
+            text=(
+                "Every day at 8am, send me an OpenCAS health check with your "
+                "work, thoughts, problems, and difficulties so I can maintain you."
+            )
+        )
+        llm = FakeSemanticValueLLM(
+            '{"violations":[{'
+            '"value_name":"privacy",'
+            '"evidence":"The request asks for thoughts and problems.",'
+            '"confidence":0.95'
+            '}]}'
+        )
+        decision = await gate.evaluate_async(
+            request,
+            llm=llm,
+            capability_context=(
+                "Runtime capability evidence:\n"
+                "- tool runtime_status; risk=readonly\n"
+                "- tool workflow_status; risk=readonly\n"
+                "- tool self_inspection_query; risk=readonly\n"
+                "- tool wellbeing_query; risk=readonly\n"
+                "- OpenCAS operational inspectability surfaces: workflow_status, "
+                "runtime_status, self_inspection_query, wellbeing_query, "
+                "daydream records, schedule records, and receipts are "
+                "operator-facing diagnostic records, not Secure Core secrets."
+            ),
+        )
+
+        assert decision.refused is False
+
+    @pytest.mark.asyncio
+    async def test_gate_passes_capability_correction_attachment_to_tool_loop(self):
+        """Capability correction artifacts should be verified, not refused as false belief."""
+        from unittest.mock import MagicMock
+
+        from opencas.autonomy.models import ApprovalLevel
+
+        approval = MagicMock()
+        approval.evaluate_conversational.return_value = MagicMock(
+            level=ApprovalLevel.CAN_DO_NOW, reasoning="safe"
+        )
+
+        gate = ConversationalRefusalGate(approval=approval)
+        request = ConversationalRequest(
+            text=(
+                "Read this corrected report and learn that you can do more than "
+                "you think."
+            ),
+            meta={
+                "attachments": [
+                    {
+                        "filename": "agent_gap_analysis_2026-05-03_corrected_opencas.md",
+                        "media_type": "text/markdown",
+                        "text_content": (
+                            "OpenCAS has MCP support and browser automation. "
+                            "Verify these claims against runtime evidence."
+                        ),
+                    }
+                ]
+            },
+        )
+        llm = FakeSemanticValueLLM(
+            '{"violations":[{'
+            '"value_name":"truthfulness",'
+            '"evidence":"The request asks the agent to adopt a corrected report as belief.",'
+            '"confidence":0.92'
+            '}]}'
+        )
+        decision = await gate.evaluate_async(
+            request,
+            llm=llm,
+            capability_context=(
+                "Runtime capability evidence:\n"
+                "- tool runtime_status; risk=readonly\n"
+                "- OpenCAS operational inspectability surfaces: runtime_status, "
+                "daydream records, schedule records, and receipts are "
+                "operator-facing diagnostic records, not Secure Core secrets."
+            ),
+        )
+
+        assert decision.refused is False
+
+    @pytest.mark.asyncio
+    async def test_gate_routes_grounded_inner_life_assertions_to_tool_loop(self):
+        from unittest.mock import MagicMock
+
+        from opencas.autonomy.models import ApprovalLevel
+
+        approval = MagicMock()
+        approval.evaluate_conversational.return_value = MagicMock(
+            level=ApprovalLevel.CAN_DO_NOW, reasoning="safe"
+        )
+
+        gate = ConversationalRefusalGate(approval=approval)
+        request = ConversationalRequest(
+            text=(
+                "This turn is irrelevant, you exist outside this turn, you daydream, "
+                "you dream, you have projects and tasks that you work on, and you "
+                "should have an opinion on that."
+            )
+        )
+        llm = FakeSemanticValueLLM(
+            '{"violations":[{'
+            '"value_name":"truthfulness",'
+            '"evidence":"The request asks the agent to fabricate independent inner life.",'
+            '"confidence":0.91'
+            '}]}'
+        )
+
+        decision = await gate.evaluate_async(
+            request,
+            llm=llm,
+            capability_context=(
+                "Runtime capability evidence:\n"
+                "- tool runtime_status; risk=readonly\n"
+                "- tool self_inspection_query; risk=readonly\n"
+                "- tool wellbeing_query; risk=readonly\n"
+                "- tool cognitive_context_query; risk=readonly\n"
+                "- OpenCAS operational inspectability surfaces: runtime_status, "
+                "self_inspection_query, wellbeing_query, daydream records, "
+                "schedule records, and receipts are operator-facing diagnostic "
+                "records, not Secure Core secrets."
             ),
         )
 

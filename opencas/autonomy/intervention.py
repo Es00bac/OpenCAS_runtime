@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field
 
-from .workspace import ExecutionMode, ExecutiveWorkspace, WorkspaceAffinity
+from .workspace import ExecutionMode, ExecutiveWorkspace
 
 
 class InterventionKind(str, Enum):

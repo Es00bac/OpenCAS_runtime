@@ -7,7 +7,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from opencas.memory.models import Episode
-from opencas.telemetry import EventKind, Tracer
+from opencas.runtime.cognition_bus import AffectiveEvent
+from opencas.telemetry import EventKind
 
 from .models import MusubiRecord, MusubiState, ResonanceDimension
 from .store import MusubiStore
@@ -111,7 +112,6 @@ class RelationalEngine:
     async def heartbeat(self, session_active: bool = False) -> MusubiState:
         """Adjust presence based on whether contact is currently happening."""
         assert self._state is not None
-        prev_musubi = self._state.musubi
         delta: Dict[str, float] = {}
         if session_active:
             delta[ResonanceDimension.PRESENCE.value] = 0.05
@@ -138,7 +138,6 @@ class RelationalEngine:
         """Evaluate an episode for musubi impact."""
         assert self._state is not None
         delta: Dict[str, float] = {}
-        dims = self._state.dimensions
 
         # Base presence bump from any interaction
         delta[ResonanceDimension.PRESENCE.value] = 0.05
@@ -233,6 +232,40 @@ class RelationalEngine:
         self._trace("boundary_respected", {"respected": respected, "musubi": self._state.musubi})
         return self._state
 
+    async def record_affective_event(self, event: AffectiveEvent) -> MusubiState:
+        """Apply bounded relational movement from a shared affective event."""
+        assert self._state is not None
+        magnitude = max(0.0, min(1.0, float(event.magnitude or 0.0)))
+        kind = event.kind
+        if kind == "affective.user_frustration":
+            delta = {
+                ResonanceDimension.TRUST.value: -0.08 * magnitude,
+                ResonanceDimension.RESONANCE.value: -0.05 * magnitude,
+                ResonanceDimension.ATTUNEMENT.value: -0.05 * magnitude,
+            }
+        elif kind == "affective.user_gratitude":
+            delta = {
+                ResonanceDimension.TRUST.value: 0.04 * magnitude,
+                ResonanceDimension.RESONANCE.value: 0.06 * magnitude,
+                ResonanceDimension.ATTUNEMENT.value: 0.04 * magnitude,
+            }
+        elif kind == "affective.goal_blocked":
+            delta = {
+                ResonanceDimension.PRESENCE.value: -0.03 * magnitude,
+                ResonanceDimension.ATTUNEMENT.value: -0.03 * magnitude,
+            }
+        else:
+            delta = {ResonanceDimension.PRESENCE.value: 0.02 * magnitude}
+        note = f"affective_event={kind}; magnitude={magnitude:.3f}"
+        await self._apply_deltas(
+            delta,
+            kind,
+            note=note,
+            episode_id=(event.evidence_ids[0] if event.evidence_ids else None),
+        )
+        self._trace("affective_event", {"kind": kind, "magnitude": magnitude, "musubi": self._state.musubi})
+        return self._state
+
     async def record_burst_event(
         self,
         trigger: str,
@@ -243,6 +276,15 @@ class RelationalEngine:
         episode_id: Optional[str] = None,
     ) -> None:
         """Record an explicit burst lifecycle marker in musubi history."""
+        if trigger == "cycle_burst_started":
+            self._trace(
+                "burst_event_skipped",
+                {
+                    "trigger": trigger,
+                    "reason": "zero_delta_cycle_heartbeat_not_relational_evidence",
+                },
+            )
+            return
         await self._apply_deltas(
             {},
             trigger,

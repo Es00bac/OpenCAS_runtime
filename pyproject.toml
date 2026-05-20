@@ -5,6 +5,14 @@ build-backend = "setuptools.build_meta"
 [tool.ruff]
 line-length = 120
 target-version = "py311"
+include = [
+    "opencas/*.py",
+    "opencas/**/*.py",
+    "scripts/*.py",
+    "scripts/**/*.py",
+    "tests/*.py",
+    "tests/**/*.py",
+]
 exclude = [
     ".venv",
     "venv",
@@ -17,7 +25,11 @@ exclude = [
 
 [tool.ruff.lint]
 select = ["E", "F", "I"]
-ignore = []
+ignore = ["E501", "I001"]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/**/*.py" = ["E402", "E702", "E722", "E731", "E741", "F841"]
+"tests/**/*.py" = ["E402", "E731", "E741", "F841"]
 
 [tool.mypy]
 python_version = "3.11"

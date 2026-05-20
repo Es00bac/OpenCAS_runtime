@@ -10,7 +10,7 @@ import logging
 import os
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -26,32 +26,65 @@ TOOL_SEMANTIC_HINTS: Dict[str, str] = {
     # --- Core retrieval (always available but hinted for richness) ---
     "search_memories": "Use when: searching past conversations, recalling what was discussed, finding previous interactions, querying episode memory, looking up history.",
     "recall_concepts": "Use when: recalling concepts, remembering ideas, retrieving knowledge from memory, what did we talk about, semantic memory lookup.",
+    "artifact_lookup": "Use when: asking who wrote or made a workspace file, where a file came from, what schedule/task/commitment is connected to a path, what changed about a file, or to recover provenance from path or checksum. Joins memory, schedules, tasks, receipts, commitments, plans, and provenance.",
+    "recall_autobiography": "Use when: asking what happened in past sessions, recalling continuity, recognizing past work, 'what did we do', 'do you remember when', lived experience across sessions. Returns a compact autobiographical reconstruction packet.",
     "web_search": "Use when: searching the internet, looking something up online, finding information on the web, googling, web query, search engine.",
     "web_fetch": "Use when: fetching a URL, retrieving a web page, downloading content from a link, reading a website, get page contents, HTTP GET a resource.",
     # --- Runtime / workflow ---
     "runtime_status": "Use when: checking runtime status, agent state, current configuration, operating roots, constraints, what is the agent doing.",
     "workflow_status": "Use when: checking workflow status, current plans, active tasks, what work is in progress.",
+    "self_inspection_query": "Use when: querying self-inspection, metacognition, response-shape drift, tool-use intent, recent reasoning-about-reasoning records, or grounded self-state evidence.",
+    "wellbeing_query": "Use when: checking wellbeing, maintenance state, affective pressure, fatigue, risk, drift, pacing, or how the agent is doing from inspectable wellbeing records.",
+    "cognitive_context_query": "Use when: querying cognitive state, active attention, working memory, prospective memory, learned skills, narrative evidence, surprise, counterfactuals, self-knowledge, or what the agent can focus on.",
     "workflow_create_commitment": "Use when: creating a commitment, tracking a goal, making a promise, setting a deadline, pledging to do something.",
     "workflow_update_commitment": "Use when: updating a commitment, changing a goal, modifying a deadline, progress update on a promise.",
     "workflow_list_commitments": "Use when: listing commitments, showing goals, what am I tracking, what have I promised, show deadlines.",
-    "workflow_create_writing_task": "Use when: writing a document, drafting an article, creating an essay, composing text, writing task, content creation.",
+    "workflow_get_commitment": "Use when: inspecting one commitment by id, reading commitment details, metadata, lifecycle, linked work, linked tasks, or promise evidence.",
+    "workflow_create_schedule": "Use when: creating an OpenCAS schedule, reminder, recurring task, future follow-up, calendar item, or Gmail alert monitor.",
+    "workflow_update_schedule": "Use when: editing or rescheduling an OpenCAS schedule, changing schedule title, objective, priority, tags, or status.",
+    "workflow_list_schedules": "Use when: listing OpenCAS schedules, finding schedule ids, checking reminders, future work, calendar items, or recurring tasks.",
+    "workflow_cancel_schedule": "Use when: cancelling or undoing an OpenCAS scheduled event, reminder, recurring task, future follow-up, or calendar item by schedule_id.",
+    "workflow_get_schedule": "Use when: inspecting one schedule by id, reading schedule details, run history, linked task id, recurrence, objective, metadata, or why a scheduled item exists.",
+    "workflow_create_writing_task": "Use when: writing prose, a document, an article, an essay, notes, or other non-software text artifact. Do not use for code/software project implementation.",
     "workflow_create_plan": "Use when: creating a plan, making a checklist, building a roadmap, planning steps, organizing work, structured approach.",
     "workflow_update_plan": "Use when: updating a plan, modifying checklist, changing roadmap, plan progress, revise plan.",
+    "workflow_list_plans": "Use when: listing active plans, finding plan ids, checking current plans, project roadmap inventory, or linked task plans.",
+    "workflow_get_plan": "Use when: inspecting one plan by id, reading full plan content, checking plan action history, or understanding a linked plan before editing.",
+    "workflow_cancel_task": "Use when: cancelling or deleting a BAA background task by task_id, stopping a queued or running repair/execution task.",
+    "workflow_list_tasks": "Use when: listing BAA background tasks, finding task ids, checking active or recent tasks, work queue, execution task inventory.",
+    "workflow_get_task": "Use when: inspecting one BAA task by id, task detail, lifecycle transitions, result, salvage packets, linked commitment, or cancellation target.",
     "workflow_repo_triage": "Use when: repo triage, project overview, codebase summary, audit the repository, what files are in the project, repository health.",
     "workflow_supervise_session": "Use when: supervising a session, delegating to another agent, launching Claude or Codex, operator control, managing sub-agents.",
+    "cli_discover_command": "Use when: learning a new Linux CLI command, checking whether a command exists, inspecting PATH, running --help, -h, help, --version, version, or man-page discovery before claiming a CLI cannot be used.",
     # --- Browser tools ---
-    "browser_start": "Use when: starting a browser session, opening a browser, preparing to inspect or interact with a web page.",
+    "browser_start": "Use when: starting a browser session only as setup before browser_navigate or browser_snapshot. It opens about:blank and is not useful by itself; do not use repeatedly or as standalone progress.",
     "browser_navigate": "Use when: navigating to a website, opening a URL, going to a web page, visiting a link, browsing.",
     "browser_snapshot": "Use when: taking a snapshot of a web page, reading page content, what is on the screen, accessibility snapshot.",
     "browser_click": "Use when: clicking a button on a web page, interacting with a page element, pressing a link.",
     "browser_type": "Use when: typing text into a web page field, filling in a form, entering input on a page.",
     "browser_take_screenshot": "Use when: screenshot a web page, capture the screen, visual snapshot of the browser.",
+    "browser_close": "Use when: closing one browser session after browser work is complete or aborted. Cleanup only, not standalone progress.",
+    "browser_clear": "Use when: clearing all browser sessions in a scope after work is complete or aborted. Cleanup only, not standalone progress.",
     # --- Google Workspace ---
     "google_workspace_gmail": "Use when: reading email, checking Gmail, sending email, inbox, messages.",
     "google_workspace_calendar": "Use when: calendar events, schedule, appointments, meetings, what is on my calendar.",
     "google_workspace_drive": "Use when: Google Drive files, documents, spreadsheets, shared files, cloud storage.",
+    "google_workspace_auth_status": "Use when: checking whether the local gws Google Workspace CLI is installed, configured, authenticated, or connected through keyring.",
+    "google_workspace_schema": "Use when: learning or inspecting gws Google Workspace CLI methods, schemas, parameters, service resources, and command shape.",
+    "google_workspace_readonly_api": "Use when: calling an allowlisted read-only gws Google Workspace API method after inspecting schema or method parameters.",
+    "google_workspace_gmail_headlines": "Use when: checking Gmail unread mail, inbox triage, recent email headlines, sender, subject, date, labels, or snippets.",
+    "google_workspace_gmail_get_message": "Use when: reading a specific Gmail message by message id using metadata, minimal, or full format.",
+    "google_workspace_calendar_schedule": "Use when: checking Google Calendar, today's calendar, upcoming events, meetings, appointments, or what is on the operator's schedule.",
+    "google_workspace_calendar_dedupe": "Use when: finding or cleaning duplicate Google Calendar events, calendar duplicate cleanup, exact duplicate events, or deleting redundant calendar copies with dry-run proof.",
+    "google_workspace_drive_search": "Use when: searching Google Drive files, Docs, Sheets, Slides, shared files, recent cloud documents, or drive metadata.",
     # --- PTY / terminal ---
-    "pty_interact": "Use when: interacting with a terminal, PTY session, shell, command-line interface, TUI application, running an interactive program.",
+    "pty_interact": "Use when: interacting with a terminal, PTY session, shell, command-line interface, TUI application, running an interactive program, or recovering after a non-interactive command lookup failed.",
+    "tui_playwright_open": "Use when: opening a terminal UI, curses app, editor, REPL, or other PTY-backed TUI that should be driven through browser automation with stable Playwright selectors.",
+    "tui_playwright_input": "Use when: typing text into an existing browser-targetable TUI session and then observing the terminal screen.",
+    "tui_playwright_keys": "Use when: sending named keys such as Ctrl-C, Escape, Enter, Tab, arrow keys, Home, End, PageUp, or PageDown to a browser-targetable TUI session.",
+    "tui_playwright_resize": "Use when: resizing a browser-targetable TUI terminal session before driving a full-screen terminal app.",
+    "tui_playwright_snapshot": "Use when: refreshing or inspecting an existing browser-targetable TUI terminal session without sending input.",
+    "tui_playwright_close": "Use when: closing and cleaning up a browser-targetable TUI terminal session.",
     "pty_remove": "Use when: removing a terminal session, cleaning up PTY, closing a shell session.",
     "pty_clear": "Use when: clearing a terminal, resetting PTY output, clean screen.",
     "pty_kill": "Use when: killing a process, terminating a terminal session, force stop.",
@@ -65,7 +98,7 @@ TOOL_SEMANTIC_HINTS: Dict[str, str] = {
     "fs_write_file": "Use when: writing a file, creating a file, saving content to disk, output to file, store data.",
     "grep_search": "Use when: searching code, grep, finding text in files, searching for a pattern, ripgrep, code search.",
     "glob_search": "Use when: finding files by name, glob pattern, file search, where is a file, locate files.",
-    "bash_run_command": "Use when: running a shell command, executing bash, system command, terminal command, run script.",
+    "bash_run_command": "Use when: running a shell command, executing bash, system command, terminal command, run script, checking command -v, --help, -h, help, man, or learning a new CLI tool.",
     "lsp_diagnostics": "Use when: language server diagnostics, code errors, type checking, linting, code issues, compiler errors.",
     "agent": "Use when: delegating to a sub-agent, spawning a helper task, parallel research, agent tool.",
     # --- Plan mode ---
@@ -118,7 +151,8 @@ class ToolEmbeddingIndex:
 
     ALWAYS_AVAILABLE: frozenset = field(
         default_factory=lambda: frozenset(
-            {"search_memories", "recall_concepts", "web_search", "web_fetch"}
+            {"search_memories", "recall_concepts", "artifact_lookup", "web_search", "web_fetch"}
+            | {"recall_autobiography"}
         )
     )
 

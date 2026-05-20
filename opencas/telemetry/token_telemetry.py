@@ -22,6 +22,7 @@ class TokenUsageEvent:
         latency_ms: int,
         source: str,
         cost: Optional[float] = None,
+        cached_prompt_tokens: Optional[int] = None,
         session_id: Optional[str] = None,
         task_id: Optional[str] = None,
         execution_mode: Optional[str] = None,
@@ -35,6 +36,7 @@ class TokenUsageEvent:
         self.latency_ms = latency_ms
         self.source = source
         self.cost = cost
+        self.cached_prompt_tokens = cached_prompt_tokens
         self.session_id = session_id
         self.task_id = task_id
         self.execution_mode = execution_mode
@@ -52,6 +54,8 @@ class TokenUsageEvent:
         }
         if self.cost is not None:
             d["cost"] = self.cost
+        if self.cached_prompt_tokens is not None:
+            d["cachedPromptTokens"] = self.cached_prompt_tokens
         if self.session_id is not None:
             d["sessionId"] = self.session_id
         if self.task_id is not None:
@@ -72,6 +76,12 @@ class TokenUsageEvent:
             latency_ms=int(data.get("latencyMs", 0)),
             source=str(data.get("source", "unknown")),
             cost=data.get("cost") if isinstance(data.get("cost"), (int, float)) else None,
+            cached_prompt_tokens=(
+                int(data["cachedPromptTokens"])
+                if isinstance(data.get("cachedPromptTokens"), (int, float))
+                and not isinstance(data.get("cachedPromptTokens"), bool)
+                else None
+            ),
             session_id=data.get("sessionId") if isinstance(data.get("sessionId"), str) else None,
             task_id=data.get("taskId") if isinstance(data.get("taskId"), str) else None,
             execution_mode=data.get("executionMode") if isinstance(data.get("executionMode"), str) else None,
@@ -198,6 +208,7 @@ class TokenTelemetry:
         provider: Optional[str] = None,
         source: Optional[str] = None,
         cost: Optional[float] = None,
+        cached_prompt_tokens: Optional[int] = None,
         session_id: Optional[str] = None,
         task_id: Optional[str] = None,
         execution_mode: Optional[str] = None,
@@ -217,6 +228,11 @@ class TokenTelemetry:
             latency_ms=_norm_int(latency_ms, 0),
             source=_norm_str(source, "chat"),
             cost=cost if isinstance(cost, (int, float)) and not isinstance(cost, bool) else None,
+            cached_prompt_tokens=(
+                _norm_int(cached_prompt_tokens, 0)
+                if cached_prompt_tokens is not None
+                else None
+            ),
             session_id=_norm_optional_str(session_id),
             task_id=_norm_optional_str(task_id),
             execution_mode=_norm_optional_str(execution_mode),

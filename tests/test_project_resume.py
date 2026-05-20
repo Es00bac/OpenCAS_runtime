@@ -61,14 +61,14 @@ async def test_project_resume_resolver_prefers_canonical_manuscript_path(resume_
         Episode(
             kind=EpisodeKind.OBSERVATION,
             content=(
-                "Artifact memory from workspace/Chronicles/4246/chronicle_4246.md\n"
-                "Title: Chronicle 4246\nChunk 1 of 1"
+                "Artifact memory from workspace/writing/4246/story_4246.md\n"
+                "Title: writing project 4246\nChunk 1 of 1"
             ),
             payload={
                 "payload": {
                     "artifact": {
-                        "path": "workspace/Chronicles/4246/chronicle_4246.md",
-                        "title": "Chronicle 4246",
+                        "path": "workspace/writing/4246/story_4246.md",
+                        "title": "writing project 4246",
                     }
                 }
             },
@@ -78,14 +78,14 @@ async def test_project_resume_resolver_prefers_canonical_manuscript_path(resume_
         Episode(
             kind=EpisodeKind.OBSERVATION,
             content=(
-                "Artifact memory from workspace/review/chronicle_4246_project_review.md\n"
-                "Title: Chronicle 4246 — Project State Review Summary\nChunk 1 of 1"
+                "Artifact memory from workspace/review/story_4246_project_review.md\n"
+                "Title: writing project 4246 — Project State Review Summary\nChunk 1 of 1"
             ),
             payload={
                 "payload": {
                     "artifact": {
-                        "path": "workspace/review/chronicle_4246_project_review.md",
-                        "title": "Chronicle 4246 — Project State Review Summary",
+                        "path": "workspace/review/story_4246_project_review.md",
+                        "title": "writing project 4246 — Project State Review Summary",
                     }
                 }
             },
@@ -93,8 +93,8 @@ async def test_project_resume_resolver_prefers_canonical_manuscript_path(resume_
     )
 
     primary_loop = ObjectiveLoop(
-        title="Write Chronicle 4246 as a 12 chapter novel and compile chronicle_4246.md.",
-        description="Write Chronicle 4246 as a 12 chapter novel and compile chronicle_4246.md.",
+        title="Write writing project 4246 as a 12 chapter novel and compile story_4246.md.",
+        description="Write writing project 4246 as a 12 chapter novel and compile story_4246.md.",
         status=ObjectiveStatus.ACTIVE,
         generated_task_ids=["task-1", "task-2"],
     )
@@ -103,15 +103,15 @@ async def test_project_resume_resolver_prefers_canonical_manuscript_path(resume_
     await work.save(
         WorkObject(
             stage=WorkStage.PROJECT,
-            content="Continue Chronicle 4246 manuscript from the existing compiled draft.",
+            content="Continue writing project 4246 manuscript from the existing compiled draft.",
             project_id=str(primary_loop.loop_id),
             meta={"loop_id": str(primary_loop.loop_id)},
         )
     )
 
     plan = await plans.create_plan(
-        "plan-chronicle",
-        content="Continue Chronicle 4246 from chronicle_4246.md rather than restarting.",
+        "plan-creative_writing",
+        content="Continue writing project 4246 from story_4246.md rather than restarting.",
         project_id=str(primary_loop.loop_id),
     )
     await plans.set_status(plan.plan_id, "active")
@@ -124,14 +124,31 @@ async def test_project_resume_resolver_prefers_canonical_manuscript_path(resume_
     )
 
     snapshot = await resolver.resolve(
-        "Should I continue Chronicle 4246 instead of starting over?"
+        "Should I continue writing project 4246 instead of starting over?"
     )
 
     assert snapshot is not None
-    assert snapshot.canonical_artifact_path == "workspace/Chronicles/4246/chronicle_4246.md"
+    assert snapshot.canonical_artifact_path == "workspace/writing/4246/story_4246.md"
     assert snapshot.active_work_count == 1
     assert snapshot.active_plan_count == 1
     assert snapshot.primary_loop_id == str(primary_loop.loop_id)
+
+
+def test_project_resume_artifact_priority_is_project_neutral():
+    from opencas.autonomy.project_resume import ProjectResumeResolver
+
+    story_path = "workspace/writing/4246/story_4246.md"
+    generic_path = "workspace/IncomeMission/2026/income_mission.md"
+    review_path = "workspace/review/income_mission_status_matrix.md"
+
+    assert (
+        ProjectResumeResolver._artifact_path_priority(story_path)
+        == ProjectResumeResolver._artifact_path_priority(generic_path)
+    )
+    assert (
+        ProjectResumeResolver._artifact_path_priority(generic_path)
+        > ProjectResumeResolver._artifact_path_priority(review_path)
+    )
 
 
 @pytest.mark.asyncio
@@ -148,14 +165,14 @@ async def test_context_builder_includes_project_resume_guidance(resume_stores):
         Episode(
             kind=EpisodeKind.OBSERVATION,
             content=(
-                "Artifact memory from workspace/Chronicles/4246/chronicle_4246.md\n"
-                "Title: Chronicle 4246\nChunk 1 of 1"
+                "Artifact memory from workspace/writing/4246/story_4246.md\n"
+                "Title: writing project 4246\nChunk 1 of 1"
             ),
             payload={
                 "payload": {
                     "artifact": {
-                        "path": "workspace/Chronicles/4246/chronicle_4246.md",
-                        "title": "Chronicle 4246",
+                        "path": "workspace/writing/4246/story_4246.md",
+                        "title": "writing project 4246",
                     }
                 }
             },
@@ -164,14 +181,14 @@ async def test_context_builder_includes_project_resume_guidance(resume_stores):
     await work.save(
         WorkObject(
             stage=WorkStage.PROJECT,
-            content="Continue Chronicle 4246 manuscript from the current draft.",
-            project_id="loop-chronicle",
+            content="Continue writing project 4246 manuscript from the current draft.",
+            project_id="loop-creative_writing",
         )
     )
     plan = await plans.create_plan(
-        "plan-chronicle",
-        content="Continue Chronicle 4246 from the current manuscript.",
-        project_id="loop-chronicle",
+        "plan-creative_writing",
+        content="Continue writing project 4246 from the current manuscript.",
+        project_id="loop-creative_writing",
     )
     await plans.set_status(plan.plan_id, "active")
 
@@ -200,12 +217,12 @@ async def test_context_builder_includes_project_resume_guidance(resume_stores):
     )
 
     manifest = await builder.build(
-        "Please continue Chronicle 4246 instead of starting over.",
+        "Please continue writing project 4246 instead of starting over.",
         session_id="s1",
     )
 
     assert "Project continuation evidence" in manifest.system.content
-    assert "workspace/Chronicles/4246/chronicle_4246.md" in manifest.system.content
+    assert "workspace/writing/4246/story_4246.md" in manifest.system.content
     assert "continue the existing project" in manifest.system.content.lower()
     assert "this is your own active creative work" in manifest.system.content
     assert "do not substitute research, naming, cataloging" in manifest.system.content
@@ -225,22 +242,22 @@ async def test_harness_suppresses_duplicate_objective_loops_and_reuses_existing_
     harness_store = resume_stores["harness"]
 
     primary = ObjectiveLoop(
-        title="Write Chronicle 4246 as a 12 chapter novel and compile chronicle_4246.md.",
-        description="Write Chronicle 4246 as a 12 chapter novel and compile chronicle_4246.md.",
+        title="Write writing project 4246 as a 12 chapter novel and compile story_4246.md.",
+        description="Write writing project 4246 as a 12 chapter novel and compile story_4246.md.",
         status=ObjectiveStatus.ACTIVE,
         generated_task_ids=["task-1", "task-2", "task-3"],
         meta={
             "objective_contract": {
-                "goal": "Write Chronicle 4246 as a 12 chapter novel and compile chronicle_4246.md.",
-                "expected_output": "One bounded continuation edit in workspace/Chronicles/4246/chronicle_4246.md.",
+                "goal": "Write writing project 4246 as a 12 chapter novel and compile story_4246.md.",
+                "expected_output": "One bounded continuation edit in workspace/writing/4246/story_4246.md.",
                 "success_check": "The edit advances the existing manuscript without restarting.",
                 "stop_condition": "Stop after one bounded edit or a concrete blocker.",
             }
         },
     )
     duplicate = ObjectiveLoop(
-        title="Complete Chronicle 4246 as a real novel-length third book, include revision and critique, and compile chronicle_4246.md.",
-        description="Complete Chronicle 4246 as a real novel-length third book, include revision and critique, and compile chronicle_4246.md.",
+        title="Complete writing project 4246 as a real novel-length third book, include revision and critique, and compile story_4246.md.",
+        description="Complete writing project 4246 as a real novel-length third book, include revision and critique, and compile story_4246.md.",
         status=ObjectiveStatus.ACTIVE,
     )
     await harness_store.save_loop(primary)
@@ -249,7 +266,7 @@ async def test_harness_suppresses_duplicate_objective_loops_and_reuses_existing_
     await work.save(
         WorkObject(
             stage=WorkStage.PROJECT,
-            content="Continue Chronicle 4246 from the existing compiled manuscript.",
+            content="Continue writing project 4246 from the existing compiled manuscript.",
             project_id=str(primary.loop_id),
             meta={"loop_id": str(primary.loop_id)},
         )
@@ -296,22 +313,22 @@ async def test_project_resume_lists_compact_project_ledger_entries(resume_stores
         Episode(
             kind=EpisodeKind.OBSERVATION,
             content=(
-                "Artifact memory from workspace/Chronicles/4246/chronicle_4246.md\n"
-                "Title: Chronicle 4246\nChunk 1 of 1"
+                "Artifact memory from workspace/writing/4246/story_4246.md\n"
+                "Title: writing project 4246\nChunk 1 of 1"
             ),
             payload={
                 "payload": {
                     "artifact": {
-                        "path": "workspace/Chronicles/4246/chronicle_4246.md",
-                        "title": "Chronicle 4246",
+                        "path": "workspace/writing/4246/story_4246.md",
+                        "title": "writing project 4246",
                     }
                 }
             },
         )
     )
     loop = ObjectiveLoop(
-        title="Write Chronicle 4246 as a 12 chapter novel and compile chronicle_4246.md.",
-        description="Write Chronicle 4246 as a 12 chapter novel and compile chronicle_4246.md.",
+        title="Write writing project 4246 as a 12 chapter novel and compile story_4246.md.",
+        description="Write writing project 4246 as a 12 chapter novel and compile story_4246.md.",
         status=ObjectiveStatus.ACTIVE,
         generated_task_ids=["task-1"],
     )
@@ -319,14 +336,14 @@ async def test_project_resume_lists_compact_project_ledger_entries(resume_stores
     await work.save(
         WorkObject(
             stage=WorkStage.PROJECT,
-            content="Continue Chronicle 4246 from the existing compiled manuscript.",
+            content="Continue writing project 4246 from the existing compiled manuscript.",
             project_id=str(loop.loop_id),
             meta={"loop_id": str(loop.loop_id)},
         )
     )
     plan = await plans.create_plan(
-        "plan-chronicle",
-        content="Continue Chronicle 4246 from the current compiled manuscript instead of restarting.",
+        "plan-creative_writing",
+        content="Continue writing project 4246 from the current compiled manuscript instead of restarting.",
         project_id=str(loop.loop_id),
     )
     await plans.set_status(plan.plan_id, "active")
@@ -341,8 +358,8 @@ async def test_project_resume_lists_compact_project_ledger_entries(resume_stores
     entries = await resolver.list_projects(limit=10)
 
     assert len(entries) == 1
-    assert entries[0].display_name == "Chronicle 4246"
-    assert entries[0].canonical_artifact_path == "workspace/Chronicles/4246/chronicle_4246.md"
+    assert entries[0].display_name == "writing project 4246"
+    assert entries[0].canonical_artifact_path == "workspace/writing/4246/story_4246.md"
     assert entries[0].synopsis
     assert "existing compiled manuscript" in entries[0].synopsis.lower()
     assert "objective_loop" in entries[0].source_surfaces
@@ -359,13 +376,13 @@ async def test_project_resume_surfaces_retry_state_and_latest_salvage_packet(res
     harness_store = resume_stores["harness"]
 
     loop = ObjectiveLoop(
-        title="Continue Chronicle 4246",
-        description="Continue Chronicle 4246",
+        title="Continue writing project 4246",
+        description="Continue writing project 4246",
         status=ObjectiveStatus.ACTIVE,
         meta={
             "objective_contract": {
-                "goal": "Continue Chronicle 4246",
-                "expected_output": "A focused edit in workspace/Chronicles/4246/chronicle_4246.md.",
+                "goal": "Continue writing project 4246",
+                "expected_output": "A focused edit in workspace/writing/4246/story_4246.md.",
                 "success_check": "The existing manuscript changes in a bounded way.",
                 "stop_condition": "Stop if the next attempt lacks new evidence or artifact progress.",
             }
@@ -375,7 +392,7 @@ async def test_project_resume_surfaces_retry_state_and_latest_salvage_packet(res
     await work.save(
         WorkObject(
             stage=WorkStage.PROJECT,
-            content="Continue Chronicle 4246 from the existing manuscript.",
+            content="Continue writing project 4246 from the existing manuscript.",
             project_id=str(loop.loop_id),
             meta={"loop_id": str(loop.loop_id)},
         )
@@ -388,7 +405,7 @@ async def test_project_resume_surfaces_retry_state_and_latest_salvage_packet(res
     await task_store.connect()
 
     task = RepairTask(
-        objective="Continue Chronicle 4246 from the existing manuscript.",
+        objective="Continue writing project 4246 from the existing manuscript.",
         project_id=str(loop.loop_id),
         meta={"resume_project": {"signature": sig}},
     )
@@ -396,8 +413,8 @@ async def test_project_resume_surfaces_retry_state_and_latest_salvage_packet(res
     packet = build_salvage_packet(
         task,
         outcome=AttemptOutcome.VERIFY_FAILED.value,
-        canonical_artifact_path="workspace/Chronicles/4246/chronicle_4246.md",
-        artifact_paths_touched=["workspace/Chronicles/4246/chronicle_4246.md"],
+        canonical_artifact_path="workspace/writing/4246/story_4246.md",
+        artifact_paths_touched=["workspace/writing/4246/story_4246.md"],
         tool_calls=[{"name": "fs_write_file"}],
     )
     await task_store.save_salvage_packet(packet)
@@ -421,7 +438,7 @@ async def test_project_resume_surfaces_retry_state_and_latest_salvage_packet(res
     assert entry.last_salvage_outcome == AttemptOutcome.VERIFY_FAILED.value
     assert entry.latest_salvage_meaningful_progress_signal == packet.meaningful_progress_signal
     assert entry.objective_contract["expected_output"] == (
-        "A focused edit in workspace/Chronicles/4246/chronicle_4246.md."
+        "A focused edit in workspace/writing/4246/story_4246.md."
     )
     assert entry.to_meta()["objective_contract"]["stop_condition"] == (
         "Stop if the next attempt lacks new evidence or artifact progress."

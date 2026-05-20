@@ -9,6 +9,8 @@ from opencas.cognition import (
     build_pre_turn_self_inspection_record,
 )
 
+from .audit_mode import is_audit_only_text
+
 if TYPE_CHECKING:
     from .agent_loop import AgentRuntime
 
@@ -23,6 +25,7 @@ async def record_pre_turn_self_inspection(
     store = getattr(runtime, "self_inspection_store", None)
     if store is None:
         return
+    audit_only = is_audit_only_text(user_input)
     try:
         active_commitments = []
         commitment_store = getattr(runtime, "commitment_store", None)
@@ -33,6 +36,8 @@ async def record_pre_turn_self_inspection(
             user_input=user_input,
             active_commitments=active_commitments,
         )
+        if audit_only:
+            record.meta["audit_only"] = True
         await store.save(record)
     except Exception as exc:
         runtime._trace(
@@ -51,11 +56,14 @@ async def record_post_turn_self_inspection(
     pre_somatic_state: Any,
     captured_commitments: list[Any],
     tool_use_inspections: list[Any],
+    tool_call_transits: list[Any] | None = None,
+    tool_chain_summary: Any | None = None,
 ) -> None:
     """Persist response-shape, valence-source, tool-use, and promise-gap evidence."""
     store = getattr(runtime, "self_inspection_store", None)
     if store is None:
         return
+    audit_only = is_audit_only_text(user_input, assistant_meta_extra)
     try:
         integrity_review = {}
         if isinstance(assistant_meta_extra, dict):
@@ -69,10 +77,14 @@ async def record_post_turn_self_inspection(
             captured_commitments=captured_commitments,
             integrity_review=integrity_review,
             tool_use_inspections=tool_use_inspections,
+            tool_call_transits=tool_call_transits or [],
+            tool_chain_summary=tool_chain_summary,
             pre_somatic_state=pre_somatic_state,
             post_somatic_state=post_somatic_state,
             recent_records=recent_records,
         )
+        if audit_only:
+            record.meta["audit_only"] = True
         await store.save(record)
     except Exception as exc:
         runtime._trace(

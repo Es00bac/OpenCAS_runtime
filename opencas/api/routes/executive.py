@@ -13,6 +13,7 @@ router = APIRouter(tags=["executive"])
 
 class ExecutiveSnapshotResponse(BaseModel):
     intention: Optional[str]
+    intention_source: Optional[str] = None
     active_goals: List[str]
     parked_goal_count: int = 0
     parked_goals: List[str] = []
@@ -81,6 +82,39 @@ def _plan_to_dict(p: Any) -> Dict[str, Any]:
     }
 
 
+def _normalize_snapshot(snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove stale work-driven intention from operator-facing executive state."""
+
+    payload = dict(snapshot)
+    intention_source = payload.get("intention_source")
+    has_foreground = bool(payload.get("active_goals")) or int(payload.get("queue_size") or 0) > 0
+    if intention_source == "active_work" and payload.get("intention") and not has_foreground:
+        payload["intention"] = None
+        payload["intention_source"] = "stale_active_work"
+    return payload
+
+
+def _snapshot_response(snapshot: Dict[str, Any]) -> ExecutiveSnapshotResponse:
+    snapshot = _normalize_snapshot(snapshot)
+    return ExecutiveSnapshotResponse(
+        intention=snapshot.get("intention"),
+        intention_source=snapshot.get("intention_source"),
+        active_goals=snapshot.get("active_goals", []),
+        parked_goal_count=snapshot.get("parked_goal_count", 0),
+        parked_goals=snapshot.get("parked_goals", []),
+        parked_goal_metadata=snapshot.get("parked_goal_metadata", {}),
+        archived_parked_goal_count=snapshot.get("archived_parked_goal_count", 0),
+        archived_parked_goals=snapshot.get("archived_parked_goals", []),
+        weighted_load=snapshot.get("weighted_load", 0.0),
+        capacity_remaining=snapshot.get("capacity_remaining", 0),
+        queue_size=snapshot.get("queue_size", 0),
+        queue_stages=snapshot.get("queue_stages", []),
+        queue_metadata=snapshot.get("queue_metadata", []),
+        recommend_pause=snapshot.get("recommend_pause", False),
+        timestamp=snapshot.get("timestamp", ""),
+    )
+
+
 def build_executive_router(runtime: Any) -> APIRouter:
     """Build executive routes wired to *runtime*."""
     r = APIRouter(prefix="/api/executive", tags=["executive"])
@@ -108,22 +142,7 @@ def build_executive_router(runtime: Any) -> APIRouter:
                 pass
 
         return ExecutiveSummaryResponse(
-            snapshot=ExecutiveSnapshotResponse(
-                intention=snapshot.get("intention"),
-                active_goals=snapshot.get("active_goals", []),
-                parked_goal_count=snapshot.get("parked_goal_count", 0),
-                parked_goals=snapshot.get("parked_goals", []),
-                parked_goal_metadata=snapshot.get("parked_goal_metadata", {}),
-                archived_parked_goal_count=snapshot.get("archived_parked_goal_count", 0),
-                archived_parked_goals=snapshot.get("archived_parked_goals", []),
-                weighted_load=snapshot.get("weighted_load", 0.0),
-                capacity_remaining=snapshot.get("capacity_remaining", 0),
-                queue_size=snapshot.get("queue_size", 0),
-                queue_stages=snapshot.get("queue_stages", []),
-                queue_metadata=snapshot.get("queue_metadata", []),
-                recommend_pause=snapshot.get("recommend_pause", False),
-                timestamp=snapshot.get("timestamp", ""),
-            ),
+            snapshot=_snapshot_response(snapshot),
             commitments=commitments,
             plans=plans,
         )
@@ -131,22 +150,7 @@ def build_executive_router(runtime: Any) -> APIRouter:
     @r.get("/snapshot", response_model=ExecutiveSnapshotResponse)
     async def get_executive_snapshot() -> ExecutiveSnapshotResponse:
         snapshot = runtime.ctx.executive.snapshot()
-        return ExecutiveSnapshotResponse(
-            intention=snapshot.get("intention"),
-            active_goals=snapshot.get("active_goals", []),
-            parked_goal_count=snapshot.get("parked_goal_count", 0),
-            parked_goals=snapshot.get("parked_goals", []),
-            parked_goal_metadata=snapshot.get("parked_goal_metadata", {}),
-            archived_parked_goal_count=snapshot.get("archived_parked_goal_count", 0),
-            archived_parked_goals=snapshot.get("archived_parked_goals", []),
-            weighted_load=snapshot.get("weighted_load", 0.0),
-            capacity_remaining=snapshot.get("capacity_remaining", 0),
-            queue_size=snapshot.get("queue_size", 0),
-            queue_stages=snapshot.get("queue_stages", []),
-            queue_metadata=snapshot.get("queue_metadata", []),
-            recommend_pause=snapshot.get("recommend_pause", False),
-            timestamp=snapshot.get("timestamp", ""),
-        )
+        return _snapshot_response(snapshot)
 
     @r.post("/park-goal", response_model=ExecutiveSnapshotResponse)
     async def park_goal(req: ParkGoalRequest) -> ExecutiveSnapshotResponse:
@@ -157,22 +161,7 @@ def build_executive_router(runtime: Any) -> APIRouter:
             source_artifact=req.source_artifact,
         )
         snapshot = runtime.ctx.executive.snapshot()
-        return ExecutiveSnapshotResponse(
-            intention=snapshot.get("intention"),
-            active_goals=snapshot.get("active_goals", []),
-            parked_goal_count=snapshot.get("parked_goal_count", 0),
-            parked_goals=snapshot.get("parked_goals", []),
-            parked_goal_metadata=snapshot.get("parked_goal_metadata", {}),
-            archived_parked_goal_count=snapshot.get("archived_parked_goal_count", 0),
-            archived_parked_goals=snapshot.get("archived_parked_goals", []),
-            weighted_load=snapshot.get("weighted_load", 0.0),
-            capacity_remaining=snapshot.get("capacity_remaining", 0),
-            queue_size=snapshot.get("queue_size", 0),
-            queue_stages=snapshot.get("queue_stages", []),
-            queue_metadata=snapshot.get("queue_metadata", []),
-            recommend_pause=snapshot.get("recommend_pause", False),
-            timestamp=snapshot.get("timestamp", ""),
-        )
+        return _snapshot_response(snapshot)
 
     @r.get("/commitments", response_model=List[CommitmentResponse])
     async def list_commitments(status: Optional[str] = "active", limit: int = 50) -> List[CommitmentResponse]:

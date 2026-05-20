@@ -3,7 +3,7 @@
 import pytest
 import pytest_asyncio
 
-from opencas.memory import EdgeKind, Episode, EpisodeEdge, EpisodeKind, MemoryStore
+from opencas.memory import Episode, EpisodeEdge, EpisodeKind, MemoryStore
 
 
 @pytest_asyncio.fixture

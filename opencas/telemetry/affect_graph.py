@@ -6,17 +6,13 @@ emotional states and code quality outcomes through the provenance chain.
 
 from __future__ import annotations
 
-from collections import defaultdict
-from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List
 
 from .affect_models import (
     AffectDimension,
     AffectQualityEdge,
-    AffectSnapshot,
     AffectTrajectory,
     QualitySignal,
-    TeamHealthAlert,
 )
 from .affect_store import AffectStore
 
@@ -53,10 +49,16 @@ class AffectQualityGraph:
         """Build correlation edges between affect and quality for an artifact."""
         trajectories = list(self.store.iter_trajectories(artifact_id=artifact_id))
         quality_signals = list(self.store.iter_quality_signals(artifact_id=artifact_id))
+        existing_pairs = {
+            (str(edge.trajectory_id), str(edge.quality_signal_id))
+            for edge in self.store.iter_edges(artifact_id=artifact_id)
+        }
 
         edges: List[AffectQualityEdge] = []
         for traj in trajectories:
             for qsig in quality_signals:
+                if (str(traj.trajectory_id), str(qsig.signal_id)) in existing_pairs:
+                    continue
                 if not traj.snapshots:
                     continue
                 # Affect must precede quality signal
@@ -173,10 +175,8 @@ class AffectQualityGraph:
             risk_factors.append("negative_valence")
 
         latest_quality = quality_signals[-1] if quality_signals else None
-        quality_risk = False
         if latest_quality and latest_quality.composite_quality is not None:
             if latest_quality.composite_quality < 0.4:
-                quality_risk = True
                 risk_factors.append("low_quality")
 
         predictive_edges = [e for e in edges if e.is_predictive]

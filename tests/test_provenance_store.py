@@ -242,6 +242,40 @@ def test_transition_history_is_immutable_across_appends_and_queries(tmp_path: Pa
     ]
 
 
+def test_transition_history_skips_malformed_legacy_lines(tmp_path: Path) -> None:
+    store = ps.ProvenanceEntryStore(tmp_path / "provenance.jsonl")
+    first = _transition(
+        session_id="session-malformed",
+        entity_id="entity-a",
+        kind=ps.ProvenanceTransitionKind.CHECK,
+        status="checked",
+        recorded_at="2026-04-18T12:15:00+00:00",
+    )
+    second = _transition(
+        session_id="session-malformed",
+        entity_id="entity-a",
+        kind=ps.ProvenanceTransitionKind.MUTATION,
+        status="mutated",
+        recorded_at="2026-04-18T12:16:00+00:00",
+    )
+    transition_path = tmp_path / "provenance.transitions.jsonl"
+    transition_path.write_text(
+        "\n".join(
+            [
+                ps.format_provenance_transition(first),
+                '{"v":"1","transition_id":"truncated"',
+                ps.format_provenance_transition(second),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert store.list_transition_history(limit=None) == [first, second]
+    assert store.get_current_status(session_id="session-malformed", entity_id="entity-a") == second
+    assert store._last_transition_parse_errors == 1
+
+
 def test_current_status_uses_latest_effective_state_after_mixed_histories(tmp_path: Path) -> None:
     store = ps.ProvenanceEntryStore(tmp_path / "provenance.jsonl")
     history = [
@@ -288,6 +322,74 @@ def test_current_status_uses_latest_effective_state_after_mixed_histories(tmp_pa
     assert store.get_current_status(session_id="session-3", entity_id="entity-a") == history[2]
     assert store.get_current_status(session_id="session-3", entity_id="entity-b") == history[3]
     assert store.get_current_status(session_id="session-3", entity_id="missing") is None
+
+
+def test_transition_log_rotation_archives_and_checkpoints_current_status(tmp_path: Path) -> None:
+    store = ps.ProvenanceEntryStore(
+        tmp_path / "provenance.jsonl",
+        transition_max_bytes=1,
+        transition_archive_limit=3,
+    )
+    first = _transition(
+        session_id="session-rotate",
+        entity_id="entity-a",
+        kind=ps.ProvenanceTransitionKind.CHECK,
+        status="checked",
+        recorded_at="2026-04-18T12:30:00+00:00",
+    )
+    second = _transition(
+        session_id="session-rotate",
+        entity_id="entity-a",
+        kind=ps.ProvenanceTransitionKind.MUTATION,
+        status="mutated",
+        recorded_at="2026-04-18T12:31:00+00:00",
+    )
+
+    store.record_transition(first)
+    store.record_transition(second)
+
+    archives = sorted(tmp_path.glob("provenance.transitions.*.jsonl"))
+    active_lines = (tmp_path / "provenance.transitions.jsonl").read_text(encoding="utf-8").splitlines()
+    active_records = [ps.parse_provenance_transition(line) for line in active_lines]
+
+    assert len(archives) == 1
+    assert archives[0].read_text(encoding="utf-8").splitlines() == [
+        ps.format_provenance_transition(first)
+    ]
+    assert active_records[0].details["rotation_checkpoint"] is True
+    assert active_records[0].details["checkpoint_source_transition_id"] == first.transition_id
+    assert active_records[1] == second
+    assert store.get_current_status(session_id="session-rotate", entity_id="entity-a") == second
+
+
+def test_transition_log_rotation_prunes_archives_without_losing_current_status(tmp_path: Path) -> None:
+    store = ps.ProvenanceEntryStore(
+        tmp_path / "provenance.jsonl",
+        transition_max_bytes=1,
+        transition_archive_limit=1,
+    )
+    records = [
+        _transition(
+            session_id="session-prune",
+            entity_id=f"entity-{index}",
+            kind=ps.ProvenanceTransitionKind.CHECK,
+            status="checked",
+            recorded_at=f"2026-04-18T12:4{index}:00+00:00",
+        )
+        for index in range(3)
+    ]
+
+    for record in records:
+        store.record_transition(record)
+
+    archives = sorted(tmp_path.glob("provenance.transitions.*.jsonl"))
+    current = store.list_current_status(limit=None, session_id="session-prune")
+    current_by_entity = {record.entity_id: record for record in current}
+
+    assert len(archives) == 1
+    assert sorted(current_by_entity) == ["entity-0", "entity-1", "entity-2"]
+    assert current_by_entity["entity-2"] == records[2]
+    assert current_by_entity["entity-0"].details["rotation_checkpoint"] is True
 
 
 @pytest.mark.parametrize(

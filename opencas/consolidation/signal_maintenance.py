@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Set
 import numpy as np
 
 from opencas.memory import EdgeKind, EpisodeEdge, Memory
+from opencas.telemetry import EventKind
 
 from .models import SalienceUpdate
 from .signal_ranker import SignalScore

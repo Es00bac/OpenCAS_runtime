@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import re
+import asyncio
+import json
 from typing import Any, Dict, List, Optional
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
@@ -11,6 +13,7 @@ from pydantic import BaseModel, Field
 from pathlib import Path
 
 from opencas.api.chat_service import (
+    chat_inflight_snapshot,
     chat_upload_dir,
     perform_chat_turn,
     store_uploaded_file,
@@ -21,6 +24,7 @@ from opencas.bootstrap.task_beacon import (
     runtime_task_beacon_fragments,
 )
 from opencas.bootstrap.live_objective import read_tasklist_live_objective
+from opencas.context.builder import DEFAULT_INTERACTION_PROMPT_BUDGET
 from opencas.api.voice_service import (
     synthesize_speech,
     transcribe_audio,
@@ -123,6 +127,10 @@ class ChatSendRequest(BaseModel):
     speak_response: bool = False
     voice_prefer_local: bool = True
     voice_expressive: bool = False
+    suppress_body_double_voice: bool = True
+    actor_type: Optional[str] = None
+    actor_label: Optional[str] = None
+    actor_note: Optional[str] = None
 
 
 class CreateSessionResponse(BaseModel):
@@ -145,6 +153,7 @@ class ChatContextSummaryResponse(BaseModel):
     somatic: Optional[Dict[str, Any]] = None
     lane: Dict[str, Any] = Field(default_factory=dict)
     last_lane: Dict[str, Any] = Field(default_factory=dict)
+    context_budget: Dict[str, Any] = Field(default_factory=dict)
     executive: Dict[str, Any] = Field(default_factory=dict)
     current_work: Optional[Dict[str, Any]] = None
     tasks: Dict[str, Any] = Field(default_factory=dict)
@@ -174,6 +183,8 @@ def _human_title(text: Optional[str], fallback: str = "Untitled") -> str:
 def _task_ui_status(stage: str, status: str) -> str:
     stage_key = str(stage or "").strip().lower()
     status_key = str(status or "").strip().lower()
+    if status_key == "held":
+        return "held"
     if stage_key == "done" or status_key in {"completed", "success"}:
         return "completed"
     if stage_key == "failed" or status_key in {"failed", "error"}:
@@ -227,7 +238,7 @@ def _current_work_from_queue_items(queue_items: List[Dict[str, Any]]) -> Optiona
 
 
 def _runtime_intention_source(runtime: Any) -> Optional[str]:
-    executive = getattr(runtime, "executive", None) or getattr(getattr(runtime, "ctx", None), "executive", None)
+    executive = _runtime_executive(runtime)
     return getattr(executive, "intention_source", None)
 
 
@@ -271,11 +282,148 @@ def _tasklist_section_for_title(workspace_root: Any, title: Any) -> Optional[str
     return None
 
 
+def _bounded_task_beacon_payload(runtime: Any, workspace_root: Any) -> Dict[str, Any]:
+    """Build task beacon details only when the source is small enough for chrome."""
+
+    tasklist_path = Path(workspace_root) / "TaskList.md" if workspace_root else None
+    try:
+        if tasklist_path is not None and tasklist_path.exists() and tasklist_path.stat().st_size > 240_000:
+            return {
+                "available": False,
+                "source": str(tasklist_path),
+                "error": "task_beacon_deferred_large_tasklist",
+                "headline": "task beacon deferred",
+                "counts": {},
+                "items": [],
+            }
+        return public_task_beacon_payload(
+            build_task_beacon(
+                workspace_root,
+                limit_per_state=1,
+                live_fragments=runtime_task_beacon_fragments(runtime),
+            ),
+            include_details=True,
+            include_items=True,
+        )
+    except Exception as exc:
+        return {
+            "available": False,
+            "source": str(tasklist_path) if tasklist_path else "",
+            "error": f"task_beacon_timeout:{type(exc).__name__}",
+            "headline": "task beacon unavailable",
+            "counts": {},
+            "items": [],
+        }
+
+
+def _fast_task_beacon_payload(workspace_root: Any) -> Dict[str, Any]:
+    """Return TaskList availability without parsing the whole beacon."""
+
+    tasklist_path = Path(workspace_root) / "TaskList.md" if workspace_root else None
+    try:
+        available = bool(tasklist_path is not None and tasklist_path.exists())
+        size_bytes = tasklist_path.stat().st_size if available else 0
+    except OSError:
+        available = False
+        size_bytes = 0
+    return {
+        "available": available,
+        "source": str(tasklist_path) if tasklist_path else "",
+        "headline": "task beacon available" if available else "task beacon unavailable",
+        "counts": {},
+        "items": [],
+        "summary_mode": "availability_fast",
+        "size_bytes": size_bytes,
+    }
+
+
+def _runtime_executive(runtime: Any) -> Any:
+    """Return the runtime executive source used by dashboard truth endpoints."""
+
+    return getattr(getattr(runtime, "ctx", None), "executive", None) or getattr(runtime, "executive", None)
+
+
+def _fast_workflow_status(runtime: Any) -> Dict[str, Any]:
+    """Return dashboard workflow chrome from in-memory executive state only."""
+
+    executive = _runtime_executive(runtime)
+    recommend_pause = getattr(executive, "recommend_pause", False)
+    if callable(recommend_pause):
+        try:
+            recommend_pause = recommend_pause()
+        except Exception:
+            recommend_pause = False
+    active_goals = list(getattr(executive, "active_goals", []) or [])
+    queue = getattr(executive, "queue", None)
+    queue_items = list(getattr(queue, "items", []) or []) if queue is not None else []
+    return {
+        "summary_mode": "availability_fast",
+        "work": {"items": []},
+        "executive": {
+            "intention": getattr(executive, "intention", None),
+            "active_goals": active_goals,
+            "recommend_pause": bool(recommend_pause),
+            "queued_work_count": len(queue_items),
+            "capacity_remaining": getattr(executive, "capacity_remaining", 0),
+            "queue": {"items": []},
+        },
+        "consolidation": {},
+    }
+
+
+async def _bounded_workflow_status(runtime: Any, *, limit: int) -> Dict[str, Any]:
+    """Return workflow status without letting a slow store block chat chrome."""
+
+    try:
+        return await asyncio.wait_for(runtime.workflow_status(limit=limit), timeout=0.15)
+    except Exception as exc:
+        executive = _runtime_executive(runtime)
+        recommend_pause = getattr(executive, "recommend_pause", False)
+        if callable(recommend_pause):
+            try:
+                recommend_pause = recommend_pause()
+            except Exception:
+                recommend_pause = False
+        return {
+            "degraded": True,
+            "degraded_reason": f"workflow_status_timeout:{type(exc).__name__}",
+            "work": {"items": []},
+            "executive": {
+                "intention": getattr(executive, "intention", None),
+                "active_goals": list(getattr(executive, "active_goals", []) or []),
+                "recommend_pause": bool(recommend_pause),
+                "queued_work_count": 0,
+                "capacity_remaining": getattr(executive, "capacity_remaining", 0),
+                "queue": {"items": []},
+            },
+            "consolidation": {},
+        }
+
+
 def _normalize_session_status(status: str) -> str:
     normalized = str(status or "").strip().lower() or "active"
     if normalized not in {"active", "archived", "all"}:
         raise HTTPException(status_code=400, detail=f"Unsupported session status: {status}")
     return normalized
+
+
+def _parse_region_selection(value: Optional[str]) -> Dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        payload = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail="selection must be valid JSON") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="selection must be a JSON object")
+    selection: Dict[str, Any] = {}
+    for key in ("x", "y", "width", "height"):
+        if key in payload:
+            try:
+                selection[key] = int(payload[key])
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"selection.{key} must be an integer") from exc
+    return selection
 
 
 def build_chat_router(runtime: Any) -> APIRouter:
@@ -381,6 +529,7 @@ def build_chat_router(runtime: Any) -> APIRouter:
     async def get_context_summary(
         session_id: Optional[str] = None,
         task_limit: int = 6,
+        include_details: bool = False,
     ) -> ChatContextSummaryResponse:
         sid = session_id or runtime.ctx.config.session_id or "default"
         somatic = None
@@ -406,24 +555,74 @@ def build_chat_router(runtime: Any) -> APIRouter:
         last_lane: Dict[str, Any] = build_runtime_lane_meta(runtime, prefer_current=True)
         if last_lane == lane:
             last_lane = {}
+        context_budget: Dict[str, Any] = {}
+        llm = getattr(runtime.ctx, "llm", None)
+        metadata_fn = getattr(llm, "model_context_metadata", None)
+        if callable(metadata_fn):
+            try:
+                context_budget = dict(metadata_fn() or {})
+            except Exception:
+                context_budget = {}
+        builder = getattr(runtime, "builder", None)
+        raw_prompt_budget = context_budget.get("prompt_context_budget")
+        effective_budget_fn = getattr(builder, "_effective_prompt_context_budget", None)
+        try:
+            raw_int = int(raw_prompt_budget)
+        except (TypeError, ValueError):
+            raw_int = 0
+        if raw_int > 0:
+            effective_prompt_budget = (
+                int(effective_budget_fn(raw_int))
+                if callable(effective_budget_fn)
+                else max(1024, min(raw_int, DEFAULT_INTERACTION_PROMPT_BUDGET))
+            )
+            context_budget["model_prompt_context_budget"] = raw_int
+            context_budget["prompt_context_budget"] = effective_prompt_budget
+            context_budget["effective_prompt_context_budget"] = effective_prompt_budget
+            context_budget["prompt_budget_policy"] = (
+                "standard_interaction_cap"
+                if effective_prompt_budget < raw_int
+                else "model_metadata"
+            )
+        context_budget.setdefault("prompt_cache_strategy", "stable_prefix_then_volatile_runtime_facts")
+        context_budget.setdefault(
+            "volatile_prompt_fields_late",
+            [
+                "current_time",
+                "model_lane",
+                "temporal_agenda",
+                "daydream_continuity",
+                "context_proposals",
+                "thread_registry",
+                "wellbeing",
+            ],
+        )
+        if builder is not None and getattr(builder, "max_tokens", None):
+            context_budget["builder_current_prompt_budget"] = getattr(builder, "max_tokens")
+        context_budget.setdefault(
+            "active_prompt_budget",
+            context_budget.get("prompt_context_budget")
+            or context_budget.get("builder_current_prompt_budget"),
+        )
 
-        workflow = await runtime.workflow_status(limit=task_limit)
+        workflow = (
+            await _bounded_workflow_status(runtime, limit=task_limit)
+            if include_details
+            else _fast_workflow_status(runtime)
+        )
         workspace_root = getattr(getattr(runtime.ctx, "config", None), "workspace_root", None)
-        task_beacon = public_task_beacon_payload(
-            build_task_beacon(
-                workspace_root,
-                limit_per_state=1,
-                live_fragments=runtime_task_beacon_fragments(runtime),
-            ),
-            include_details=True,
-            include_items=True,
+        task_beacon = (
+            _bounded_task_beacon_payload(runtime, workspace_root)
+            if include_details
+            else _fast_task_beacon_payload(workspace_root)
         )
         work_items = workflow.get("work", {}).get("items", []) or []
         current_work = _current_work_from_items(work_items)
         executive_payload = workflow.get("executive", {}) or {}
         effective_intention = executive_payload.get("intention")
         intention_source = _runtime_intention_source(runtime) or "workflow"
-        tasklist_live_objective = read_tasklist_live_objective(workspace_root)
+        tasklist_live_objective = read_tasklist_live_objective(workspace_root) if include_details else None
+        priority_intention = await _active_priority_intention(runtime)
         if current_work is None:
             current_work = _current_work_from_queue_items(
                 ((executive_payload.get("queue") or {}).get("items") or [])
@@ -431,10 +630,16 @@ def build_chat_router(runtime: Any) -> APIRouter:
             if current_work is not None:
                 effective_intention = current_work["title"]
                 intention_source = "active_queue"
+            elif priority_intention:
+                effective_intention = priority_intention
+                intention_source = "cognitive_life_priority"
             elif tasklist_live_objective:
                 effective_intention = tasklist_live_objective
                 intention_source = "tasklist_live_objective"
-            elif _tasklist_section_for_title(workspace_root, effective_intention) in _TASKLIST_STALE_SECTIONS:
+            elif (
+                include_details
+                and _tasklist_section_for_title(workspace_root, effective_intention) in _TASKLIST_STALE_SECTIONS
+            ):
                 effective_intention = None
                 intention_source = "stale_tasklist_completed"
             elif (
@@ -448,8 +653,15 @@ def build_chat_router(runtime: Any) -> APIRouter:
         task_entries = []
         task_counts = {"active": 0, "waiting": 0, "completed": 0, "failed": 0, "total": 0}
         task_store = getattr(runtime.ctx, "tasks", None)
-        if task_store is not None:
-            tasks = await task_store.list_all(limit=max(task_limit, 50))
+        if include_details and task_store is not None:
+            try:
+                tasks = await asyncio.wait_for(
+                    task_store.list_all(limit=task_limit),
+                    timeout=0.15,
+                )
+            except Exception:
+                tasks = []
+                task_counts["degraded"] = 1
             task_counts["total"] = len(tasks)
             objective_counts: Dict[str, int] = {}
             for task in tasks:
@@ -461,7 +673,7 @@ def build_chat_router(runtime: Any) -> APIRouter:
                 )
                 if ui_status in {"queued", "planning", "executing", "verifying", "recovering"}:
                     task_counts["active"] += 1
-                elif ui_status in {"needs approval", "needs clarification"}:
+                elif ui_status in {"held", "needs approval", "needs clarification"}:
                     task_counts["waiting"] += 1
                 elif ui_status == "completed":
                     task_counts["completed"] += 1
@@ -488,10 +700,14 @@ def build_chat_router(runtime: Any) -> APIRouter:
             somatic=somatic,
             lane=lane,
             last_lane=last_lane,
+            context_budget=context_budget,
             executive={
                 "intention": effective_intention,
                 "intention_source": intention_source,
-                "active_goals": executive_payload.get("active_goals", []),
+                "active_goals": _merge_priority_goal(
+                    executive_payload.get("active_goals", []),
+                    priority_intention,
+                ),
                 "recommend_pause": executive_payload.get("recommend_pause", False),
                 "queued_work_count": executive_payload.get("queued_work_count", 0),
                 "capacity_remaining": executive_payload.get("capacity_remaining", 0),
@@ -516,6 +732,13 @@ def build_chat_router(runtime: Any) -> APIRouter:
             speak_response=req.speak_response,
             voice_prefer_local=req.voice_prefer_local,
             voice_expressive=req.voice_expressive,
+            actor_type=req.actor_type,
+            actor_label=req.actor_label,
+            actor_note=req.actor_note,
+            suppress_body_double_voice=req.suppress_body_double_voice,
+            body_double_voice_suppression_explicit=(
+                "suppress_body_double_voice" in getattr(req, "model_fields_set", set())
+            ),
         )
         return ChatSendResponse(
             session_id=result.session_id,
@@ -523,6 +746,93 @@ def build_chat_router(runtime: Any) -> APIRouter:
             somatic=result.somatic,
             voice_output=result.voice_output,
         )
+
+    @r.post("/region-prompt", response_model=ChatSendResponse)
+    async def send_region_prompt(
+        prompt: str = Form(...),
+        file: UploadFile = File(...),
+        session_id: Optional[str] = Form(None),
+        selection: Optional[str] = Form(None),
+        speak_response: bool = Form(False),
+        voice_prefer_local: bool = Form(True),
+        voice_expressive: bool = Form(False),
+    ) -> ChatSendResponse:
+        cleaned_prompt = str(prompt or "").strip()
+        if not cleaned_prompt:
+            raise HTTPException(status_code=400, detail="prompt is required")
+        upload_payload = store_uploaded_file(
+            upload_dir,
+            filename=file.filename or "selected-region.png",
+            content_type=file.content_type or "image/png",
+            fileobj=file.file,
+        )
+        selection_payload = _parse_region_selection(selection)
+        region_context: Dict[str, Any] = {
+            "status": "observed",
+            "reason": "region_prompt_attachment_only",
+            "source": "kde_region_prompt",
+            "prompt": cleaned_prompt,
+            "capture": {
+                "path": upload_payload["path"],
+                "url": upload_payload["url"],
+                "media_type": upload_payload["media_type"],
+                "size_bytes": upload_payload["size_bytes"],
+            },
+            "region_selection": selection_payload,
+            "conversation_prompt_note": "\n".join(
+                [
+                    "Selected desktop region context is active for this user turn.",
+                    "The selected region screenshot was captured and attached, but desktop-context vision analysis was unavailable.",
+                    f"- user question/instruction: {cleaned_prompt}",
+                    f"- screenshot evidence: {upload_payload['path']}",
+                    f"- selection geometry: {json.dumps(selection_payload, sort_keys=True)}",
+                    "Use the attached/evidence path cautiously and say if visual evidence is insufficient.",
+                ]
+            ),
+        }
+        desktop_context = getattr(runtime, "desktop_context", None)
+        analyze_region = getattr(desktop_context, "analyze_region_for_conversation", None)
+        if callable(analyze_region):
+            try:
+                analyzed_context = await analyze_region(
+                    image_path=upload_payload["path"],
+                    prompt=cleaned_prompt,
+                    session_id=session_id,
+                    selection=selection_payload,
+                    source="kde_region_prompt",
+                )
+                if isinstance(analyzed_context, dict) and analyzed_context.get("conversation_prompt_note"):
+                    region_context = analyzed_context
+                elif isinstance(analyzed_context, dict):
+                    region_context["analysis_status"] = analyzed_context
+            except Exception as exc:
+                region_context["analysis_status"] = {
+                    "status": "failed",
+                    "reason": f"{type(exc).__name__}: {exc}",
+                }
+        result = await perform_chat_turn(
+            runtime,
+            session_id=session_id,
+            message=cleaned_prompt,
+            attachments=[upload_payload],
+            speak_response=speak_response,
+            voice_prefer_local=voice_prefer_local,
+            voice_expressive=voice_expressive,
+            actor_type="operator",
+            actor_label="operator",
+            actor_note="KDE desktop region prompt selected a rectangular screenshot area for this turn.",
+            extra_user_meta={"desktop_context_turn": region_context},
+        )
+        return ChatSendResponse(
+            session_id=result.session_id,
+            response=result.response,
+            somatic=result.somatic,
+            voice_output=result.voice_output,
+        )
+
+    @r.get("/inflight", response_model=Dict[str, Any])
+    async def get_inflight(session_id: Optional[str] = None) -> Dict[str, Any]:
+        return chat_inflight_snapshot(runtime, session_id=session_id)
 
     @r.get("/voice/status", response_model=ChatVoiceStatusResponse)
     async def get_voice_status() -> ChatVoiceStatusResponse:
@@ -588,3 +898,32 @@ def build_chat_router(runtime: Any) -> APIRouter:
         return FileResponse(target)
 
     return r
+
+
+async def _active_priority_intention(runtime: Any) -> Optional[str]:
+    store = getattr(getattr(runtime, "ctx", None), "cognitive_state_store", None) or getattr(
+        runtime,
+        "cognitive_state_store",
+        None,
+    )
+    list_attention = getattr(store, "list_attention", None)
+    if not callable(list_attention):
+        return None
+    try:
+        items = await asyncio.wait_for(list_attention(limit=12), timeout=0.08)
+    except Exception:
+        return None
+    for item in items:
+        label = str(getattr(item, "label", "") or "").strip()
+        status = str(getattr(item, "status", "") or "")
+        strength = float(getattr(item, "strength", 0.0) or 0.0)
+        if status == "active" and strength >= 0.75 and "operator priority:" in label.lower():
+            return label
+    return None
+
+
+def _merge_priority_goal(active_goals: Any, priority_intention: Optional[str]) -> List[str]:
+    goals = list(active_goals or [])
+    if priority_intention and priority_intention not in goals:
+        goals.insert(0, priority_intention)
+    return goals

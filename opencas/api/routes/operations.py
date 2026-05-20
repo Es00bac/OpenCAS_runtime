@@ -81,6 +81,8 @@ def _human_title(text: Optional[str], fallback: str = "Untitled") -> str:
 def _task_ui_status(stage: str, status: str) -> str:
     stage_key = str(stage or "").strip().lower()
     status_key = str(status or "").strip().lower()
+    if status_key == "held":
+        return "held"
     if stage_key in {"done"} or status_key in {"completed", "success"}:
         return "completed"
     if stage_key in {"failed"} or status_key in {"failed", "error"}:

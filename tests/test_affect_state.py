@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from opencas.identity import IdentityManager, IdentityStore
 from opencas.somatic import SomaticManager
 from opencas.somatic.models import PrimaryEmotion, SocialTarget
 

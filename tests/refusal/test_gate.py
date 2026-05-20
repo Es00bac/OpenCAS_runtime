@@ -2,6 +2,7 @@
 
 import pytest
 
+from opencas.autonomy.authorization import AuthorizationStore
 from opencas.autonomy.self_approval import SelfApprovalLadder
 from opencas.identity import IdentityManager, IdentityStore
 from opencas.infra.hook_bus import PRE_CONVERSATION_RESPONSE, HookBus, HookResult
@@ -66,3 +67,28 @@ async def test_refusal_decision_carries_policy_evidence_not_visible_text(tmp_pat
     assert decision.refused is True
     assert decision.policy_evidence
     assert not hasattr(decision, "suggested_response")
+
+
+@pytest.mark.asyncio
+async def test_gmail_conversation_uses_standing_authorization(tmp_path):
+    store = IdentityStore(tmp_path / "identity")
+    identity = IdentityManager(store)
+    identity.load()
+    auth_store = AuthorizationStore(tmp_path / "authorizations.db")
+    auth_store.grant(
+        action_class="gmail_read",
+        scope="google_workspace:gmail",
+        session_id="session-1",
+        evidence_episode_id="episode-1",
+    )
+    approval = SelfApprovalLadder(identity=identity, authorization_store=auth_store)
+    gate = ConversationalRefusalGate(approval=approval)
+
+    request = ConversationalRequest(
+        text="Check my email for job search updates",
+        session_id="session-1",
+    )
+    decision = gate.evaluate(request)
+
+    assert decision.refused is False
+    assert "standing_authorization:gmail_read" in decision.reasoning

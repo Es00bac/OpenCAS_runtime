@@ -10,7 +10,6 @@ The criterion requires ALL of:
 3. shared_boundary.is_structurally_held() (both phases != UNSET)
 """
 
-import pytest
 
 from opencas.relational.models import (
     BoundaryPhase,

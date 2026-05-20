@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -61,17 +62,51 @@ class SelfKnowledgeRegistry:
         evidence_ids: Optional[List[str]] = None,
         meta: Optional[Dict[str, Any]] = None,
     ) -> KnowledgeEntry:
+        resolved_meta = dict(meta or {})
+        resolved_meta.setdefault("content_hash", self.value_hash(value))
         entry = KnowledgeEntry(
             domain=domain,
             key=key,
             value=value,
             confidence=confidence,
             evidence_ids=evidence_ids or [],
-            meta=meta or {},
+            meta=resolved_meta,
         )
         self._entries.append(entry)
         self._flush()
         return entry
+
+    def recent_value_hash_seen(
+        self,
+        domain: str,
+        key: str,
+        value: Any,
+        *,
+        limit: int = 3,
+        exclude_keys: Optional[List[str]] = None,
+    ) -> bool:
+        """Return true when *value* matches one of the latest entries."""
+        candidate_hash = self.value_hash(value, exclude_keys=exclude_keys)
+        recent = [
+            entry
+            for entry in reversed(self._entries)
+            if entry.domain == domain and entry.key == key
+        ][: max(1, int(limit))]
+        for entry in recent:
+            entry_hashes = {
+                entry.meta.get("comparison_hash"),
+                entry.meta.get("content_hash"),
+                self.value_hash(entry.value, exclude_keys=exclude_keys),
+            }
+            if candidate_hash in entry_hashes:
+                return True
+        return False
+
+    @staticmethod
+    def value_hash(value: Any, *, exclude_keys: Optional[List[str]] = None) -> str:
+        comparable = _without_keys(value, set(exclude_keys or []))
+        payload = json.dumps(comparable, ensure_ascii=True, sort_keys=True, default=str)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
     def get(self, domain: str, key: str) -> Optional[KnowledgeEntry]:
         for entry in reversed(self._entries):
@@ -95,3 +130,17 @@ class SelfKnowledgeRegistry:
         for (domain, key), value in latest.items():
             nested.setdefault(domain, {})[key] = value
         return nested
+
+
+def _without_keys(value: Any, excluded: set[str]) -> Any:
+    if not excluded:
+        return value
+    if isinstance(value, dict):
+        return {
+            key: _without_keys(item, excluded)
+            for key, item in value.items()
+            if key not in excluded
+        }
+    if isinstance(value, list):
+        return [_without_keys(item, excluded) for item in value]
+    return value

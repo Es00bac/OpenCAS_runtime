@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import aiosqlite
 import sqlite3
@@ -252,10 +252,15 @@ class TaskStore:
         row = await cursor.fetchone()
         if row is None or row["success"] is None:
             return None
+        stage = self._coerce_execution_stage(
+            row["result_stage"],
+            status="completed" if bool(row["success"]) else "failed",
+            success=bool(row["success"]),
+        )
         return RepairResult(
             task_id=task_id,
             success=bool(row["success"]),
-            stage=ExecutionStage(row["result_stage"]),
+            stage=stage,
             output=row["result_output"] or "",
             timestamp=datetime.fromisoformat(row["result_timestamp"]),
         )
@@ -281,6 +286,7 @@ class TaskStore:
             """
             SELECT * FROM tasks
             WHERE stage NOT IN ('done', 'failed')
+              AND status NOT IN ('completed', 'failed', 'cancelled')
             ORDER BY updated_at DESC
             LIMIT ? OFFSET ?
             """,
@@ -557,7 +563,7 @@ class TaskStore:
             created_at=datetime.fromisoformat(row["created_at"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
             objective=row["objective"],
-            stage=ExecutionStage(row["stage"]),
+            stage=TaskStore._coerce_execution_stage(row["stage"], status=row["status"]),
             status=row["status"],
             artifacts=artifacts,
             attempt=row["attempt"],
@@ -573,3 +579,23 @@ class TaskStore:
             project_id=row["project_id"],
             commitment_id=row["commitment_id"],
         )
+
+    @staticmethod
+    def _coerce_execution_stage(
+        value: Optional[str],
+        *,
+        status: Optional[str] = None,
+        success: Optional[bool] = None,
+    ) -> ExecutionStage:
+        """Return a valid stage for legacy or externally edited task rows."""
+
+        try:
+            return ExecutionStage(value)
+        except ValueError:
+            normalized = str(value or "").strip().lower()
+            normalized_status = str(status or "").strip().lower()
+            if normalized in {"cancelled", "canceled", "abandoned"} or normalized_status == "cancelled":
+                return ExecutionStage.FAILED
+            if success is True or normalized_status == "completed":
+                return ExecutionStage.DONE
+            return ExecutionStage.FAILED

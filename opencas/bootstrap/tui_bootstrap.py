@@ -137,7 +137,7 @@ def save_runtime_preferences(state: WizardState, state_dir: Path) -> Dict[str, P
         enabled=state.desktop_context_enabled,
         capture_interval_seconds=_parse_int(
             state.desktop_capture_interval_seconds,
-            default=300,
+            default=60,
             field_name="Desktop capture interval",
         ),
         min_speech_interval_seconds=_parse_int(

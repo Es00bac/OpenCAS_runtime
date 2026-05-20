@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from opencas.context import MessageRole
 
+from .audit_mode import is_audit_only_text, with_audit_only_meta
 from .lane_metadata import build_assistant_message_meta
 
 
@@ -49,13 +50,17 @@ def start_conversation_turn_marker(
     active_dir, _completed_dir = _marker_dirs(state_dir)
     marker_id = str(uuid4())
     started_at = _now_iso()
+    persisted_meta = with_audit_only_meta(
+        user_meta,
+        audit_only=is_audit_only_text(user_input, user_meta),
+    )
     payload: Dict[str, Any] = {
         "marker_id": marker_id,
         "session_id": session_id,
         "phase": "started",
         "user_input": user_input,
         "user_input_preview": user_input[:_PREVIEW_LIMIT],
-        "user_meta": dict(user_meta or {}),
+        "user_meta": persisted_meta,
         "started_at": started_at,
         "updated_at": started_at,
     }
@@ -127,6 +132,24 @@ async def recover_interrupted_conversation_turns(runtime: Any) -> int:
         session_id = str(marker.get("session_id") or getattr(config, "session_id", "default") or "default")
         preview = str(marker.get("user_input_preview") or marker.get("user_input") or "").strip()
         if not marker_id:
+            continue
+        marker_meta = marker.get("user_meta") if isinstance(marker.get("user_meta"), dict) else {}
+        if is_audit_only_text(preview, marker.get("user_input"), marker_meta):
+            complete_conversation_turn_marker(
+                state_dir,
+                marker_id,
+                outcome="audit_only_recovery_skipped",
+            )
+            trace = getattr(runtime, "_trace", None)
+            if callable(trace):
+                trace(
+                    "conversation_turn_recovery_skipped",
+                    {
+                        "session_id": session_id,
+                        "marker_id": marker_id,
+                        "reason": "audit_only_turn",
+                    },
+                )
             continue
         content = (
             "I was interrupted while working on your last request before I could send "

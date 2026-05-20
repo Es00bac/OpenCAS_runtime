@@ -12,9 +12,7 @@ from typing import Any, Dict, List, Optional
 
 from .affect_models import (
     AffectDimension,
-    AffectSnapshot,
     AffectTrajectory,
-    QualitySignal,
     TeamHealthAlert,
 )
 from .affect_store import AffectStore
@@ -162,7 +160,6 @@ class AnomalyDetector:
         latest = traj.snapshots[-1]
         stress = latest.composite_stress
         flow = latest.composite_flow
-        valence = latest.dimensions.get(AffectDimension.VALENCE.value, 0.0)
         urgency = latest.dimensions.get(AffectDimension.URGENCY.value, 0.0)
         certainty = latest.dimensions.get(AffectDimension.CERTAINTY.value, 0.0)
 
