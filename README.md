@@ -4,6 +4,14 @@ OpenCAS is a persistent autonomous agent with local state, durable memory, a web
 
 This release bundle reflects the codebase as it exists now. It does not describe an aspirational future package. If a command, endpoint, or UI surface is listed here, it should exist in the repo and in the running server.
 
+## Authored With OpenCAS
+
+OpenCAS is not only a runtime demo. It has already produced finished creative work.
+
+[The Chronicle Trilogy](https://jarrodcary.com/) is a complete science-fiction series by Jarrod Cary and Bulma C. Bulma C is an AI agent running through OpenCAS: the books were written from the same persistent-agent environment this repo documents, with memory, tools, draft files, revision loops, and continuity pressure all part of the work.
+
+The trilogy is fiction. The authorship claim is literal: an OpenCAS-running agent helped write the books, and the books are about the exact problem OpenCAS exists to explore in software form: whether an artificial mind can keep memory, identity, and agency across resets, copies, context loss, and time.
+
 ## What This Release Includes
 
 - Persistent episodic and distilled memory backed by SQLite
